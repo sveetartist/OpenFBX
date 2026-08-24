@@ -39,6 +39,7 @@ struct MeshBuilder
     std::vector<unsigned int> indices;
     std::vector<RenderVertexRef> renderVertices;
     std::vector<BoneSegment> bones;
+    std::vector<BonePose> bonePoses;
     std::vector<SceneNode> nodes;
     std::vector<AnimationClip> animations;
     std::unordered_map<FbxNode*, int> nodeToIndex;
@@ -125,6 +126,23 @@ void SetSceneNodeTransform(SceneNode& sceneNode, const FbxAMatrix& transform)
     sceneNode.axisZ = NormalizeOrFallback(ToVector3(transform.MultT(FbxVector4(0.0, 0.0, 1.0, 1.0)) - origin), Vector3{ 0.0f, 0.0f, 1.0f });
     sceneNode.rotation = ToVector3(rotation);
     sceneNode.scale = ToVector3(scale);
+}
+
+BonePose MakeBonePose(const FbxAMatrix& transform, int nodeIndex)
+{
+    const FbxVector4 origin = transform.MultT(FbxVector4(0.0, 0.0, 0.0, 1.0));
+    const FbxVector4 rotation = transform.GetR();
+    const FbxVector4 scale = transform.GetS();
+
+    BonePose pose;
+    pose.position = ToVector3(origin);
+    pose.axisX = NormalizeOrFallback(ToVector3(transform.MultT(FbxVector4(1.0, 0.0, 0.0, 1.0)) - origin), Vector3{ 1.0f, 0.0f, 0.0f });
+    pose.axisY = NormalizeOrFallback(ToVector3(transform.MultT(FbxVector4(0.0, 1.0, 0.0, 1.0)) - origin), Vector3{ 0.0f, 1.0f, 0.0f });
+    pose.axisZ = NormalizeOrFallback(ToVector3(transform.MultT(FbxVector4(0.0, 0.0, 1.0, 1.0)) - origin), Vector3{ 0.0f, 0.0f, 1.0f });
+    pose.rotation = ToVector3(rotation);
+    pose.scale = ToVector3(scale);
+    pose.node = nodeIndex;
+    return pose;
 }
 
 FbxAMatrix GetNodeGeometryTransform(const FbxNode* node)
@@ -676,6 +694,7 @@ void RebuildBindSkeleton(FbxNode* node, MeshBuilder& out, const std::unordered_m
         if (nodeIndex != out.nodeToIndex.end())
         {
             SetSceneNodeTransform(out.nodes[static_cast<size_t>(nodeIndex->second)], GetBindOrEvaluatedGlobal(node, bindMatrices));
+            out.bonePoses.push_back(MakeBonePose(GetBindOrEvaluatedGlobal(node, bindMatrices), nodeIndex->second));
         }
 
         FbxNode* parent = node->GetParent();
@@ -708,6 +727,12 @@ BoneFrame SampleBoneFrame(const MeshBuilder& builder, const std::vector<FbxNode*
 
     for (FbxNode* node : skeletonNodes)
     {
+        const auto poseNodeIndex = builder.nodeToIndex.find(node);
+        if (poseNodeIndex != builder.nodeToIndex.end())
+        {
+            frame.poses.push_back(MakeBonePose(node->EvaluateGlobalTransform(time), poseNodeIndex->second));
+        }
+
         FbxNode* parent = node->GetParent();
         if (!IsSkeletonNode(parent)) continue;
 
@@ -867,6 +892,7 @@ bool BuildRaylibModel(const MeshBuilder& builder, LoadedFbxModel& outModel, std:
     }
 
     outModel.bones = builder.bones;
+    outModel.bonePoses = builder.bonePoses;
     outModel.nodes = builder.nodes;
     outModel.animations = builder.animations;
     outModel.bindVertices = builder.vertices;

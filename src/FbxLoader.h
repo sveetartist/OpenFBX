@@ -13,10 +13,22 @@ struct BoneSegment
     int endNode = -1;
 };
 
+struct BonePose
+{
+    Vector3 position{};
+    Vector3 axisX{ 1.0f, 0.0f, 0.0f };
+    Vector3 axisY{ 0.0f, 1.0f, 0.0f };
+    Vector3 axisZ{ 0.0f, 0.0f, 1.0f };
+    Vector3 rotation{};
+    Vector3 scale{ 1.0f, 1.0f, 1.0f };
+    int node = -1;
+};
+
 struct BoneFrame
 {
     float time = 0.0f;
     std::vector<BoneSegment> bones;
+    std::vector<BonePose> poses;
 };
 
 struct MeshFrame
@@ -67,6 +79,7 @@ struct LoadedFbxModel
     std::vector<float> bindVertices;
     std::vector<float> bindNormals;
     std::vector<BoneSegment> bones;
+    std::vector<BonePose> bonePoses;
     std::vector<SceneNode> nodes;
     std::vector<AnimationClip> animations;
     bool hasMesh = false;

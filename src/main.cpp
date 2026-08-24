@@ -67,6 +67,10 @@ struct OrbitCamera
     float yaw = 45.0f * DEG2RAD;
     float pitch = 30.0f * DEG2RAD;
     float focusDistance = 6.0f;
+    float snapDragX = 0.0f;
+    float snapDragY = 0.0f;
+    bool snapping = false;
+    bool snappedView = false;
 };
 
 struct AnimationState
@@ -74,6 +78,7 @@ struct AnimationState
     int clipIndex = -1;
     float time = 0.0f;
     bool playing = false;
+    bool scrubbing = false;
 };
 
 enum class ViewMode
@@ -112,6 +117,7 @@ struct ModelTab
     std::vector<float> blendedVertices;
     std::vector<float> blendedNormals;
     std::vector<BoneSegment> visibleBones;
+    std::vector<BonePose> visibleBonePoses;
     int appliedClipIndex = -2;
     int appliedMeshFrameIndex = -1;
     int appliedNextMeshFrameIndex = -1;
@@ -138,6 +144,7 @@ struct VisibilityState
 {
     bool geometry = true;
     bool bones = true;
+    bool boneRotations = false;
     bool empties = true;
 };
 
@@ -154,6 +161,71 @@ struct LitShader
 float ClampFloat(float value, float minimum, float maximum)
 {
     return std::max(minimum, std::min(maximum, value));
+}
+
+float SnapAngle(float value, float step)
+{
+    return std::round(value / step) * step;
+}
+
+void SnapOrbitCamera(OrbitCamera& orbit)
+{
+    constexpr float yawStep = 90.0f * DEG2RAD;
+    constexpr float pitchStep = 90.0f * DEG2RAD;
+    orbit.yaw = SnapAngle(orbit.yaw, yawStep);
+    orbit.pitch = ClampFloat(SnapAngle(orbit.pitch, pitchStep), -89.0f * DEG2RAD, 89.0f * DEG2RAD);
+}
+
+void UpdateSnappedOrbitCamera(OrbitCamera& orbit, Vector2 mouseDelta)
+{
+    constexpr float snapDragPixels = 70.0f;
+    constexpr float snapStep = 90.0f * DEG2RAD;
+
+    if (!orbit.snapping)
+    {
+        SnapOrbitCamera(orbit);
+        orbit.snapDragX = 0.0f;
+        orbit.snapDragY = 0.0f;
+        orbit.snapping = true;
+        orbit.snappedView = true;
+    }
+
+    orbit.snapDragX += mouseDelta.x;
+    orbit.snapDragY += mouseDelta.y;
+
+    while (orbit.snapDragX >= snapDragPixels)
+    {
+        orbit.yaw -= snapStep;
+        orbit.snapDragX -= snapDragPixels;
+    }
+    while (orbit.snapDragX <= -snapDragPixels)
+    {
+        orbit.yaw += snapStep;
+        orbit.snapDragX += snapDragPixels;
+    }
+    while (orbit.snapDragY >= snapDragPixels)
+    {
+        orbit.pitch = ClampFloat(orbit.pitch + snapStep, -89.0f * DEG2RAD, 89.0f * DEG2RAD);
+        orbit.snapDragY -= snapDragPixels;
+    }
+    while (orbit.snapDragY <= -snapDragPixels)
+    {
+        orbit.pitch = ClampFloat(orbit.pitch - snapStep, -89.0f * DEG2RAD, 89.0f * DEG2RAD);
+        orbit.snapDragY += snapDragPixels;
+    }
+}
+
+void StopSnappedOrbitDrag(OrbitCamera& orbit)
+{
+    orbit.snapping = false;
+    orbit.snapDragX = 0.0f;
+    orbit.snapDragY = 0.0f;
+}
+
+void ExitSnappedOrbitView(OrbitCamera& orbit)
+{
+    StopSnappedOrbitDrag(orbit);
+    orbit.snappedView = false;
 }
 
 Vector3 NormalizeOrFallback(Vector3 value, Vector3 fallback)
@@ -184,8 +256,8 @@ void UpdateOrbitCameraTransform(OrbitCamera& orbit)
     orbit.camera.position = Vector3Add(orbit.target, offset);
     orbit.camera.target = orbit.target;
     orbit.camera.up = Vector3{ 0.0f, 1.0f, 0.0f };
-    orbit.camera.fovy = 45.0f;
-    orbit.camera.projection = CAMERA_PERSPECTIVE;
+    orbit.camera.fovy = orbit.snappedView ? std::max(0.1f, orbit.distance) : 45.0f;
+    orbit.camera.projection = orbit.snappedView ? CAMERA_ORTHOGRAPHIC : CAMERA_PERSPECTIVE;
 }
 
 OrbitCamera CreateDefaultCamera()
@@ -222,10 +294,12 @@ void UpdateBlenderNavigation(OrbitCamera& orbit)
 {
     const Vector2 mouseDelta = GetMouseDelta();
     const bool shiftDown = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+    const bool altDown = IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT);
     const bool middleDown = IsMouseButtonDown(MOUSE_BUTTON_MIDDLE);
 
     if (middleDown && shiftDown)
     {
+        StopSnappedOrbitDrag(orbit);
         const Vector3 forward = Vector3Normalize(Vector3Subtract(orbit.target, orbit.camera.position));
         const Vector3 right = Vector3Normalize(Vector3CrossProduct(forward, Vector3{ 0.0f, 1.0f, 0.0f }));
         const Vector3 up = Vector3Normalize(Vector3CrossProduct(right, forward));
@@ -236,9 +310,21 @@ void UpdateBlenderNavigation(OrbitCamera& orbit)
     }
     else if (middleDown)
     {
-        orbit.yaw -= mouseDelta.x * 0.008f;
-        orbit.pitch += mouseDelta.y * 0.008f;
-        orbit.pitch = ClampFloat(orbit.pitch, -89.0f * DEG2RAD, 89.0f * DEG2RAD);
+        if (altDown)
+        {
+            UpdateSnappedOrbitCamera(orbit, mouseDelta);
+        }
+        else
+        {
+            ExitSnappedOrbitView(orbit);
+            orbit.yaw -= mouseDelta.x * 0.008f;
+            orbit.pitch += mouseDelta.y * 0.008f;
+            orbit.pitch = ClampFloat(orbit.pitch, -89.0f * DEG2RAD, 89.0f * DEG2RAD);
+        }
+    }
+    else
+    {
+        StopSnappedOrbitDrag(orbit);
     }
 
     const float wheel = GetMouseWheelMove();
@@ -255,9 +341,11 @@ void UpdateMayaNavigation(OrbitCamera& orbit)
 {
     const Vector2 mouseDelta = GetMouseDelta();
     const bool altDown = IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT);
+    const bool shiftDown = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
 
     if (altDown && IsMouseButtonDown(MOUSE_BUTTON_MIDDLE))
     {
+        StopSnappedOrbitDrag(orbit);
         const Vector3 forward = Vector3Normalize(Vector3Subtract(orbit.target, orbit.camera.position));
         const Vector3 right = Vector3Normalize(Vector3CrossProduct(forward, Vector3{ 0.0f, 1.0f, 0.0f }));
         const Vector3 up = Vector3Normalize(Vector3CrossProduct(right, forward));
@@ -268,14 +356,27 @@ void UpdateMayaNavigation(OrbitCamera& orbit)
     }
     else if (altDown && IsMouseButtonDown(MOUSE_BUTTON_LEFT))
     {
-        orbit.yaw -= mouseDelta.x * 0.008f;
-        orbit.pitch += mouseDelta.y * 0.008f;
-        orbit.pitch = ClampFloat(orbit.pitch, -89.0f * DEG2RAD, 89.0f * DEG2RAD);
+        if (shiftDown)
+        {
+            UpdateSnappedOrbitCamera(orbit, mouseDelta);
+        }
+        else
+        {
+            ExitSnappedOrbitView(orbit);
+            orbit.yaw -= mouseDelta.x * 0.008f;
+            orbit.pitch += mouseDelta.y * 0.008f;
+            orbit.pitch = ClampFloat(orbit.pitch, -89.0f * DEG2RAD, 89.0f * DEG2RAD);
+        }
     }
     else if (altDown && IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
     {
+        StopSnappedOrbitDrag(orbit);
         orbit.distance *= std::pow(1.01f, mouseDelta.y);
         orbit.distance = std::max(0.001f, orbit.distance);
+    }
+    else
+    {
+        StopSnappedOrbitDrag(orbit);
     }
 
     const float wheel = GetMouseWheelMove();
@@ -326,7 +427,7 @@ void ApplyNeutralMaterial(LoadedFbxModel& loaded)
 {
     if (loaded.valid && loaded.model.materialCount > 0)
     {
-        loaded.model.materials[0].maps[MATERIAL_MAP_DIFFUSE].color = Color{ 200, 200, 200, 255 };
+        loaded.model.materials[0].maps[MATERIAL_MAP_DIFFUSE].color = Color{ 135, 135, 135, 255 };
     }
 }
 
@@ -426,6 +527,11 @@ void UpdateLitShader(const LitShader& lit, const OrbitCamera& orbit)
 const std::vector<BoneSegment>& GetVisibleBones(const ModelTab& tab)
 {
     return tab.visibleBones.empty() ? tab.loaded.bones : tab.visibleBones;
+}
+
+const std::vector<BonePose>& GetVisibleBonePoses(const ModelTab& tab)
+{
+    return tab.visibleBonePoses.empty() ? tab.loaded.bonePoses : tab.visibleBonePoses;
 }
 
 int GetAnimationFrameIndex(const LoadedFbxModel& loaded, const AnimationState& animation)
@@ -580,6 +686,7 @@ void ApplyAnimatedBoneFrame(ModelTab& tab)
         if (tab.appliedBoneClipIndex != -1)
         {
             tab.visibleBones = tab.loaded.bones;
+            tab.visibleBonePoses = tab.loaded.bonePoses;
             tab.appliedBoneClipIndex = -1;
             tab.appliedBoneFrameIndex = -1;
             tab.appliedNextBoneFrameIndex = -1;
@@ -605,13 +712,15 @@ void ApplyAnimatedBoneFrame(ModelTab& tab)
 
     const std::vector<BoneSegment>& firstBones = clip.frames[static_cast<size_t>(sample.first)].bones;
     const std::vector<BoneSegment>& secondBones = clip.frames[static_cast<size_t>(sample.second)].bones;
+    const std::vector<BonePose>& firstPoses = clip.frames[static_cast<size_t>(sample.first)].poses;
+    const std::vector<BonePose>& secondPoses = clip.frames[static_cast<size_t>(sample.second)].poses;
+    const float alpha = ClampFloat(sample.alpha, 0.0f, 1.0f);
     if (firstBones.size() != secondBones.size())
     {
         tab.visibleBones = firstBones;
     }
     else
     {
-        const float alpha = ClampFloat(sample.alpha, 0.0f, 1.0f);
         tab.visibleBones.resize(firstBones.size());
         for (size_t i = 0; i < firstBones.size(); ++i)
         {
@@ -626,40 +735,55 @@ void ApplyAnimatedBoneFrame(ModelTab& tab)
         }
     }
 
+    if (firstPoses.size() != secondPoses.size())
+    {
+        tab.visibleBonePoses = firstPoses;
+    }
+    else
+    {
+        tab.visibleBonePoses.resize(firstPoses.size());
+        for (size_t i = 0; i < firstPoses.size(); ++i)
+        {
+            const BonePose& first = firstPoses[i];
+            const BonePose& second = secondPoses[i];
+            BonePose pose;
+            pose.position = LerpVector3(first.position, second.position, alpha);
+            pose.axisX = NormalizeOrFallback(LerpVector3(first.axisX, second.axisX, alpha), first.axisX);
+            pose.axisY = NormalizeOrFallback(LerpVector3(first.axisY, second.axisY, alpha), first.axisY);
+            pose.axisZ = NormalizeOrFallback(LerpVector3(first.axisZ, second.axisZ, alpha), first.axisZ);
+            pose.rotation = LerpVector3(first.rotation, second.rotation, alpha);
+            pose.scale = LerpVector3(first.scale, second.scale, alpha);
+            pose.node = first.node;
+            tab.visibleBonePoses[i] = pose;
+        }
+    }
+
     tab.appliedBoneClipIndex = tab.animation.clipIndex;
     tab.appliedBoneFrameIndex = sample.first;
     tab.appliedNextBoneFrameIndex = sample.second;
     tab.appliedBoneFrameAlpha = sample.alpha;
 }
 
-void DrawJointBillboard(const Camera3D& camera, Vector3 position, float radius, Color color)
+void DrawJointCircle(Vector3 position, Vector3 axisA, Vector3 axisB, float radius, Color color)
 {
-    const Vector3 forward = Vector3Normalize(Vector3Subtract(camera.position, position));
-    Vector3 right = Vector3Normalize(Vector3CrossProduct(Vector3{ 0.0f, 1.0f, 0.0f }, forward));
-    if (Vector3Length(right) < 0.0001f)
-    {
-        right = Vector3{ 1.0f, 0.0f, 0.0f };
-    }
-    const Vector3 up = Vector3Normalize(Vector3CrossProduct(forward, right));
-
-    constexpr int kSegments = 18;
-    Vector3 previous = Vector3Add(position, Vector3Scale(right, radius));
+    constexpr int kSegments = 28;
+    Vector3 previous = Vector3Add(position, Vector3Scale(axisA, radius));
     for (int i = 1; i <= kSegments; ++i)
     {
         const float angle = static_cast<float>(i) / static_cast<float>(kSegments) * 2.0f * PI;
-        const Vector3 offset = Vector3Add(Vector3Scale(right, std::cos(angle) * radius),
-                                          Vector3Scale(up, std::sin(angle) * radius));
+        const Vector3 offset = Vector3Add(Vector3Scale(axisA, std::cos(angle) * radius),
+                                          Vector3Scale(axisB, std::sin(angle) * radius));
         const Vector3 current = Vector3Add(position, offset);
         DrawLine3D(previous, current, color);
         previous = current;
     }
+}
 
-    DrawLine3D(Vector3Subtract(position, Vector3Scale(right, radius * 0.65f)),
-               Vector3Add(position, Vector3Scale(right, radius * 0.65f)),
-               color);
-    DrawLine3D(Vector3Subtract(position, Vector3Scale(up, radius * 0.65f)),
-               Vector3Add(position, Vector3Scale(up, radius * 0.65f)),
-               color);
+void DrawJointSphere(Vector3 position, float radius, Color color)
+{
+    DrawJointCircle(position, Vector3{ 1.0f, 0.0f, 0.0f }, Vector3{ 0.0f, 1.0f, 0.0f }, radius, color);
+    DrawJointCircle(position, Vector3{ 1.0f, 0.0f, 0.0f }, Vector3{ 0.0f, 0.0f, 1.0f }, radius, color);
+    DrawJointCircle(position, Vector3{ 0.0f, 1.0f, 0.0f }, Vector3{ 0.0f, 0.0f, 1.0f }, radius, color);
 }
 
 void DrawMayaBone(Vector3 start, Vector3 end, float radius, Color color)
@@ -696,7 +820,7 @@ void DrawMayaBone(Vector3 start, Vector3 end, float radius, Color color)
     DrawLine3D(points[3], points[0], color);
 }
 
-void DrawBones(const std::vector<BoneSegment>& bones, const Camera3D& camera, int selectedNode)
+void DrawBones(const std::vector<BoneSegment>& bones, int selectedNode)
 {
     float radius = 0.035f;
     if (!bones.empty())
@@ -717,8 +841,20 @@ void DrawBones(const std::vector<BoneSegment>& bones, const Camera3D& camera, in
 
     for (const BoneSegment& bone : bones)
     {
-        DrawJointBillboard(camera, bone.start, radius, bone.startNode == selectedNode ? Color{ 255, 214, 80, 255 } : Color{ 142, 210, 255, 255 });
-        DrawJointBillboard(camera, bone.end, radius, bone.endNode == selectedNode ? Color{ 255, 214, 80, 255 } : Color{ 142, 210, 255, 255 });
+        DrawJointSphere(bone.start, bone.startNode == selectedNode ? radius * 1.15f : radius * 0.85f, bone.startNode == selectedNode ? Color{ 255, 214, 80, 255 } : Color{ 142, 210, 255, 255 });
+        DrawJointSphere(bone.end, bone.endNode == selectedNode ? radius * 1.15f : radius * 0.85f, bone.endNode == selectedNode ? Color{ 255, 214, 80, 255 } : Color{ 142, 210, 255, 255 });
+    }
+}
+
+void DrawBoneRotations(const std::vector<BonePose>& poses, float sceneDiagonal, int selectedNode)
+{
+    const float axisLength = ClampFloat(sceneDiagonal * 0.028f, 0.04f, 0.32f);
+    for (const BonePose& pose : poses)
+    {
+        const unsigned char alpha = pose.node == selectedNode ? 255 : 190;
+        DrawLine3D(pose.position, Vector3Add(pose.position, Vector3Scale(pose.axisX, axisLength)), Color{ 235, 74, 74, alpha });
+        DrawLine3D(pose.position, Vector3Add(pose.position, Vector3Scale(pose.axisY, axisLength)), Color{ 92, 210, 94, alpha });
+        DrawLine3D(pose.position, Vector3Add(pose.position, Vector3Scale(pose.axisZ, axisLength)), Color{ 86, 142, 255, alpha });
     }
 }
 
@@ -746,6 +882,24 @@ void DrawEmptyCross(const SceneNode& node, float length, Color color)
     DrawLine3D(Vector3Subtract(node.position, Vector3Scale(node.axisX, length)), Vector3Add(node.position, Vector3Scale(node.axisX, length)), color);
     DrawLine3D(Vector3Subtract(node.position, Vector3Scale(node.axisY, length)), Vector3Add(node.position, Vector3Scale(node.axisY, length)), color);
     DrawLine3D(Vector3Subtract(node.position, Vector3Scale(node.axisZ, length)), Vector3Add(node.position, Vector3Scale(node.axisZ, length)), color);
+}
+
+void DrawMeshOriginAxis(Vector3 origin, Vector3 axis, float length, Color color)
+{
+    DrawLine3D(origin, Vector3Add(origin, Vector3Scale(axis, length)), color);
+}
+
+void DrawMeshOrigin(const SceneNode& node, float sceneDiagonal)
+{
+    const float axisLength = ClampFloat(sceneDiagonal * 0.045f, 0.07f, 0.55f);
+    const float crossLength = axisLength * 0.32f;
+    const float sphereRadius = axisLength * 0.045f;
+
+    DrawEmptyCross(node, crossLength, Color{ 255, 214, 80, 255 });
+    DrawSphere(node.position, sphereRadius, Color{ 255, 214, 80, 255 });
+    DrawMeshOriginAxis(node.position, node.axisX, axisLength, Color{ 235, 74, 74, 255 });
+    DrawMeshOriginAxis(node.position, node.axisY, axisLength, Color{ 92, 210, 94, 255 });
+    DrawMeshOriginAxis(node.position, node.axisZ, axisLength, Color{ 86, 142, 255, 255 });
 }
 
 void DrawEmptyCrosses(const ModelTab& tab)
@@ -807,6 +961,18 @@ float DistancePointToScreenSegment(Vector2 point, Vector2 a, Vector2 b)
     return Vector2Distance(point, closest);
 }
 
+float ClosestAlphaOnScreenSegment(Vector2 point, Vector2 a, Vector2 b)
+{
+    const Vector2 ab = Vector2Subtract(b, a);
+    const float lengthSq = Vector2DotProduct(ab, ab);
+    if (lengthSq <= 0.0001f)
+    {
+        return 0.0f;
+    }
+
+    return ClampFloat(Vector2DotProduct(Vector2Subtract(point, a), ab) / lengthSq, 0.0f, 1.0f);
+}
+
 bool SelectNodeFromViewport(ModelTab& tab, Vector2 mouse, const VisibilityState& visibility)
 {
     if (!tab.loaded.valid || tab.loaded.nodes.empty()) return false;
@@ -830,16 +996,31 @@ bool SelectNodeFromViewport(ModelTab& tab, Vector2 mouse, const VisibilityState&
             const Vector2 startScreen = GetWorldToScreen(bone.start, tab.orbit.camera);
             const Vector2 endScreen = GetWorldToScreen(bone.end, tab.orbit.camera);
             const float screenDistance = DistancePointToScreenSegment(mouse, startScreen, endScreen);
-            if (screenDistance <= bonePickRadiusPixels)
+            const float startDistance = Vector2Distance(mouse, startScreen);
+            const float endDistance = Vector2Distance(mouse, endScreen);
+            const float jointDistance = std::min(startDistance, endDistance);
+            const float pickDistance = std::min(screenDistance, jointDistance);
+            if (pickDistance <= bonePickRadiusPixels)
             {
                 const float depth = std::max(0.0f, std::min(startDepth, endDepth));
-                const bool closerOnScreen = screenDistance < bestBoneScreenDistance - 1.0f;
-                const bool sameScreenDistanceButCloser = std::fabs(screenDistance - bestBoneScreenDistance) <= 1.0f && depth < bestBoneDepth;
+                const bool closerOnScreen = pickDistance < bestBoneScreenDistance - 1.0f;
+                const bool sameScreenDistanceButCloser = std::fabs(pickDistance - bestBoneScreenDistance) <= 1.0f && depth < bestBoneDepth;
                 if (closerOnScreen || sameScreenDistanceButCloser)
                 {
-                    bestBoneScreenDistance = screenDistance;
+                    const float segmentAlpha = ClosestAlphaOnScreenSegment(mouse, startScreen, endScreen);
+                    const bool nearEndJoint = endDistance <= bonePickRadiusPixels && endDistance <= startDistance;
+                    const bool nearStartJoint = startDistance <= bonePickRadiusPixels && startDistance < endDistance;
+
+                    bestBoneScreenDistance = pickDistance;
                     bestBoneDepth = depth;
-                    bestBoneNode = bone.startNode >= 0 ? bone.startNode : bone.endNode;
+                    if ((nearEndJoint || (!nearStartJoint && segmentAlpha >= 0.5f)) && bone.endNode >= 0)
+                    {
+                        bestBoneNode = bone.endNode;
+                    }
+                    else
+                    {
+                        bestBoneNode = bone.startNode >= 0 ? bone.startNode : bone.endNode;
+                    }
                 }
             }
         }
@@ -957,6 +1138,7 @@ void DrawSelectedNodeOverlay(const ModelTab& tab, const VisibilityState& visibil
     const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(tab.selectedNode)];
     if (node.type == SceneNodeType::Mesh && node.hasBounds)
     {
+        DrawMeshOrigin(node, GetBoundsDiagonal(tab.loaded.bounds));
         return;
     }
 
@@ -1164,11 +1346,28 @@ std::string MakeTabTitle(const std::string& path)
     return fileName && fileName[0] ? fileName : path;
 }
 
+const BonePose* FindCurrentBonePose(const ModelTab& tab, int nodeIndex)
+{
+    for (const BonePose& pose : GetVisibleBonePoses(tab))
+    {
+        if (pose.node == nodeIndex)
+        {
+            return &pose;
+        }
+    }
+
+    return nullptr;
+}
+
 void DrawSelectedInfoPanel(Font font, const ModelTab* active)
 {
     if (!active || active->selectedNode < 0 || active->selectedNode >= static_cast<int>(active->loaded.nodes.size())) return;
 
     const SceneNode& node = active->loaded.nodes[static_cast<size_t>(active->selectedNode)];
+    const BonePose* currentBonePose = node.type == SceneNodeType::Bone ? FindCurrentBonePose(*active, active->selectedNode) : nullptr;
+    const Vector3 position = currentBonePose ? currentBonePose->position : node.position;
+    const Vector3 rotation = currentBonePose ? currentBonePose->rotation : node.rotation;
+    const Vector3 scale = currentBonePose ? currentBonePose->scale : node.scale;
     constexpr float panelW = 330.0f;
     constexpr float panelH = 154.0f;
     const float panelX = static_cast<float>(GetScreenWidth()) - panelW - 12.0f;
@@ -1184,13 +1383,13 @@ void DrawSelectedInfoPanel(Font font, const ModelTab* active)
     std::snprintf(line, sizeof(line), "Type: %s", GetSceneNodeTypeName(node.type));
     DrawUiText(font, line, panelX + 12.0f, panelY + 36.0f, 14.0f, Color{ 205, 213, 220, 255 });
 
-    std::snprintf(line, sizeof(line), "Pos:  %.3f  %.3f  %.3f", node.position.x, node.position.y, node.position.z);
+    std::snprintf(line, sizeof(line), "Pos:  %.3f  %.3f  %.3f", position.x, position.y, position.z);
     DrawUiText(font, line, panelX + 12.0f, panelY + 58.0f, 14.0f, Color{ 205, 213, 220, 255 });
 
-    std::snprintf(line, sizeof(line), "Rot:  %.2f  %.2f  %.2f", node.rotation.x, node.rotation.y, node.rotation.z);
+    std::snprintf(line, sizeof(line), "Rot:  %.2f  %.2f  %.2f", rotation.x, rotation.y, rotation.z);
     DrawUiText(font, line, panelX + 12.0f, panelY + 80.0f, 14.0f, Color{ 205, 213, 220, 255 });
 
-    std::snprintf(line, sizeof(line), "Scale: %.3f  %.3f  %.3f", node.scale.x, node.scale.y, node.scale.z);
+    std::snprintf(line, sizeof(line), "Scale: %.3f  %.3f  %.3f", scale.x, scale.y, scale.z);
     DrawUiText(font, line, panelX + 12.0f, panelY + 102.0f, 14.0f, Color{ 205, 213, 220, 255 });
 
     std::snprintf(line, sizeof(line), "Polys: %d", node.meshTriangleCount);
@@ -1628,7 +1827,7 @@ void DrawMenuBar(Font font, OpenMenu& openMenu, bool& openRequested, ViewMode& v
     }
     else if (openMenu == OpenMenu::View)
     {
-        DrawRectangle(66, 29, 230, 218, Color{ 28, 31, 35, 245 });
+        DrawRectangle(66, 29, 230, 248, Color{ 28, 31, 35, 245 });
         if (DrawMenuItem(font, Rectangle{ 66.0f, 29.0f, 230.0f, 30.0f }, "Shaded", viewMode == ViewMode::Shaded))
         {
             viewMode = ViewMode::Shaded;
@@ -1649,7 +1848,11 @@ void DrawMenuBar(Font font, OpenMenu& openMenu, bool& openRequested, ViewMode& v
         {
             visibility.bones = !visibility.bones;
         }
-        if (DrawMenuItem(font, Rectangle{ 66.0f, 187.0f, 230.0f, 30.0f }, visibility.empties ? "[x] Empties" : "[ ] Empties"))
+        if (DrawMenuItem(font, Rectangle{ 66.0f, 187.0f, 230.0f, 30.0f }, visibility.boneRotations ? "[x] Bone Rotations" : "[ ] Bone Rotations"))
+        {
+            visibility.boneRotations = !visibility.boneRotations;
+        }
+        if (DrawMenuItem(font, Rectangle{ 66.0f, 217.0f, 230.0f, 30.0f }, visibility.empties ? "[x] Empties" : "[ ] Empties"))
         {
             visibility.empties = !visibility.empties;
         }
@@ -1669,8 +1872,8 @@ void DrawMenuBar(Font font, OpenMenu& openMenu, bool& openRequested, ViewMode& v
 
         DrawUiText(font, "HOTKEYS", 140.0f, 110.0f, 16.0f, Color{ 165, 182, 196, 255 });
         DrawUiText(font, "O open FBX    V view mode    F focus    Space play/pause", 140.0f, 136.0f, 15.0f, Color{ 205, 213, 220, 255 });
-        DrawUiText(font, "Blender: MMB orbit, Shift+MMB pan, Wheel zoom", 140.0f, 162.0f, 15.0f, Color{ 205, 213, 220, 255 });
-        DrawUiText(font, "Maya: Alt+LMB orbit, Alt+MMB pan, Alt+RMB/Wheel zoom", 140.0f, 188.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        DrawUiText(font, "Blender: MMB orbit, Alt snap, Shift+MMB pan, Wheel zoom", 140.0f, 162.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        DrawUiText(font, "Maya: Alt+LMB orbit, Shift snap, Alt+MMB pan, Alt+RMB/Wheel zoom", 140.0f, 188.0f, 15.0f, Color{ 205, 213, 220, 255 });
         DrawUiText(font, "Tabs: X closes, middle-click tab closes", 140.0f, 214.0f, 15.0f, Color{ 205, 213, 220, 255 });
     }
 }
@@ -1795,12 +1998,13 @@ void DrawTimeline(Font font, LoadedFbxModel& loaded, AnimationState& animation)
     {
         DrawRectangleRec(noAnimationRow, Color{ 36, 42, 48, 255 });
     }
-    DrawUiText(font, "No animation", noAnimationRow.x + 8.0f, noAnimationRow.y + 3.0f, 15.0f, noAnimationSelected ? RAYWHITE : Color{ 185, 194, 202, 255 });
+    DrawUiText(font, "Bind pose", noAnimationRow.x + 8.0f, noAnimationRow.y + 3.0f, 15.0f, noAnimationSelected ? RAYWHITE : Color{ 185, 194, 202, 255 });
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, noAnimationRow))
     {
         animation.clipIndex = -1;
         animation.time = 0.0f;
         animation.playing = false;
+        animation.scrubbing = false;
     }
 
     const int visibleRows = 3;
@@ -1824,6 +2028,7 @@ void DrawTimeline(Font font, LoadedFbxModel& loaded, AnimationState& animation)
             animation.clipIndex = i;
             animation.time = 0.0f;
             animation.playing = true;
+            animation.scrubbing = false;
         }
 
         char rowText[256] = {};
@@ -1841,13 +2046,22 @@ void DrawTimeline(Font font, LoadedFbxModel& loaded, AnimationState& animation)
     const float timelineY = panelY + 48.0f;
     const float timelineW = static_cast<float>(width) - timelineX - 24.0f;
     const Rectangle scrub{ timelineX, timelineY, timelineW, 14.0f };
+    const Rectangle scrubHitbox{ scrub.x, scrub.y - 12.0f, scrub.width, scrub.height + 24.0f };
 
     DrawUiText(font, animation.playing ? "PLAYING  [SPACE]" : "PAUSED   [SPACE]", timelineX, panelY + 14.0f, 16.0f, Color{ 165, 182, 196, 255 });
     DrawRectangleRec(scrub, Color{ 58, 64, 70, 255 });
 
     if (clip && clip->duration > 0.0f)
     {
-        if (IsMouseButtonDown(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, scrub))
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, scrubHitbox))
+        {
+            animation.scrubbing = true;
+        }
+        if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT))
+        {
+            animation.scrubbing = false;
+        }
+        if (animation.scrubbing)
         {
             const float alpha = ClampFloat((mouse.x - scrub.x) / scrub.width, 0.0f, 1.0f);
             animation.time = alpha * clip->duration;
@@ -1859,12 +2073,15 @@ void DrawTimeline(Font font, LoadedFbxModel& loaded, AnimationState& animation)
         DrawRectangle(static_cast<int>(scrub.x + scrub.width * progress - 2.0f), static_cast<int>(scrub.y - 5.0f), 4, 24, Color{ 220, 232, 242, 255 });
 
         char timeText[128] = {};
-        std::snprintf(timeText, sizeof(timeText), "%.2fs / %.2fs    frames: %zu", animation.time, clip->duration, clip->frames.size());
+        const int totalFrames = static_cast<int>(std::max(clip->frames.size(), clip->meshFrames.size()));
+        const int currentFrame = totalFrames > 0 ? static_cast<int>(ClampFloat(std::round(progress * static_cast<float>(totalFrames - 1)), 0.0f, static_cast<float>(totalFrames - 1))) + 1 : 0;
+        std::snprintf(timeText, sizeof(timeText), "%.2fs / %.2fs    frame: %d / %d", animation.time, clip->duration, currentFrame, totalFrames);
         DrawUiText(font, timeText, timelineX, timelineY + 28.0f, 16.0f, Color{ 190, 200, 210, 255 });
     }
     else
     {
-        DrawUiText(font, "No active clip", timelineX, timelineY + 28.0f, 16.0f, Color{ 128, 136, 144, 255 });
+        animation.scrubbing = false;
+        DrawUiText(font, "Bind pose", timelineX, timelineY + 28.0f, 16.0f, Color{ 128, 136, 144, 255 });
     }
 }
 }
@@ -1909,6 +2126,7 @@ int main(int argc, char** argv)
         tab->animation.time = 0.0f;
         tab->animation.playing = false;
         tab->visibleBones = tab->loaded.bones;
+        tab->visibleBonePoses = tab->loaded.bonePoses;
         tab->collapsedNodes.assign(tab->loaded.nodes.size(), false);
         tab->selectedNode = tab->loaded.nodes.empty() ? -1 : 0;
         tab->path = path;
@@ -2038,7 +2256,11 @@ int main(int argc, char** argv)
             }
             if (visibility.bones)
             {
-                DrawBones(GetVisibleBones(*active), active->orbit.camera, active->selectedNode);
+                DrawBones(GetVisibleBones(*active), active->selectedNode);
+                if (visibility.boneRotations)
+                {
+                    DrawBoneRotations(GetVisibleBonePoses(*active), GetBoundsDiagonal(active->loaded.bounds), active->selectedNode);
+                }
             }
             DrawSelectedNodeOverlay(*active, visibility);
             rlDrawRenderBatchActive();
