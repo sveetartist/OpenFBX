@@ -512,6 +512,86 @@ void CollectSkeletonNodes(FbxNode* node, std::vector<FbxNode*>& skeletonNodes)
     }
 }
 
+void CollectSkinBindMatrices(FbxNode* node, std::unordered_map<FbxNode*, FbxAMatrix>& bindMatrices)
+{
+    if (!node) return;
+
+    for (int attributeIndex = 0; attributeIndex < node->GetNodeAttributeCount(); ++attributeIndex)
+    {
+        FbxNodeAttribute* attribute = node->GetNodeAttributeByIndex(attributeIndex);
+        if (!attribute || attribute->GetAttributeType() != FbxNodeAttribute::eMesh) continue;
+
+        FbxMesh* mesh = static_cast<FbxMesh*>(attribute);
+        for (int skinIndex = 0; skinIndex < mesh->GetDeformerCount(FbxDeformer::eSkin); ++skinIndex)
+        {
+            FbxSkin* skin = static_cast<FbxSkin*>(mesh->GetDeformer(skinIndex, FbxDeformer::eSkin));
+            if (!skin) continue;
+
+            for (int clusterIndex = 0; clusterIndex < skin->GetClusterCount(); ++clusterIndex)
+            {
+                FbxCluster* cluster = skin->GetCluster(clusterIndex);
+                FbxNode* link = cluster ? cluster->GetLink() : nullptr;
+                if (!link) continue;
+
+                FbxAMatrix linkBindMatrix;
+                cluster->GetTransformLinkMatrix(linkBindMatrix);
+                bindMatrices[link] = linkBindMatrix;
+            }
+        }
+    }
+
+    for (int childIndex = 0; childIndex < node->GetChildCount(); ++childIndex)
+    {
+        CollectSkinBindMatrices(node->GetChild(childIndex), bindMatrices);
+    }
+}
+
+FbxAMatrix GetBindOrEvaluatedGlobal(FbxNode* node, const std::unordered_map<FbxNode*, FbxAMatrix>& bindMatrices)
+{
+    const auto found = bindMatrices.find(node);
+    if (found != bindMatrices.end())
+    {
+        return found->second;
+    }
+
+    return node->EvaluateGlobalTransform();
+}
+
+void RebuildBindSkeleton(FbxNode* node, MeshBuilder& out, const std::unordered_map<FbxNode*, FbxAMatrix>& bindMatrices)
+{
+    if (!node) return;
+
+    if (IsSkeletonNode(node))
+    {
+        const auto nodeIndex = out.nodeToIndex.find(node);
+        if (nodeIndex != out.nodeToIndex.end())
+        {
+            out.nodes[static_cast<size_t>(nodeIndex->second)].position = ToVector3(GetBindOrEvaluatedGlobal(node, bindMatrices).GetT());
+        }
+
+        FbxNode* parent = node->GetParent();
+        if (IsSkeletonNode(parent))
+        {
+            const Vector3 parentPosition = ToVector3(GetBindOrEvaluatedGlobal(parent, bindMatrices).GetT());
+            const Vector3 nodePosition = ToVector3(GetBindOrEvaluatedGlobal(node, bindMatrices).GetT());
+            const auto parentIndex = out.nodeToIndex.find(parent);
+            const int parentSceneIndex = parentIndex != out.nodeToIndex.end() ? parentIndex->second : -1;
+            const int nodeSceneIndex = nodeIndex != out.nodeToIndex.end() ? nodeIndex->second : -1;
+
+            out.bones.push_back(BoneSegment{ parentPosition, nodePosition, parentSceneIndex, nodeSceneIndex });
+            out.AddBounds(parentPosition);
+            out.AddBounds(nodePosition);
+            ExpandSceneNodeBounds(out, parent, parentPosition);
+            ExpandSceneNodeBounds(out, node, nodePosition);
+        }
+    }
+
+    for (int childIndex = 0; childIndex < node->GetChildCount(); ++childIndex)
+    {
+        RebuildBindSkeleton(node->GetChild(childIndex), out, bindMatrices);
+    }
+}
+
 BoneFrame SampleBoneFrame(const MeshBuilder& builder, const std::vector<FbxNode*>& skeletonNodes, const FbxTime& time, double clipStart)
 {
     BoneFrame frame;
@@ -625,8 +705,6 @@ void TraverseNode(FbxNode* node, int parentIndex, int depth, MeshBuilder& out)
             AppendMesh(node, static_cast<FbxMesh*>(attribute), out);
         }
     }
-
-    AppendBone(node, out);
 
     for (int i = 0; i < node->GetChildCount(); ++i)
     {
@@ -764,6 +842,11 @@ bool LoadFbxModel(const std::string& path, LoadedFbxModel& outModel, std::string
 
     MeshBuilder builder;
     TraverseNode(scene->GetRootNode(), -1, 0, builder);
+
+    std::unordered_map<FbxNode*, FbxAMatrix> bindMatrices;
+    CollectSkinBindMatrices(scene->GetRootNode(), bindMatrices);
+    RebuildBindSkeleton(scene->GetRootNode(), builder, bindMatrices);
+
     SampleAnimations(scene, builder);
 
     return BuildRaylibModel(builder, outModel, error);

@@ -1,22 +1,35 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(openfbx LANGUAGES CXX)
+project(openfbx LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-add_executable(openfbx
+set(OPENFBX_SOURCES
     src/main.cpp
     src/FbxLoader.cpp
     src/FbxLoader.h
 )
 
 if(WIN32)
+    list(APPEND OPENFBX_SOURCES src/openfbx.rc)
+endif()
+
+add_executable(openfbx ${OPENFBX_SOURCES})
+
+if(WIN32)
     set_target_properties(openfbx PROPERTIES WIN32_EXECUTABLE TRUE)
     if(MSVC)
         target_link_options(openfbx PRIVATE /ENTRY:mainCRTStartup)
     endif()
+
+    add_custom_command(TARGET openfbx POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${CMAKE_CURRENT_SOURCE_DIR}/open_fbx_icon.png"
+                "$<TARGET_FILE_DIR:openfbx>/open_fbx_icon.png"
+        COMMENT "Copying openfbx window icon"
+    )
 endif()
 
 set(FBXSDK_ROOT "" CACHE PATH "Autodesk FBX SDK install root, for example C:/Program Files/Autodesk/FBX/FBX SDK/2020.3.7")

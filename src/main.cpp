@@ -676,6 +676,44 @@ void DrawUiText(Font font, const char* text, float x, float y, float size, Color
     DrawTextEx(font, text, Vector2{ x, y }, size, 1.0f, color);
 }
 
+void DrawUiTextClipped(Font font, const char* text, float x, float y, float size, float maxWidth, Color color)
+{
+    if (!text || maxWidth <= 0.0f) return;
+
+    if (MeasureTextEx(font, text, size, 1.0f).x <= maxWidth)
+    {
+        DrawUiText(font, text, x, y, size, color);
+        return;
+    }
+
+    std::string clipped = text;
+    const char* ellipsis = "...";
+    while (!clipped.empty())
+    {
+        clipped.pop_back();
+        const std::string candidate = clipped + ellipsis;
+        if (MeasureTextEx(font, candidate.c_str(), size, 1.0f).x <= maxWidth)
+        {
+            DrawUiText(font, candidate.c_str(), x, y, size, color);
+            return;
+        }
+    }
+}
+
+void ApplyWindowIcon()
+{
+    const std::string iconPath = std::string(GetApplicationDirectory()) + "open_fbx_icon.png";
+    const char* path = FileExists(iconPath.c_str()) ? iconPath.c_str() : "open_fbx_icon.png";
+    if (!FileExists(path)) return;
+
+    Image icon = LoadImage(path);
+    if (icon.data)
+    {
+        SetWindowIcon(icon);
+        UnloadImage(icon);
+    }
+}
+
 void DrawLoadingScreen(Font font, const std::string& path)
 {
     BeginDrawing();
@@ -832,7 +870,11 @@ void DrawHierarchyPanel(Font font, ModelTab* active)
 
         char label[320] = {};
         std::snprintf(label, sizeof(label), "%s %s", GetSceneNodeIcon(node.type), node.name.c_str());
-        DrawUiText(font, label, panelX + 28.0f + indent, rowY + 3.0f, 15.0f, selected ? RAYWHITE : Color{ 198, 207, 216, 255 });
+        const float labelX = panelX + 28.0f + indent;
+        const float labelMaxW = panelX + panelW - 12.0f - labelX;
+        BeginScissorMode(static_cast<int>(panelX), static_cast<int>(panelY), static_cast<int>(panelW), static_cast<int>(panelH));
+        DrawUiTextClipped(font, label, labelX, rowY + 3.0f, 15.0f, labelMaxW, selected ? RAYWHITE : Color{ 198, 207, 216, 255 });
+        EndScissorMode();
 
         if (hovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !CheckCollisionPointRec(mouse, collapseRect))
         {
@@ -1133,6 +1175,7 @@ int main(int argc, char** argv)
 {
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
     InitWindow(1280, 800, "openfbx");
+    ApplyWindowIcon();
     SetTargetFPS(60);
 
     Font uiFont = LoadTechnicalFont();
