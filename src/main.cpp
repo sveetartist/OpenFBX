@@ -97,6 +97,12 @@ enum class OpenMenu
     Preferences
 };
 
+enum class LeftPanelTab
+{
+    Hierarchy,
+    Stats
+};
+
 struct ModelTab
 {
     LoadedFbxModel loaded;
@@ -116,6 +122,7 @@ struct HierarchyPanelState
     float scroll = 0.0f;
     bool hidden = false;
     bool resizing = false;
+    LeftPanelTab activeTab = LeftPanelTab::Hierarchy;
 };
 
 struct VisibilityState
@@ -562,13 +569,13 @@ void DrawBones(const std::vector<BoneSegment>& bones, const Camera3D& camera, in
 
     for (const BoneSegment& bone : bones)
     {
-        const bool selected = bone.endNode == selectedNode;
+        const bool selected = bone.startNode == selectedNode;
         DrawMayaBone(bone.start, bone.end, radius, selected ? Color{ 255, 214, 80, 255 } : Color{ 100, 185, 255, 255 });
     }
 
     for (const BoneSegment& bone : bones)
     {
-        DrawJointBillboard(camera, bone.start, radius, Color{ 142, 210, 255, 255 });
+        DrawJointBillboard(camera, bone.start, radius, bone.startNode == selectedNode ? Color{ 255, 214, 80, 255 } : Color{ 142, 210, 255, 255 });
         DrawJointBillboard(camera, bone.end, radius, bone.endNode == selectedNode ? Color{ 255, 214, 80, 255 } : Color{ 142, 210, 255, 255 });
     }
 }
@@ -690,7 +697,7 @@ bool SelectNodeFromViewport(ModelTab& tab, Vector2 mouse, const VisibilityState&
                 {
                     bestBoneScreenDistance = screenDistance;
                     bestBoneDepth = depth;
-                    bestBoneNode = bone.endNode >= 0 ? bone.endNode : bone.startNode;
+                    bestBoneNode = bone.startNode >= 0 ? bone.startNode : bone.endNode;
                 }
             }
         }
@@ -790,17 +797,24 @@ bool FocusCameraOnSelection(ModelTab& tab)
     return true;
 }
 
+void DrawSelectedMeshOverlay(const ModelTab& tab, const VisibilityState& visibility)
+{
+    if (!visibility.geometry || tab.selectedNode < 0 || tab.selectedNode >= static_cast<int>(tab.loaded.nodes.size())) return;
+
+    const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(tab.selectedNode)];
+    if (node.type == SceneNodeType::Mesh && node.hasBounds)
+    {
+        DrawMeshNodeWireframe(tab, node, Color{ 255, 214, 80, 255 });
+    }
+}
+
 void DrawSelectedNodeOverlay(const ModelTab& tab, const VisibilityState& visibility)
 {
     if (tab.selectedNode < 0 || tab.selectedNode >= static_cast<int>(tab.loaded.nodes.size())) return;
 
     const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(tab.selectedNode)];
-    const float selectedAxisLength = ClampFloat(GetBoundsDiagonal(tab.loaded.bounds) * 0.12f, 0.16f, tab.orbit.distance * 0.35f);
     if (node.type == SceneNodeType::Mesh && node.hasBounds)
     {
-        if (!visibility.geometry) return;
-        DrawMeshNodeWireframe(tab, node, Color{ 100, 185, 255, 255 });
-        DrawNodeAxes(node, selectedAxisLength, 255);
         return;
     }
 
@@ -1070,6 +1084,11 @@ float GetHierarchyPanelHeight()
     return static_cast<float>(GetScreenHeight()) - 61.0f - 124.0f;
 }
 
+float GetHierarchyContentStartY()
+{
+    return 61.0f + 64.0f;
+}
+
 int CountVisibleSceneNodes(const LoadedFbxModel& loaded, const std::vector<bool>& collapsed)
 {
     int count = 0;
@@ -1111,7 +1130,7 @@ void RevealNodeInHierarchy(ModelTab& tab, HierarchyPanelState& panel, int nodeIn
 
     constexpr float rowH = 22.0f;
     const float panelH = GetHierarchyPanelHeight();
-    const float visibleRows = std::max(1.0f, std::floor((panelH - 34.0f) / rowH));
+    const float visibleRows = std::max(1.0f, std::floor((panelH - 64.0f) / rowH));
     const float maxScroll = std::max(0.0f, static_cast<float>(CountVisibleSceneNodes(tab.loaded, tab.collapsedNodes)) - visibleRows);
 
     if (static_cast<float>(row) < panel.scroll)
@@ -1131,7 +1150,6 @@ void UpdateHierarchyPanelInteraction(HierarchyPanelState& panel, const ModelTab*
     constexpr float panelX = 0.0f;
     constexpr float panelY = 61.0f;
     constexpr float collapsedW = 28.0f;
-    constexpr float headerH = 32.0f;
     constexpr float rowH = 22.0f;
     const float panelH = GetHierarchyPanelHeight();
     const Vector2 mouse = GetMousePosition();
@@ -1148,7 +1166,7 @@ void UpdateHierarchyPanelInteraction(HierarchyPanelState& panel, const ModelTab*
 
     panel.width = ClampFloat(panel.width, 220.0f, std::min(620.0f, static_cast<float>(GetScreenWidth()) - 160.0f));
 
-    const Rectangle titleRect{ panelX, panelY, panel.width, headerH };
+    const Rectangle titleRect{ panelX, panelY, panel.width, 30.0f };
     const Rectangle resizeRect{ panel.width - 5.0f, panelY, 10.0f, panelH };
 
     if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, resizeRect))
@@ -1175,7 +1193,7 @@ void UpdateHierarchyPanelInteraction(HierarchyPanelState& panel, const ModelTab*
         const float wheel = GetMouseWheelMove();
         if (std::fabs(wheel) > 0.0f)
         {
-            const float visibleRows = std::max(0.0f, std::floor((panelH - 34.0f) / rowH));
+            const float visibleRows = std::max(0.0f, std::floor((panelH - 64.0f) / rowH));
             const float maxScroll = std::max(0.0f, static_cast<float>(CountVisibleSceneNodes(active->loaded, active->collapsedNodes)) - visibleRows);
             panel.scroll = ClampFloat(panel.scroll - wheel * 3.0f, 0.0f, maxScroll);
         }
@@ -1185,6 +1203,111 @@ void UpdateHierarchyPanelInteraction(HierarchyPanelState& panel, const ModelTab*
 float GetHierarchyPanelBlockWidth(const HierarchyPanelState& panel)
 {
     return panel.hidden ? 28.0f : panel.width;
+}
+
+struct SceneStats
+{
+    int nodes = 0;
+    int meshes = 0;
+    int bones = 0;
+    int empties = 0;
+    int vertices = 0;
+    int triangles = 0;
+    int materials = 0;
+};
+
+SceneStats CalculateSceneStats(const LoadedFbxModel& loaded)
+{
+    SceneStats stats;
+    std::vector<std::string> materialNames;
+    stats.nodes = static_cast<int>(loaded.nodes.size());
+
+    for (const SceneNode& node : loaded.nodes)
+    {
+        switch (node.type)
+        {
+        case SceneNodeType::Mesh:
+            ++stats.meshes;
+            stats.vertices += node.meshVertexCount;
+            stats.triangles += node.meshTriangleCount;
+            if (!node.materialName.empty() && node.materialName != "None" &&
+                std::find(materialNames.begin(), materialNames.end(), node.materialName) == materialNames.end())
+            {
+                materialNames.push_back(node.materialName);
+            }
+            break;
+        case SceneNodeType::Bone:
+            ++stats.bones;
+            break;
+        case SceneNodeType::Empty:
+            ++stats.empties;
+            break;
+        }
+    }
+
+    stats.materials = static_cast<int>(materialNames.size());
+    return stats;
+}
+
+bool DrawPanelTab(Font font, Rectangle bounds, const char* label, bool selected)
+{
+    const Vector2 mouse = GetMousePosition();
+    const bool hovered = CheckCollisionPointRec(mouse, bounds);
+    DrawRectangleRec(bounds, selected ? Color{ 48, 70, 92, 255 } : hovered ? Color{ 34, 39, 45, 255 } : Color{ 24, 27, 31, 245 });
+    DrawUiText(font, label, bounds.x + 10.0f, bounds.y + 5.0f, 15.0f, selected ? RAYWHITE : Color{ 180, 190, 200, 255 });
+    return hovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+}
+
+void DrawSceneStatsPanel(Font font, const ModelTab& tab, float panelX, float panelY, float panelW)
+{
+    const SceneStats stats = CalculateSceneStats(tab.loaded);
+    const BoundingBox& bounds = tab.loaded.bounds;
+    const Vector3 size = Vector3Subtract(bounds.max, bounds.min);
+    const float contentX = panelX + 12.0f;
+    float y = panelY;
+    char line[256] = {};
+
+    DrawUiText(font, "SCENE STATS", contentX, y, 16.0f, Color{ 165, 182, 196, 255 });
+    y += 30.0f;
+
+    std::snprintf(line, sizeof(line), "Nodes: %d", stats.nodes);
+    DrawUiText(font, line, contentX, y, 15.0f, Color{ 205, 213, 220, 255 });
+    y += 24.0f;
+    std::snprintf(line, sizeof(line), "Models: %d", stats.meshes);
+    DrawUiText(font, line, contentX, y, 15.0f, Color{ 205, 213, 220, 255 });
+    y += 24.0f;
+    std::snprintf(line, sizeof(line), "Bones: %d", stats.bones);
+    DrawUiText(font, line, contentX, y, 15.0f, Color{ 205, 213, 220, 255 });
+    y += 24.0f;
+    std::snprintf(line, sizeof(line), "Empties: %d", stats.empties);
+    DrawUiText(font, line, contentX, y, 15.0f, Color{ 205, 213, 220, 255 });
+    y += 34.0f;
+
+    DrawUiText(font, "GEOMETRY", contentX, y, 16.0f, Color{ 165, 182, 196, 255 });
+    y += 30.0f;
+    std::snprintf(line, sizeof(line), "Vertices: %d", stats.vertices);
+    DrawUiText(font, line, contentX, y, 15.0f, Color{ 205, 213, 220, 255 });
+    y += 24.0f;
+    std::snprintf(line, sizeof(line), "Triangles: %d", stats.triangles);
+    DrawUiText(font, line, contentX, y, 15.0f, Color{ 205, 213, 220, 255 });
+    y += 24.0f;
+    std::snprintf(line, sizeof(line), "Materials: %d", stats.materials);
+    DrawUiText(font, line, contentX, y, 15.0f, Color{ 205, 213, 220, 255 });
+    y += 24.0f;
+    std::snprintf(line, sizeof(line), "Animations: %zu", tab.loaded.animations.size());
+    DrawUiText(font, line, contentX, y, 15.0f, Color{ 205, 213, 220, 255 });
+    y += 34.0f;
+
+    DrawUiText(font, "SIZE IN METERS", contentX, y, 16.0f, Color{ 165, 182, 196, 255 });
+    y += 30.0f;
+    std::snprintf(line, sizeof(line), "Width X:  %.3f m", size.x);
+    DrawUiTextClipped(font, line, contentX, y, 15.0f, panelW - 24.0f, Color{ 205, 213, 220, 255 });
+    y += 24.0f;
+    std::snprintf(line, sizeof(line), "Height Y: %.3f m", size.y);
+    DrawUiTextClipped(font, line, contentX, y, 15.0f, panelW - 24.0f, Color{ 205, 213, 220, 255 });
+    y += 24.0f;
+    std::snprintf(line, sizeof(line), "Depth Z:  %.3f m", size.z);
+    DrawUiTextClipped(font, line, contentX, y, 15.0f, panelW - 24.0f, Color{ 205, 213, 220, 255 });
 }
 
 void DrawHierarchyPanel(Font font, ModelTab* active, HierarchyPanelState& panel)
@@ -1206,12 +1329,29 @@ void DrawHierarchyPanel(Font font, ModelTab* active, HierarchyPanelState& panel)
 
     DrawRectangle(static_cast<int>(panelX), static_cast<int>(panelY), static_cast<int>(panelW), static_cast<int>(panelH), Color{ 18, 20, 23, 235 });
     DrawLine(static_cast<int>(panelW), static_cast<int>(panelY), static_cast<int>(panelW), static_cast<int>(panelY + panelH), Color{ 64, 70, 78, 255 });
-    DrawUiText(font, "SCENE HIERARCHY", panelX + 12.0f, panelY + 10.0f, 16.0f, Color{ 165, 182, 196, 255 });
+    DrawUiText(font, "SCENE", panelX + 12.0f, panelY + 10.0f, 16.0f, Color{ 165, 182, 196, 255 });
     DrawUiText(font, "||", panelW - 16.0f, panelY + 8.0f, 16.0f, Color{ 120, 130, 140, 255 });
+
+    const Rectangle hierarchyTab{ panelX + 8.0f, panelY + 34.0f, (panelW - 20.0f) * 0.5f, 24.0f };
+    const Rectangle statsTab{ hierarchyTab.x + hierarchyTab.width + 4.0f, panelY + 34.0f, hierarchyTab.width, 24.0f };
+    if (DrawPanelTab(font, hierarchyTab, "Hierarchy", panel.activeTab == LeftPanelTab::Hierarchy))
+    {
+        panel.activeTab = LeftPanelTab::Hierarchy;
+    }
+    if (DrawPanelTab(font, statsTab, "Stats", panel.activeTab == LeftPanelTab::Stats))
+    {
+        panel.activeTab = LeftPanelTab::Stats;
+    }
 
     if (!active)
     {
-        DrawUiText(font, "No active tab", panelX + 12.0f, panelY + 40.0f, 15.0f, Color{ 128, 136, 144, 255 });
+        DrawUiText(font, "No active tab", panelX + 12.0f, GetHierarchyContentStartY(), 15.0f, Color{ 128, 136, 144, 255 });
+        return;
+    }
+
+    if (panel.activeTab == LeftPanelTab::Stats)
+    {
+        DrawSceneStatsPanel(font, *active, panelX, GetHierarchyContentStartY() + 10.0f, panelW);
         return;
     }
 
@@ -1221,7 +1361,7 @@ void DrawHierarchyPanel(Font font, ModelTab* active, HierarchyPanelState& panel)
     }
 
     const Vector2 mouse = GetMousePosition();
-    float rowY = panelY + 34.0f;
+    float rowY = GetHierarchyContentStartY();
     int visibleRow = 0;
     const int firstRow = static_cast<int>(std::floor(panel.scroll));
 
@@ -1274,14 +1414,14 @@ void DrawHierarchyPanel(Font font, ModelTab* active, HierarchyPanelState& panel)
     }
 
     const int visibleCount = CountVisibleSceneNodes(active->loaded, active->collapsedNodes);
-    const float visibleRows = std::max(1.0f, std::floor((panelH - 34.0f) / rowH));
+    const float visibleRows = std::max(1.0f, std::floor((panelH - 64.0f) / rowH));
     const float maxScroll = std::max(0.0f, static_cast<float>(visibleCount) - visibleRows);
     panel.scroll = ClampFloat(panel.scroll, 0.0f, maxScroll);
 
     if (maxScroll > 0.0f)
     {
-        const float trackY = panelY + 34.0f;
-        const float trackH = panelH - 38.0f;
+        const float trackY = GetHierarchyContentStartY();
+        const float trackH = panelH - 68.0f;
         const float thumbH = std::max(28.0f, trackH * (visibleRows / static_cast<float>(visibleCount)));
         const float thumbY = trackY + (trackH - thumbH) * (panel.scroll / maxScroll);
         DrawRectangle(static_cast<int>(panelW - 8.0f), static_cast<int>(trackY), 4, static_cast<int>(trackH), Color{ 44, 49, 55, 255 });
@@ -1743,6 +1883,8 @@ int main(int argc, char** argv)
                     DrawModel(active->loaded.model, Vector3{ 0.0f, 0.0f, 0.0f }, 1.0f, viewMode == ViewMode::Wireframe ? Color{ 220, 225, 230, 255 } : Color{ 25, 28, 31, 150 });
                     rlDisableWireMode();
                 }
+
+                DrawSelectedMeshOverlay(*active, visibility);
             }
             rlDrawRenderBatchActive();
             rlDisableDepthTest();
