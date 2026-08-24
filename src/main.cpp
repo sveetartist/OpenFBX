@@ -109,8 +109,17 @@ struct ModelTab
     OrbitCamera orbit;
     AnimationState animation;
     std::vector<bool> collapsedNodes;
+    std::vector<float> blendedVertices;
+    std::vector<float> blendedNormals;
+    std::vector<BoneSegment> visibleBones;
     int appliedClipIndex = -2;
     int appliedMeshFrameIndex = -1;
+    int appliedNextMeshFrameIndex = -1;
+    float appliedMeshFrameAlpha = -1.0f;
+    int appliedBoneClipIndex = -2;
+    int appliedBoneFrameIndex = -1;
+    int appliedNextBoneFrameIndex = -1;
+    float appliedBoneFrameAlpha = -1.0f;
     int selectedNode = -1;
     std::string path;
     std::string title;
@@ -145,6 +154,22 @@ struct LitShader
 float ClampFloat(float value, float minimum, float maximum)
 {
     return std::max(minimum, std::min(maximum, value));
+}
+
+Vector3 NormalizeOrFallback(Vector3 value, Vector3 fallback)
+{
+    const float length = Vector3Length(value);
+    if (length > 0.000001f) return Vector3Scale(value, 1.0f / length);
+    return fallback;
+}
+
+Vector3 LerpVector3(Vector3 a, Vector3 b, float alpha)
+{
+    return Vector3{
+        a.x + (b.x - a.x) * alpha,
+        a.y + (b.y - a.y) * alpha,
+        a.z + (b.z - a.z) * alpha
+    };
 }
 
 void UpdateOrbitCameraTransform(OrbitCamera& orbit)
@@ -325,7 +350,7 @@ out vec4 fragColor;
 void main()
 {
     fragPosition = vec3(matModel*vec4(vertexPosition, 1.0));
-    fragNormal = normalize(vec3(matNormal*vec4(vertexNormal, 1.0)));
+    fragNormal = normalize(vec3(matNormal*vec4(vertexNormal, 0.0)));
     fragColor = vertexColor;
     gl_Position = mvp*vec4(vertexPosition, 1.0);
 }
@@ -398,22 +423,9 @@ void UpdateLitShader(const LitShader& lit, const OrbitCamera& orbit)
     SetShaderValue(lit.shader, lit.ambientLoc, ambient, SHADER_UNIFORM_VEC4);
 }
 
-const std::vector<BoneSegment>& GetVisibleBones(const LoadedFbxModel& loaded, const AnimationState& animation)
+const std::vector<BoneSegment>& GetVisibleBones(const ModelTab& tab)
 {
-    if (animation.clipIndex < 0 || animation.clipIndex >= static_cast<int>(loaded.animations.size()))
-    {
-        return loaded.bones;
-    }
-
-    const AnimationClip& clip = loaded.animations[static_cast<size_t>(animation.clipIndex)];
-    if (clip.frames.empty()) return loaded.bones;
-
-    if (clip.duration <= 0.0f) return clip.frames.front().bones;
-
-    const float normalizedTime = ClampFloat(animation.time, 0.0f, clip.duration);
-    const float frameAlpha = normalizedTime / clip.duration * static_cast<float>(clip.frames.size() - 1);
-    const size_t frameIndex = static_cast<size_t>(ClampFloat(std::round(frameAlpha), 0.0f, static_cast<float>(clip.frames.size() - 1)));
-    return clip.frames[frameIndex].bones;
+    return tab.visibleBones.empty() ? tab.loaded.bones : tab.visibleBones;
 }
 
 int GetAnimationFrameIndex(const LoadedFbxModel& loaded, const AnimationState& animation)
@@ -432,6 +444,32 @@ int GetAnimationFrameIndex(const LoadedFbxModel& loaded, const AnimationState& a
     const float normalizedTime = ClampFloat(animation.time, 0.0f, clip.duration);
     const float frameAlpha = normalizedTime / clip.duration * static_cast<float>(clip.frames.size() - 1);
     return static_cast<int>(ClampFloat(std::round(frameAlpha), 0.0f, static_cast<float>(clip.frames.size() - 1)));
+}
+
+struct MeshFrameSample
+{
+    int first = -1;
+    int second = -1;
+    float alpha = 0.0f;
+};
+
+MeshFrameSample GetFrameSample(float duration, size_t frameCount, float time)
+{
+    if (duration <= 0.0f || frameCount == 0)
+    {
+        return MeshFrameSample{ frameCount == 0 ? -1 : 0, frameCount == 0 ? -1 : 0, 0.0f };
+    }
+
+    const float normalizedTime = ClampFloat(time, 0.0f, duration);
+    const float framePosition = normalizedTime / duration * static_cast<float>(frameCount - 1);
+    const int first = static_cast<int>(ClampFloat(std::floor(framePosition), 0.0f, static_cast<float>(frameCount - 1)));
+    const int second = std::min(first + 1, static_cast<int>(frameCount) - 1);
+    return MeshFrameSample{ first, second, framePosition - static_cast<float>(first) };
+}
+
+MeshFrameSample GetMeshFrameSample(const AnimationClip& clip, float time)
+{
+    return GetFrameSample(clip.duration, clip.meshFrames.size(), time);
 }
 
 void ApplyAnimatedMeshFrame(ModelTab& tab)
@@ -458,6 +496,8 @@ void ApplyAnimatedMeshFrame(ModelTab& tab)
         }
         tab.appliedClipIndex = -1;
         tab.appliedMeshFrameIndex = -1;
+        tab.appliedNextMeshFrameIndex = -1;
+        tab.appliedMeshFrameAlpha = -1.0f;
         return;
     }
 
@@ -467,27 +507,129 @@ void ApplyAnimatedMeshFrame(ModelTab& tab)
     }
 
     const AnimationClip& clip = tab.loaded.animations[static_cast<size_t>(tab.animation.clipIndex)];
-    const int frameIndex = GetAnimationFrameIndex(tab.loaded, tab.animation);
-    if (frameIndex < 0 || frameIndex >= static_cast<int>(clip.meshFrames.size()) ||
-        (frameIndex == tab.appliedMeshFrameIndex && tab.animation.clipIndex == tab.appliedClipIndex))
+    const MeshFrameSample sample = GetMeshFrameSample(clip, tab.animation.time);
+    if (sample.first < 0 || sample.second < 0 ||
+        sample.first >= static_cast<int>(clip.meshFrames.size()) ||
+        sample.second >= static_cast<int>(clip.meshFrames.size()))
     {
         return;
     }
 
     Mesh& mesh = tab.loaded.model.meshes[0];
-    const MeshFrame& frame = clip.meshFrames[static_cast<size_t>(frameIndex)];
-    const size_t vertexBytes = frame.vertices.size() * sizeof(float);
-    const size_t normalBytes = frame.normals.size() * sizeof(float);
+    const MeshFrame& firstFrame = clip.meshFrames[static_cast<size_t>(sample.first)];
+    const MeshFrame& secondFrame = clip.meshFrames[static_cast<size_t>(sample.second)];
+    const size_t expectedFloats = static_cast<size_t>(mesh.vertexCount) * 3;
 
-    if (frame.vertices.size() == static_cast<size_t>(mesh.vertexCount) * 3 && frame.normals.size() == static_cast<size_t>(mesh.vertexCount) * 3)
+    if (firstFrame.vertices.size() == expectedFloats &&
+        firstFrame.normals.size() == expectedFloats &&
+        secondFrame.vertices.size() == expectedFloats &&
+        secondFrame.normals.size() == expectedFloats)
     {
-        std::memcpy(mesh.vertices, frame.vertices.data(), vertexBytes);
-        std::memcpy(mesh.normals, frame.normals.data(), normalBytes);
-        UpdateMeshBuffer(mesh, 0, frame.vertices.data(), static_cast<int>(vertexBytes), 0);
-        UpdateMeshBuffer(mesh, 2, frame.normals.data(), static_cast<int>(normalBytes), 0);
+        const bool sameSample = tab.appliedClipIndex == tab.animation.clipIndex &&
+                                tab.appliedMeshFrameIndex == sample.first &&
+                                tab.appliedNextMeshFrameIndex == sample.second &&
+                                std::fabs(tab.appliedMeshFrameAlpha - sample.alpha) < 0.0001f;
+        if (sameSample) return;
+
+        const float alpha = ClampFloat(sample.alpha, 0.0f, 1.0f);
+        const float inverseAlpha = 1.0f - alpha;
+        const float* vertices = firstFrame.vertices.data();
+        const float* normals = firstFrame.normals.data();
+
+        if (sample.first != sample.second && alpha > 0.0001f)
+        {
+            tab.blendedVertices.resize(expectedFloats);
+            tab.blendedNormals.resize(expectedFloats);
+            for (size_t i = 0; i < expectedFloats; i += 3)
+            {
+                tab.blendedVertices[i] = firstFrame.vertices[i] * inverseAlpha + secondFrame.vertices[i] * alpha;
+                tab.blendedVertices[i + 1] = firstFrame.vertices[i + 1] * inverseAlpha + secondFrame.vertices[i + 1] * alpha;
+                tab.blendedVertices[i + 2] = firstFrame.vertices[i + 2] * inverseAlpha + secondFrame.vertices[i + 2] * alpha;
+
+                const Vector3 blendedNormal = NormalizeOrFallback(Vector3{
+                    firstFrame.normals[i] * inverseAlpha + secondFrame.normals[i] * alpha,
+                    firstFrame.normals[i + 1] * inverseAlpha + secondFrame.normals[i + 1] * alpha,
+                    firstFrame.normals[i + 2] * inverseAlpha + secondFrame.normals[i + 2] * alpha
+                }, Vector3{ firstFrame.normals[i], firstFrame.normals[i + 1], firstFrame.normals[i + 2] });
+                tab.blendedNormals[i] = blendedNormal.x;
+                tab.blendedNormals[i + 1] = blendedNormal.y;
+                tab.blendedNormals[i + 2] = blendedNormal.z;
+            }
+            vertices = tab.blendedVertices.data();
+            normals = tab.blendedNormals.data();
+        }
+
+        const size_t vertexBytes = expectedFloats * sizeof(float);
+        const size_t normalBytes = expectedFloats * sizeof(float);
+        std::memcpy(mesh.vertices, vertices, vertexBytes);
+        std::memcpy(mesh.normals, normals, normalBytes);
+        UpdateMeshBuffer(mesh, 0, vertices, static_cast<int>(vertexBytes), 0);
+        UpdateMeshBuffer(mesh, 2, normals, static_cast<int>(normalBytes), 0);
         tab.appliedClipIndex = tab.animation.clipIndex;
-        tab.appliedMeshFrameIndex = frameIndex;
+        tab.appliedMeshFrameIndex = sample.first;
+        tab.appliedNextMeshFrameIndex = sample.second;
+        tab.appliedMeshFrameAlpha = sample.alpha;
     }
+}
+
+void ApplyAnimatedBoneFrame(ModelTab& tab)
+{
+    if (tab.animation.clipIndex < 0 ||
+        tab.animation.clipIndex >= static_cast<int>(tab.loaded.animations.size()))
+    {
+        if (tab.appliedBoneClipIndex != -1)
+        {
+            tab.visibleBones = tab.loaded.bones;
+            tab.appliedBoneClipIndex = -1;
+            tab.appliedBoneFrameIndex = -1;
+            tab.appliedNextBoneFrameIndex = -1;
+            tab.appliedBoneFrameAlpha = -1.0f;
+        }
+        return;
+    }
+
+    const AnimationClip& clip = tab.loaded.animations[static_cast<size_t>(tab.animation.clipIndex)];
+    const MeshFrameSample sample = GetFrameSample(clip.duration, clip.frames.size(), tab.animation.time);
+    if (sample.first < 0 || sample.second < 0 ||
+        sample.first >= static_cast<int>(clip.frames.size()) ||
+        sample.second >= static_cast<int>(clip.frames.size()))
+    {
+        return;
+    }
+
+    const bool sameSample = tab.appliedBoneClipIndex == tab.animation.clipIndex &&
+                            tab.appliedBoneFrameIndex == sample.first &&
+                            tab.appliedNextBoneFrameIndex == sample.second &&
+                            std::fabs(tab.appliedBoneFrameAlpha - sample.alpha) < 0.0001f;
+    if (sameSample) return;
+
+    const std::vector<BoneSegment>& firstBones = clip.frames[static_cast<size_t>(sample.first)].bones;
+    const std::vector<BoneSegment>& secondBones = clip.frames[static_cast<size_t>(sample.second)].bones;
+    if (firstBones.size() != secondBones.size())
+    {
+        tab.visibleBones = firstBones;
+    }
+    else
+    {
+        const float alpha = ClampFloat(sample.alpha, 0.0f, 1.0f);
+        tab.visibleBones.resize(firstBones.size());
+        for (size_t i = 0; i < firstBones.size(); ++i)
+        {
+            const BoneSegment& first = firstBones[i];
+            const BoneSegment& second = secondBones[i];
+            tab.visibleBones[i] = BoneSegment{
+                LerpVector3(first.start, second.start, alpha),
+                LerpVector3(first.end, second.end, alpha),
+                first.startNode,
+                first.endNode
+            };
+        }
+    }
+
+    tab.appliedBoneClipIndex = tab.animation.clipIndex;
+    tab.appliedBoneFrameIndex = sample.first;
+    tab.appliedNextBoneFrameIndex = sample.second;
+    tab.appliedBoneFrameAlpha = sample.alpha;
 }
 
 void DrawJointBillboard(const Camera3D& camera, Vector3 position, float radius, Color color)
@@ -679,7 +821,7 @@ bool SelectNodeFromViewport(ModelTab& tab, Vector2 mouse, const VisibilityState&
 
     if (visibility.bones)
     {
-        for (const BoneSegment& bone : GetVisibleBones(tab.loaded, tab.animation))
+        for (const BoneSegment& bone : GetVisibleBones(tab))
         {
             const float startDepth = Vector3DotProduct(Vector3Subtract(bone.start, ray.position), ray.direction);
             const float endDepth = Vector3DotProduct(Vector3Subtract(bone.end, ray.position), ray.direction);
@@ -760,7 +902,7 @@ bool GetSelectedNodePosition(const ModelTab& tab, Vector3& outPosition)
     const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(tab.selectedNode)];
     if (node.type == SceneNodeType::Bone)
     {
-        for (const BoneSegment& bone : GetVisibleBones(tab.loaded, tab.animation))
+        for (const BoneSegment& bone : GetVisibleBones(tab))
         {
             if (bone.endNode == tab.selectedNode)
             {
@@ -1681,7 +1823,7 @@ void DrawTimeline(Font font, LoadedFbxModel& loaded, AnimationState& animation)
         {
             animation.clipIndex = i;
             animation.time = 0.0f;
-            animation.playing = false;
+            animation.playing = true;
         }
 
         char rowText[256] = {};
@@ -1766,6 +1908,7 @@ int main(int argc, char** argv)
         tab->animation.clipIndex = -1;
         tab->animation.time = 0.0f;
         tab->animation.playing = false;
+        tab->visibleBones = tab->loaded.bones;
         tab->collapsedNodes.assign(tab->loaded.nodes.size(), false);
         tab->selectedNode = tab->loaded.nodes.empty() ? -1 : 0;
         tab->path = path;
@@ -1848,6 +1991,7 @@ int main(int argc, char** argv)
 
             UpdateAnimation(active->animation, active->loaded);
             ApplyAnimatedMeshFrame(*active);
+            ApplyAnimatedBoneFrame(*active);
             UpdateLitShader(litShader, active->orbit);
         }
         else
@@ -1894,7 +2038,7 @@ int main(int argc, char** argv)
             }
             if (visibility.bones)
             {
-                DrawBones(GetVisibleBones(active->loaded, active->animation), active->orbit.camera, active->selectedNode);
+                DrawBones(GetVisibleBones(*active), active->orbit.camera, active->selectedNode);
             }
             DrawSelectedNodeOverlay(*active, visibility);
             rlDrawRenderBatchActive();

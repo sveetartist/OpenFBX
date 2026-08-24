@@ -65,6 +65,20 @@ struct MeshBuilder
     }
 };
 
+struct ControlPointInfluence
+{
+    FbxAMatrix deformation;
+    double weight = 0.0;
+};
+
+struct SkinSample
+{
+    std::vector<std::vector<ControlPointInfluence>> influences;
+    std::vector<double> weights;
+    FbxCluster::ELinkMode linkMode = FbxCluster::eNormalize;
+    bool hasCluster = false;
+};
+
 void ExpandBounds(BoundingBox& bounds, Vector3 p, bool& hasBounds)
 {
     if (!hasBounds)
@@ -207,6 +221,8 @@ void AddTriangle(MeshBuilder& out,
     }
 }
 
+FbxVector4 TransformVector(const FbxAMatrix& matrix, FbxVector4 vector);
+
 void AppendMesh(FbxNode* node, FbxMesh* mesh, MeshBuilder& out)
 {
     const int polygonCount = mesh->GetPolygonCount();
@@ -246,7 +262,7 @@ void AppendMesh(FbxNode* node, FbxMesh* mesh, MeshBuilder& out)
                 normal[3] = 0.0;
                 refs[vertex].localNormal = normal;
                 refs[vertex].hasNormal = true;
-                normals[vertex] = ToVector3(normalTransform.MultT(normal));
+                normals[vertex] = ToVector3(TransformVector(normalTransform, normal));
             }
             else
             {
@@ -306,6 +322,14 @@ FbxVector4 AddScaledVector(FbxVector4 value, const FbxVector4& add, double scale
     return value;
 }
 
+FbxVector4 TransformVector(const FbxAMatrix& matrix, FbxVector4 vector)
+{
+    vector[3] = 0.0;
+    const FbxVector4 origin = matrix.MultT(FbxVector4(0.0, 0.0, 0.0, 1.0));
+    const FbxVector4 end = matrix.MultT(FbxVector4(vector[0], vector[1], vector[2], 1.0));
+    return FbxVector4(end[0] - origin[0], end[1] - origin[1], end[2] - origin[2], 0.0);
+}
+
 FbxAMatrix GetClusterDeformationMatrix(FbxNode* meshNode, FbxCluster* cluster, const FbxTime& time)
 {
     FbxAMatrix referenceGlobalInit;
@@ -325,41 +349,33 @@ FbxAMatrix GetClusterDeformationMatrix(FbxNode* meshNode, FbxCluster* cluster, c
     return clusterRelativeCurrentInverse * clusterRelativeInit;
 }
 
-std::vector<FbxVector4> DeformControlPointsLocal(FbxNode* node, FbxMesh* mesh, const FbxTime& time)
+SkinSample BuildSkinSample(FbxNode* node, FbxMesh* mesh, const FbxTime& time)
 {
     const int controlPointCount = mesh->GetControlPointsCount();
-    const FbxVector4* controlPoints = mesh->GetControlPoints();
-    std::vector<FbxVector4> deformed(static_cast<size_t>(controlPointCount));
-    std::vector<double> weights(static_cast<size_t>(controlPointCount), 0.0);
-
-    for (int i = 0; i < controlPointCount; ++i)
-    {
-        deformed[static_cast<size_t>(i)] = FbxVector4(0.0, 0.0, 0.0, 0.0);
-    }
+    SkinSample skin;
+    skin.influences.resize(static_cast<size_t>(controlPointCount));
+    skin.weights.assign(static_cast<size_t>(controlPointCount), 0.0);
 
     const int skinCount = mesh->GetDeformerCount(FbxDeformer::eSkin);
     if (skinCount <= 0)
     {
-        return std::vector<FbxVector4>(controlPoints, controlPoints + controlPointCount);
+        return skin;
     }
-
-    FbxCluster::ELinkMode linkMode = FbxCluster::eNormalize;
-    bool hasCluster = false;
 
     for (int skinIndex = 0; skinIndex < skinCount; ++skinIndex)
     {
-        FbxSkin* skin = static_cast<FbxSkin*>(mesh->GetDeformer(skinIndex, FbxDeformer::eSkin));
-        if (!skin) continue;
+        FbxSkin* fbxSkin = static_cast<FbxSkin*>(mesh->GetDeformer(skinIndex, FbxDeformer::eSkin));
+        if (!fbxSkin) continue;
 
-        for (int clusterIndex = 0; clusterIndex < skin->GetClusterCount(); ++clusterIndex)
+        for (int clusterIndex = 0; clusterIndex < fbxSkin->GetClusterCount(); ++clusterIndex)
         {
-            FbxCluster* cluster = skin->GetCluster(clusterIndex);
+            FbxCluster* cluster = fbxSkin->GetCluster(clusterIndex);
             if (!cluster || !cluster->GetLink()) continue;
 
-            if (!hasCluster)
+            if (!skin.hasCluster)
             {
-                linkMode = cluster->GetLinkMode();
-                hasCluster = true;
+                skin.linkMode = cluster->GetLinkMode();
+                skin.hasCluster = true;
             }
 
             const FbxAMatrix deformation = GetClusterDeformationMatrix(node, cluster, time);
@@ -375,15 +391,23 @@ std::vector<FbxVector4> DeformControlPointsLocal(FbxNode* node, FbxMesh* mesh, c
                 const double weight = clusterWeights[i];
                 if (weight == 0.0) continue;
 
-                const FbxVector4 transformed = deformation.MultT(controlPoints[controlPointIndex]);
                 const size_t outIndex = static_cast<size_t>(controlPointIndex);
-                deformed[outIndex] = AddScaledVector(deformed[outIndex], transformed, weight);
-                weights[outIndex] += weight;
+                skin.influences[outIndex].push_back(ControlPointInfluence{ deformation, weight });
+                skin.weights[outIndex] += weight;
             }
         }
     }
 
-    if (!hasCluster)
+    return skin;
+}
+
+std::vector<FbxVector4> DeformControlPointsLocal(FbxMesh* mesh, const SkinSample& skin)
+{
+    const int controlPointCount = mesh->GetControlPointsCount();
+    const FbxVector4* controlPoints = mesh->GetControlPoints();
+    std::vector<FbxVector4> deformed(static_cast<size_t>(controlPointCount));
+
+    if (!skin.hasCluster)
     {
         return std::vector<FbxVector4>(controlPoints, controlPoints + controlPointCount);
     }
@@ -391,25 +415,68 @@ std::vector<FbxVector4> DeformControlPointsLocal(FbxNode* node, FbxMesh* mesh, c
     for (int i = 0; i < controlPointCount; ++i)
     {
         const size_t outIndex = static_cast<size_t>(i);
-        const double weight = weights[outIndex];
+        const double weight = skin.weights[outIndex];
+        deformed[outIndex] = FbxVector4(0.0, 0.0, 0.0, 0.0);
+
+        for (const ControlPointInfluence& influence : skin.influences[outIndex])
+        {
+            const FbxVector4 transformed = influence.deformation.MultT(controlPoints[i]);
+            deformed[outIndex] = AddScaledVector(deformed[outIndex], transformed, influence.weight);
+        }
 
         if (weight == 0.0)
         {
             deformed[outIndex] = controlPoints[i];
         }
-        else if (linkMode == FbxCluster::eNormalize)
+        else if (skin.linkMode == FbxCluster::eNormalize)
         {
             deformed[outIndex][0] /= weight;
             deformed[outIndex][1] /= weight;
             deformed[outIndex][2] /= weight;
             deformed[outIndex][3] /= weight;
         }
-        else if (linkMode == FbxCluster::eTotalOne && weight < 1.0)
+        else if (skin.linkMode == FbxCluster::eTotalOne && weight < 1.0)
         {
             deformed[outIndex] = AddScaledVector(deformed[outIndex], controlPoints[i], 1.0 - weight);
         }
     }
 
+    return deformed;
+}
+
+FbxVector4 DeformLocalNormal(const SkinSample& skin, int controlPointIndex, FbxVector4 normal)
+{
+    normal[3] = 0.0;
+    if (!skin.hasCluster || controlPointIndex < 0 || controlPointIndex >= static_cast<int>(skin.weights.size()))
+    {
+        return normal;
+    }
+
+    const size_t outIndex = static_cast<size_t>(controlPointIndex);
+    const double weight = skin.weights[outIndex];
+    if (weight == 0.0)
+    {
+        return normal;
+    }
+
+    FbxVector4 deformed(0.0, 0.0, 0.0, 0.0);
+    for (const ControlPointInfluence& influence : skin.influences[outIndex])
+    {
+        deformed = AddScaledVector(deformed, TransformVector(influence.deformation, normal), influence.weight);
+    }
+
+    if (skin.linkMode == FbxCluster::eNormalize)
+    {
+        deformed[0] /= weight;
+        deformed[1] /= weight;
+        deformed[2] /= weight;
+    }
+    else if (skin.linkMode == FbxCluster::eTotalOne && weight < 1.0)
+    {
+        deformed = AddScaledVector(deformed, normal, 1.0 - weight);
+    }
+
+    deformed[3] = 0.0;
     return deformed;
 }
 
@@ -443,6 +510,7 @@ MeshFrame SampleMeshFrame(const MeshBuilder& builder, const FbxTime& time)
     struct MeshSampleCache
     {
         std::vector<FbxVector4> localPoints;
+        SkinSample skin;
         FbxAMatrix meshTransform;
         FbxAMatrix normalTransform;
     };
@@ -463,7 +531,8 @@ MeshFrame SampleMeshFrame(const MeshBuilder& builder, const FbxTime& time)
         if (found == sampleByNode.end())
         {
             MeshSampleCache cache;
-            cache.localPoints = DeformControlPointsLocal(ref.node, ref.mesh, time);
+            cache.skin = BuildSkinSample(ref.node, ref.mesh, time);
+            cache.localPoints = DeformControlPointsLocal(ref.mesh, cache.skin);
             cache.meshTransform = ref.node->EvaluateGlobalTransform(time) * GetNodeGeometryTransform(ref.node);
             cache.normalTransform = cache.meshTransform.Inverse().Transpose();
             found = sampleByNode.emplace(ref.node, std::move(cache)).first;
@@ -486,9 +555,8 @@ MeshFrame SampleMeshFrame(const MeshBuilder& builder, const FbxTime& time)
 
         if (ref.hasNormal)
         {
-            FbxVector4 normal = ref.localNormal;
-            normal[3] = 0.0;
-            const Vector3 sampledNormal = NormalizeOrFallback(ToVector3(cache.normalTransform.MultT(normal)), Vector3{ 0.0f, 1.0f, 0.0f });
+            FbxVector4 normal = DeformLocalNormal(cache.skin, ref.controlPointIndex, ref.localNormal);
+            const Vector3 sampledNormal = NormalizeOrFallback(ToVector3(TransformVector(cache.normalTransform, normal)), Vector3{ 0.0f, 1.0f, 0.0f });
             frame.normals.push_back(sampledNormal.x);
             frame.normals.push_back(sampledNormal.y);
             frame.normals.push_back(sampledNormal.z);
