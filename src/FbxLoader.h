@@ -78,6 +78,8 @@ struct LoadedFbxModel
     BoundingBox bounds{};
     std::vector<float> bindVertices;
     std::vector<float> bindNormals;
+    std::vector<std::vector<int>> meshGlobalVertexIndices;
+    std::vector<std::string> materialNames;
     std::vector<BoneSegment> bones;
     std::vector<BonePose> bonePoses;
     std::vector<SceneNode> nodes;

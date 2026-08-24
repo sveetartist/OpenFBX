@@ -1,10 +1,14 @@
 #include <cmath>
 #include <algorithm>
+#include <array>
+#include <cctype>
 #include <cstdio>
 #include <cstring>
+#include <fstream>
 #include <iostream>
 #include <limits>
 #include <memory>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -59,6 +63,11 @@ constexpr WindowsDword kOfnNoChangeDir = 0x00000008;
 
 namespace
 {
+constexpr float kTimelinePanelHeight = 124.0f;
+constexpr float kTimelineCollapsedHeight = 28.0f;
+constexpr float kMetersPerGridCell = 1.0f;
+float gBottomPanelReservedHeight = kTimelinePanelHeight;
+
 struct OrbitCamera
 {
     Camera3D camera{};
@@ -105,7 +114,63 @@ enum class OpenMenu
 enum class LeftPanelTab
 {
     Hierarchy,
-    Stats
+    Stats,
+    Materials,
+    Skeleton
+};
+
+enum class PbrTextureSlot
+{
+    Diffuse,
+    Normal,
+    Roughness,
+    Metallic,
+    AmbientOcclusion,
+    Emissive,
+    Opacity,
+    Count
+};
+
+enum class PackedChannel
+{
+    R,
+    G,
+    B
+};
+
+enum class OpacityChannel
+{
+    RGB,
+    A
+};
+
+enum class MaterialPreviewMode
+{
+    Shaded,
+    Diffuse,
+    Normal,
+    Roughness,
+    Metallic,
+    AmbientOcclusion,
+    Emissive,
+    Opacity
+};
+
+struct PbrTexture
+{
+    Texture2D texture{};
+    std::string path;
+    bool loaded = false;
+};
+
+struct PbrMaterialState
+{
+    std::array<PbrTexture, static_cast<size_t>(PbrTextureSlot::Count)> textures;
+    bool normalDirectX = false;
+    PackedChannel roughnessChannel = PackedChannel::G;
+    PackedChannel metallicChannel = PackedChannel::B;
+    PackedChannel aoChannel = PackedChannel::R;
+    OpacityChannel opacityChannel = OpacityChannel::A;
 };
 
 struct ModelTab
@@ -116,8 +181,15 @@ struct ModelTab
     std::vector<bool> collapsedNodes;
     std::vector<float> blendedVertices;
     std::vector<float> blendedNormals;
+    std::vector<float> currentVertices;
+    std::vector<float> currentNormals;
     std::vector<BoneSegment> visibleBones;
     std::vector<BonePose> visibleBonePoses;
+    std::vector<PbrMaterialState> pbrMaterials;
+    int selectedMaterial = 0;
+    std::string skeletonComparePath;
+    std::string skeletonCompareResult;
+    bool skeletonCompatible = false;
     int appliedClipIndex = -2;
     int appliedMeshFrameIndex = -1;
     int appliedNextMeshFrameIndex = -1;
@@ -143,6 +215,7 @@ struct HierarchyPanelState
 struct VisibilityState
 {
     bool geometry = true;
+    bool textures = true;
     bool bones = true;
     bool boneRotations = false;
     bool empties = true;
@@ -155,6 +228,20 @@ struct LitShader
     int lightDirectionLoc = -1;
     int lightColorLoc = -1;
     int ambientLoc = -1;
+    int hasDiffuseMapLoc = -1;
+    int hasNormalMapLoc = -1;
+    int hasRoughnessMapLoc = -1;
+    int hasMetallicMapLoc = -1;
+    int hasAoMapLoc = -1;
+    int hasEmissiveMapLoc = -1;
+    int hasOpacityMapLoc = -1;
+    int normalDirectXLoc = -1;
+    int roughnessChannelLoc = -1;
+    int metallicChannelLoc = -1;
+    int aoChannelLoc = -1;
+    int opacityChannelLoc = -1;
+    int materialPreviewModeLoc = -1;
+    int texturesVisibleLoc = -1;
     bool valid = false;
 };
 
@@ -423,11 +510,35 @@ std::string OpenFbxFileDialog()
     return {};
 }
 
+std::string OpenTextureFileDialog()
+{
+#ifdef _WIN32
+    char filePath[4096] = {};
+
+    WindowsOpenFileNameA dialog{};
+    dialog.lStructSize = sizeof(dialog);
+    dialog.lpstrFilter = "Image files (*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.psd;*.gif;*.hdr)\0*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.psd;*.gif;*.hdr\0All files (*.*)\0*.*\0";
+    dialog.lpstrFile = filePath;
+    dialog.nMaxFile = sizeof(filePath);
+    dialog.Flags = kOfnFileMustExist | kOfnPathMustExist | kOfnNoChangeDir;
+
+    if (GetOpenFileNameA(&dialog))
+    {
+        return filePath;
+    }
+#endif
+
+    return {};
+}
+
 void ApplyNeutralMaterial(LoadedFbxModel& loaded)
 {
     if (loaded.valid && loaded.model.materialCount > 0)
     {
-        loaded.model.materials[0].maps[MATERIAL_MAP_DIFFUSE].color = Color{ 135, 135, 135, 255 };
+        for (int i = 0; i < loaded.model.materialCount; ++i)
+        {
+            loaded.model.materials[i].maps[MATERIAL_MAP_DIFFUSE].color = Color{ 135, 135, 135, 255 };
+        }
     }
 }
 
@@ -446,12 +557,14 @@ uniform mat4 matNormal;
 
 out vec3 fragPosition;
 out vec3 fragNormal;
+out vec2 fragTexCoord;
 out vec4 fragColor;
 
 void main()
 {
     fragPosition = vec3(matModel*vec4(vertexPosition, 1.0));
     fragNormal = normalize(vec3(matNormal*vec4(vertexNormal, 0.0)));
+    fragTexCoord = vertexTexCoord;
     fragColor = vertexColor;
     gl_Position = mvp*vec4(vertexPosition, 1.0);
 }
@@ -461,19 +574,84 @@ void main()
 #version 330
 in vec3 fragPosition;
 in vec3 fragNormal;
+in vec2 fragTexCoord;
 in vec4 fragColor;
 
 uniform vec4 colDiffuse;
+uniform sampler2D texture0;
+uniform sampler2D texture1;
+uniform sampler2D texture2;
+uniform sampler2D texture3;
+uniform sampler2D texture4;
+uniform sampler2D texture5;
+uniform sampler2D texture6;
 uniform vec3 viewPos;
 uniform vec3 lightDir;
 uniform vec4 lightColor;
 uniform vec4 ambient;
+uniform int hasDiffuseMap;
+uniform int hasNormalMap;
+uniform int hasRoughnessMap;
+uniform int hasMetallicMap;
+uniform int hasAoMap;
+uniform int hasEmissiveMap;
+uniform int hasOpacityMap;
+uniform int normalDirectX;
+uniform int roughnessChannel;
+uniform int metallicChannel;
+uniform int aoChannel;
+uniform int opacityChannel;
+uniform int materialPreviewMode;
+uniform int texturesVisible;
 
 out vec4 finalColor;
+
+float readPackedChannel(vec4 value, int channel)
+{
+    if (channel == 1) return value.g;
+    if (channel == 2) return value.b;
+    return value.r;
+}
+
+float readOpacity(vec4 value, int channel)
+{
+    if (channel == 1) return value.a;
+    return dot(value.rgb, vec3(0.333333));
+}
 
 void main()
 {
     vec3 normal = normalize(fragNormal);
+
+    vec4 diffuseTexel = texturesVisible == 1 && hasDiffuseMap == 1 ? texture(texture0, fragTexCoord) : vec4(1.0);
+    vec4 normalTexel = texturesVisible == 1 && hasNormalMap == 1 ? texture(texture2, fragTexCoord) : vec4(0.5, 0.5, 1.0, 1.0);
+    if (normalDirectX == 1) normalTexel.g = 1.0 - normalTexel.g;
+    if (texturesVisible == 1 && hasNormalMap == 1)
+    {
+        vec3 dp1 = dFdx(fragPosition);
+        vec3 dp2 = dFdy(fragPosition);
+        vec2 duv1 = dFdx(fragTexCoord);
+        vec2 duv2 = dFdy(fragTexCoord);
+        float det = duv1.x*duv2.y - duv1.y*duv2.x;
+        if (abs(det) > 0.000001)
+        {
+            vec3 tangent = normalize((dp1*duv2.y - dp2*duv1.y) / det);
+            tangent = normalize(tangent - normal*dot(normal, tangent));
+            vec3 bitangent = normalize(cross(normal, tangent) * sign(det));
+            vec3 tangentNormal = normalTexel.xyz*2.0 - 1.0;
+            normal = normalize(mat3(tangent, bitangent, normal)*tangentNormal);
+        }
+    }
+    vec4 roughnessTexel = texturesVisible == 1 && hasRoughnessMap == 1 ? texture(texture3, fragTexCoord) : vec4(1.0);
+    vec4 metallicTexel = texturesVisible == 1 && hasMetallicMap == 1 ? texture(texture1, fragTexCoord) : vec4(0.0);
+    vec4 aoTexel = texturesVisible == 1 && hasAoMap == 1 ? texture(texture4, fragTexCoord) : vec4(1.0);
+    vec4 emissiveTexel = texturesVisible == 1 && hasEmissiveMap == 1 ? texture(texture5, fragTexCoord) : vec4(0.0);
+    vec4 opacityTexel = texturesVisible == 1 && hasOpacityMap == 1 ? texture(texture6, fragTexCoord) : vec4(1.0);
+    float roughness = readPackedChannel(roughnessTexel, roughnessChannel);
+    float metallic = readPackedChannel(metallicTexel, metallicChannel);
+    float ao = readPackedChannel(aoTexel, aoChannel);
+    float opacity = readOpacity(opacityTexel, opacityChannel);
+
     vec3 light = normalize(-lightDir);
     float diffuse = max(dot(normal, light), 0.0);
 
@@ -481,9 +659,17 @@ void main()
     vec3 halfwayDir = normalize(light + viewDir);
     float specular = pow(max(dot(normal, halfwayDir), 0.0), 48.0) * 0.18;
 
-    vec3 base = colDiffuse.rgb * fragColor.rgb;
-    vec3 shaded = base * ambient.rgb + base * lightColor.rgb * diffuse + lightColor.rgb * specular;
-    finalColor = vec4(shaded, colDiffuse.a * fragColor.a);
+    vec3 base = colDiffuse.rgb * fragColor.rgb * diffuseTexel.rgb;
+    vec3 shaded = base * ambient.rgb * ao + base * lightColor.rgb * diffuse * ao + lightColor.rgb * specular * (1.0 - roughness * 0.6) * (0.35 + metallic * 0.65) + emissiveTexel.rgb;
+
+    if (materialPreviewMode == 1) finalColor = vec4(diffuseTexel.rgb, 1.0);
+    else if (materialPreviewMode == 2) finalColor = vec4(normalTexel.rgb, 1.0);
+    else if (materialPreviewMode == 3) finalColor = vec4(vec3(roughness), 1.0);
+    else if (materialPreviewMode == 4) finalColor = vec4(vec3(metallic), 1.0);
+    else if (materialPreviewMode == 5) finalColor = vec4(vec3(ao), 1.0);
+    else if (materialPreviewMode == 6) finalColor = vec4(emissiveTexel.rgb, 1.0);
+    else if (materialPreviewMode == 7) finalColor = vec4(vec3(opacity), 1.0);
+    else finalColor = vec4(shaded, colDiffuse.a * fragColor.a * diffuseTexel.a * opacity);
 }
 )";
 
@@ -493,6 +679,27 @@ void main()
     lit.lightDirectionLoc = GetShaderLocation(lit.shader, "lightDir");
     lit.lightColorLoc = GetShaderLocation(lit.shader, "lightColor");
     lit.ambientLoc = GetShaderLocation(lit.shader, "ambient");
+    lit.hasDiffuseMapLoc = GetShaderLocation(lit.shader, "hasDiffuseMap");
+    lit.hasNormalMapLoc = GetShaderLocation(lit.shader, "hasNormalMap");
+    lit.hasRoughnessMapLoc = GetShaderLocation(lit.shader, "hasRoughnessMap");
+    lit.hasMetallicMapLoc = GetShaderLocation(lit.shader, "hasMetallicMap");
+    lit.hasAoMapLoc = GetShaderLocation(lit.shader, "hasAoMap");
+    lit.hasEmissiveMapLoc = GetShaderLocation(lit.shader, "hasEmissiveMap");
+    lit.hasOpacityMapLoc = GetShaderLocation(lit.shader, "hasOpacityMap");
+    lit.normalDirectXLoc = GetShaderLocation(lit.shader, "normalDirectX");
+    lit.roughnessChannelLoc = GetShaderLocation(lit.shader, "roughnessChannel");
+    lit.metallicChannelLoc = GetShaderLocation(lit.shader, "metallicChannel");
+    lit.aoChannelLoc = GetShaderLocation(lit.shader, "aoChannel");
+    lit.opacityChannelLoc = GetShaderLocation(lit.shader, "opacityChannel");
+    lit.materialPreviewModeLoc = GetShaderLocation(lit.shader, "materialPreviewMode");
+    lit.texturesVisibleLoc = GetShaderLocation(lit.shader, "texturesVisible");
+    lit.shader.locs[SHADER_LOC_MAP_DIFFUSE] = GetShaderLocation(lit.shader, "texture0");
+    lit.shader.locs[SHADER_LOC_MAP_METALNESS] = GetShaderLocation(lit.shader, "texture1");
+    lit.shader.locs[SHADER_LOC_MAP_NORMAL] = GetShaderLocation(lit.shader, "texture2");
+    lit.shader.locs[SHADER_LOC_MAP_ROUGHNESS] = GetShaderLocation(lit.shader, "texture3");
+    lit.shader.locs[SHADER_LOC_MAP_OCCLUSION] = GetShaderLocation(lit.shader, "texture4");
+    lit.shader.locs[SHADER_LOC_MAP_EMISSION] = GetShaderLocation(lit.shader, "texture5");
+    lit.shader.locs[SHADER_LOC_MAP_HEIGHT] = GetShaderLocation(lit.shader, "texture6");
     lit.valid = lit.shader.id != 0;
     return lit;
 }
@@ -504,6 +711,338 @@ void ApplyLitShader(LoadedFbxModel& loaded, const LitShader& lit)
     for (int i = 0; i < loaded.model.materialCount; ++i)
     {
         loaded.model.materials[i].shader = lit.shader;
+    }
+}
+
+int ToInt(PackedChannel channel)
+{
+    return static_cast<int>(channel);
+}
+
+int ToInt(MaterialPreviewMode mode)
+{
+    return static_cast<int>(mode);
+}
+
+int ToInt(OpacityChannel channel)
+{
+    return static_cast<int>(channel);
+}
+
+const char* GetPackedChannelName(PackedChannel channel)
+{
+    switch (channel)
+    {
+    case PackedChannel::R: return "R";
+    case PackedChannel::G: return "G";
+    case PackedChannel::B: return "B";
+    }
+
+    return "R";
+}
+
+const char* GetOpacityChannelName(OpacityChannel channel)
+{
+    switch (channel)
+    {
+    case OpacityChannel::RGB: return "RGB";
+    case OpacityChannel::A: return "A";
+    }
+
+    return "A";
+}
+
+OpacityChannel NextOpacityChannel(OpacityChannel channel)
+{
+    switch (channel)
+    {
+    case OpacityChannel::RGB: return OpacityChannel::A;
+    case OpacityChannel::A: return OpacityChannel::RGB;
+    }
+
+    return OpacityChannel::A;
+}
+
+PackedChannel NextPackedChannel(PackedChannel channel)
+{
+    switch (channel)
+    {
+    case PackedChannel::R: return PackedChannel::G;
+    case PackedChannel::G: return PackedChannel::B;
+    case PackedChannel::B: return PackedChannel::R;
+    }
+
+    return PackedChannel::R;
+}
+
+const char* GetMaterialPreviewModeName(MaterialPreviewMode mode)
+{
+    switch (mode)
+    {
+    case MaterialPreviewMode::Shaded: return "Shaded";
+    case MaterialPreviewMode::Diffuse: return "Diffuse";
+    case MaterialPreviewMode::Normal: return "Normal";
+    case MaterialPreviewMode::Roughness: return "Roughness";
+    case MaterialPreviewMode::Metallic: return "Metallic";
+    case MaterialPreviewMode::AmbientOcclusion: return "AO";
+    case MaterialPreviewMode::Emissive: return "Emissive";
+    case MaterialPreviewMode::Opacity: return "Opacity";
+    }
+
+    return "Shaded";
+}
+
+MaterialPreviewMode NextMaterialPreviewMode(MaterialPreviewMode mode)
+{
+    switch (mode)
+    {
+    case MaterialPreviewMode::Shaded: return MaterialPreviewMode::Diffuse;
+    case MaterialPreviewMode::Diffuse: return MaterialPreviewMode::Normal;
+    case MaterialPreviewMode::Normal: return MaterialPreviewMode::Roughness;
+    case MaterialPreviewMode::Roughness: return MaterialPreviewMode::Metallic;
+    case MaterialPreviewMode::Metallic: return MaterialPreviewMode::AmbientOcclusion;
+    case MaterialPreviewMode::AmbientOcclusion: return MaterialPreviewMode::Emissive;
+    case MaterialPreviewMode::Emissive: return MaterialPreviewMode::Opacity;
+    case MaterialPreviewMode::Opacity: return MaterialPreviewMode::Shaded;
+    }
+
+    return MaterialPreviewMode::Shaded;
+}
+
+MaterialMapIndex GetMaterialMapIndex(PbrTextureSlot slot)
+{
+    switch (slot)
+    {
+    case PbrTextureSlot::Diffuse: return MATERIAL_MAP_DIFFUSE;
+    case PbrTextureSlot::Normal: return MATERIAL_MAP_NORMAL;
+    case PbrTextureSlot::Roughness: return MATERIAL_MAP_ROUGHNESS;
+    case PbrTextureSlot::Metallic: return MATERIAL_MAP_METALNESS;
+    case PbrTextureSlot::AmbientOcclusion: return MATERIAL_MAP_OCCLUSION;
+    case PbrTextureSlot::Emissive: return MATERIAL_MAP_EMISSION;
+    case PbrTextureSlot::Opacity: return MATERIAL_MAP_HEIGHT;
+    case PbrTextureSlot::Count: break;
+    }
+
+    return MATERIAL_MAP_DIFFUSE;
+}
+
+const char* GetPbrTextureSlotName(PbrTextureSlot slot)
+{
+    switch (slot)
+    {
+    case PbrTextureSlot::Diffuse: return "Diffuse";
+    case PbrTextureSlot::Normal: return "Normal";
+    case PbrTextureSlot::Roughness: return "Roughness";
+    case PbrTextureSlot::Metallic: return "Metallic";
+    case PbrTextureSlot::AmbientOcclusion: return "AO";
+    case PbrTextureSlot::Emissive: return "Emissive";
+    case PbrTextureSlot::Opacity: return "Opacity";
+    case PbrTextureSlot::Count: break;
+    }
+
+    return "Map";
+}
+
+PbrTexture& GetPbrTexture(PbrMaterialState& pbr, PbrTextureSlot slot)
+{
+    return pbr.textures[static_cast<size_t>(slot)];
+}
+
+const PbrTexture& GetPbrTexture(const PbrMaterialState& pbr, PbrTextureSlot slot)
+{
+    return pbr.textures[static_cast<size_t>(slot)];
+}
+
+void EnsurePbrMaterialStates(ModelTab& tab)
+{
+    const int materialCount = tab.loaded.hasMesh ? std::max(1, tab.loaded.model.materialCount) : 1;
+    if (tab.pbrMaterials.size() != static_cast<size_t>(materialCount))
+    {
+        tab.pbrMaterials.resize(static_cast<size_t>(materialCount));
+    }
+    tab.selectedMaterial = std::max(0, std::min(tab.selectedMaterial, materialCount - 1));
+}
+
+PbrMaterialState& GetSelectedPbrMaterial(ModelTab& tab)
+{
+    EnsurePbrMaterialStates(tab);
+    return tab.pbrMaterials[static_cast<size_t>(tab.selectedMaterial)];
+}
+
+const PbrMaterialState& GetSelectedPbrMaterial(const ModelTab& tab)
+{
+    static const PbrMaterialState empty;
+    if (tab.pbrMaterials.empty()) return empty;
+    const int materialCount = tab.loaded.hasMesh ? std::max(1, tab.loaded.model.materialCount) : 1;
+    const int materialIndex = std::max(0, std::min(tab.selectedMaterial, materialCount - 1));
+    return tab.pbrMaterials[static_cast<size_t>(materialIndex)];
+}
+
+void ApplyPbrTextureToModel(ModelTab& tab, int materialIndex, PbrTextureSlot slot)
+{
+    if (!tab.loaded.hasMesh || tab.loaded.model.materialCount <= 0) return;
+    if (materialIndex < 0 || materialIndex >= tab.loaded.model.materialCount) return;
+
+    EnsurePbrMaterialStates(tab);
+    const PbrTexture& texture = GetPbrTexture(tab.pbrMaterials[static_cast<size_t>(materialIndex)], slot);
+    const MaterialMapIndex mapIndex = GetMaterialMapIndex(slot);
+    tab.loaded.model.materials[materialIndex].maps[mapIndex].texture = texture.loaded ? texture.texture : Texture2D{};
+}
+
+void UnloadPbrTexture(ModelTab& tab, int materialIndex, PbrTextureSlot slot)
+{
+    EnsurePbrMaterialStates(tab);
+    if (materialIndex < 0 || materialIndex >= static_cast<int>(tab.pbrMaterials.size())) return;
+
+    PbrTexture& texture = GetPbrTexture(tab.pbrMaterials[static_cast<size_t>(materialIndex)], slot);
+    if (texture.loaded)
+    {
+        UnloadTexture(texture.texture);
+    }
+    texture = PbrTexture{};
+    ApplyPbrTextureToModel(tab, materialIndex, slot);
+}
+
+bool LoadPbrTexture(ModelTab& tab, int materialIndex, PbrTextureSlot slot, const std::string& path, std::string& error)
+{
+    error.clear();
+    if (path.empty()) return false;
+    EnsurePbrMaterialStates(tab);
+    if (materialIndex < 0 || materialIndex >= static_cast<int>(tab.pbrMaterials.size()))
+    {
+        error = "Invalid material index.";
+        return false;
+    }
+
+    Texture2D texture = LoadTexture(path.c_str());
+    if (texture.id == 0)
+    {
+        error = std::string("Failed to load texture: ") + path;
+        return false;
+    }
+
+    SetTextureFilter(texture, TEXTURE_FILTER_BILINEAR);
+    UnloadPbrTexture(tab, materialIndex, slot);
+    PbrTexture& pbrTexture = GetPbrTexture(tab.pbrMaterials[static_cast<size_t>(materialIndex)], slot);
+    pbrTexture.texture = texture;
+    pbrTexture.path = path;
+    pbrTexture.loaded = true;
+    ApplyPbrTextureToModel(tab, materialIndex, slot);
+    return true;
+}
+
+void UnloadPbrTextures(ModelTab& tab)
+{
+    for (int materialIndex = 0; materialIndex < static_cast<int>(tab.pbrMaterials.size()); ++materialIndex)
+    {
+        for (int i = 0; i < static_cast<int>(PbrTextureSlot::Count); ++i)
+        {
+            UnloadPbrTexture(tab, materialIndex, static_cast<PbrTextureSlot>(i));
+        }
+    }
+}
+
+void UpdateMaterialShader(const LitShader& lit, const PbrMaterialState* pbr, MaterialPreviewMode previewMode, bool texturesVisible)
+{
+    if (!lit.valid) return;
+
+    const int texturesEnabled = texturesVisible ? 1 : 0;
+    const int hasDiffuse = texturesVisible && pbr && GetPbrTexture(*pbr, PbrTextureSlot::Diffuse).loaded ? 1 : 0;
+    const int hasNormal = texturesVisible && pbr && GetPbrTexture(*pbr, PbrTextureSlot::Normal).loaded ? 1 : 0;
+    const int hasRoughness = texturesVisible && pbr && GetPbrTexture(*pbr, PbrTextureSlot::Roughness).loaded ? 1 : 0;
+    const int hasMetallic = texturesVisible && pbr && GetPbrTexture(*pbr, PbrTextureSlot::Metallic).loaded ? 1 : 0;
+    const int hasAo = texturesVisible && pbr && GetPbrTexture(*pbr, PbrTextureSlot::AmbientOcclusion).loaded ? 1 : 0;
+    const int hasEmissive = texturesVisible && pbr && GetPbrTexture(*pbr, PbrTextureSlot::Emissive).loaded ? 1 : 0;
+    const int hasOpacity = texturesVisible && pbr && GetPbrTexture(*pbr, PbrTextureSlot::Opacity).loaded ? 1 : 0;
+    const int normalDirectX = pbr && pbr->normalDirectX ? 1 : 0;
+    const int roughnessChannel = pbr ? ToInt(pbr->roughnessChannel) : 0;
+    const int metallicChannel = pbr ? ToInt(pbr->metallicChannel) : 0;
+    const int aoChannel = pbr ? ToInt(pbr->aoChannel) : 0;
+    const int opacityChannel = pbr ? ToInt(pbr->opacityChannel) : ToInt(OpacityChannel::A);
+    const int materialPreviewMode = ToInt(previewMode);
+
+    SetShaderValue(lit.shader, lit.hasDiffuseMapLoc, &hasDiffuse, SHADER_UNIFORM_INT);
+    SetShaderValue(lit.shader, lit.hasNormalMapLoc, &hasNormal, SHADER_UNIFORM_INT);
+    SetShaderValue(lit.shader, lit.hasRoughnessMapLoc, &hasRoughness, SHADER_UNIFORM_INT);
+    SetShaderValue(lit.shader, lit.hasMetallicMapLoc, &hasMetallic, SHADER_UNIFORM_INT);
+    SetShaderValue(lit.shader, lit.hasAoMapLoc, &hasAo, SHADER_UNIFORM_INT);
+    SetShaderValue(lit.shader, lit.hasEmissiveMapLoc, &hasEmissive, SHADER_UNIFORM_INT);
+    SetShaderValue(lit.shader, lit.hasOpacityMapLoc, &hasOpacity, SHADER_UNIFORM_INT);
+    SetShaderValue(lit.shader, lit.normalDirectXLoc, &normalDirectX, SHADER_UNIFORM_INT);
+    SetShaderValue(lit.shader, lit.roughnessChannelLoc, &roughnessChannel, SHADER_UNIFORM_INT);
+    SetShaderValue(lit.shader, lit.metallicChannelLoc, &metallicChannel, SHADER_UNIFORM_INT);
+    SetShaderValue(lit.shader, lit.aoChannelLoc, &aoChannel, SHADER_UNIFORM_INT);
+    SetShaderValue(lit.shader, lit.opacityChannelLoc, &opacityChannel, SHADER_UNIFORM_INT);
+    SetShaderValue(lit.shader, lit.materialPreviewModeLoc, &materialPreviewMode, SHADER_UNIFORM_INT);
+    SetShaderValue(lit.shader, lit.texturesVisibleLoc, &texturesEnabled, SHADER_UNIFORM_INT);
+}
+
+void DrawMaterialModel(ModelTab& tab, const LitShader& lit, MaterialPreviewMode previewMode, bool texturesVisible)
+{
+    EnsurePbrMaterialStates(tab);
+    const Matrix transform = MatrixIdentity();
+    for (int meshIndex = 0; meshIndex < tab.loaded.model.meshCount; ++meshIndex)
+    {
+        int materialIndex = tab.loaded.model.meshMaterial ? tab.loaded.model.meshMaterial[meshIndex] : 0;
+        materialIndex = std::max(0, std::min(materialIndex, static_cast<int>(tab.pbrMaterials.size()) - 1));
+        UpdateMaterialShader(lit, &tab.pbrMaterials[static_cast<size_t>(materialIndex)], previewMode, texturesVisible);
+        DrawMesh(tab.loaded.model.meshes[meshIndex], tab.loaded.model.materials[materialIndex], transform);
+    }
+}
+
+void DrawMeterGridLine(Vector3 start, Vector3 end, bool major, bool floorLine)
+{
+    const Color color = floorLine ? Color{ 230, 236, 242, 235 } :
+                        major ? Color{ 88, 98, 108, 170 } :
+                                Color{ 76, 84, 92, 140 };
+    rlSetLineWidth(floorLine ? 2.5f : major ? 1.6f : 1.0f);
+    DrawLine3D(start, end, color);
+    rlSetLineWidth(1.0f);
+}
+
+void DrawMeterGrid(const OrbitCamera& orbit)
+{
+    constexpr int halfCells = 20;
+    constexpr float extent = static_cast<float>(halfCells) * kMetersPerGridCell;
+
+    if (!orbit.snappedView || orbit.camera.projection != CAMERA_ORTHOGRAPHIC)
+    {
+        for (int i = -halfCells; i <= halfCells; ++i)
+        {
+            const float offset = static_cast<float>(i) * kMetersPerGridCell;
+            const bool major = i == 0 || i % 5 == 0;
+            DrawMeterGridLine(Vector3{ -extent, 0.0f, offset }, Vector3{ extent, 0.0f, offset }, major, i == 0);
+            DrawMeterGridLine(Vector3{ offset, 0.0f, -extent }, Vector3{ offset, 0.0f, extent }, major, i == 0);
+        }
+        return;
+    }
+
+    const Vector3 forward = Vector3Normalize(Vector3Subtract(orbit.camera.target, orbit.camera.position));
+    const float absX = std::fabs(forward.x);
+    const float absY = std::fabs(forward.y);
+    const float absZ = std::fabs(forward.z);
+
+    for (int i = -halfCells; i <= halfCells; ++i)
+    {
+        const float offset = static_cast<float>(i) * kMetersPerGridCell;
+        const bool major = i == 0 || i % 5 == 0;
+        if (absY >= absX && absY >= absZ)
+        {
+            DrawMeterGridLine(Vector3{ -extent, 0.0f, offset }, Vector3{ extent, 0.0f, offset }, major, i == 0);
+            DrawMeterGridLine(Vector3{ offset, 0.0f, -extent }, Vector3{ offset, 0.0f, extent }, major, i == 0);
+        }
+        else if (absZ >= absX)
+        {
+            const float z = orbit.target.z;
+            DrawMeterGridLine(Vector3{ -extent, offset, z }, Vector3{ extent, offset, z }, major, i == 0);
+            DrawMeterGridLine(Vector3{ offset, -extent, z }, Vector3{ offset, extent, z }, major, false);
+        }
+        else
+        {
+            const float x = orbit.target.x;
+            DrawMeterGridLine(Vector3{ x, offset, -extent }, Vector3{ x, offset, extent }, major, i == 0);
+            DrawMeterGridLine(Vector3{ x, -extent, offset }, Vector3{ x, extent, offset }, major, false);
+        }
     }
 }
 
@@ -578,6 +1117,45 @@ MeshFrameSample GetMeshFrameSample(const AnimationClip& clip, float time)
     return GetFrameSample(clip.duration, clip.meshFrames.size(), time);
 }
 
+void UploadGlobalMeshFrame(ModelTab& tab, const float* vertices, const float* normals, size_t expectedFloats)
+{
+    if (!vertices || !normals || !tab.loaded.hasMesh) return;
+    tab.currentVertices.assign(vertices, vertices + expectedFloats);
+    tab.currentNormals.assign(normals, normals + expectedFloats);
+
+    for (int meshIndex = 0; meshIndex < tab.loaded.model.meshCount; ++meshIndex)
+    {
+        if (meshIndex >= static_cast<int>(tab.loaded.meshGlobalVertexIndices.size())) continue;
+
+        Mesh& mesh = tab.loaded.model.meshes[meshIndex];
+        const std::vector<int>& globalIndices = tab.loaded.meshGlobalVertexIndices[static_cast<size_t>(meshIndex)];
+        if (globalIndices.size() != static_cast<size_t>(mesh.vertexCount)) continue;
+
+        tab.blendedVertices.resize(std::max(tab.blendedVertices.size(), globalIndices.size() * 3));
+        tab.blendedNormals.resize(std::max(tab.blendedNormals.size(), globalIndices.size() * 3));
+
+        for (size_t localVertex = 0; localVertex < globalIndices.size(); ++localVertex)
+        {
+            const size_t globalBase = static_cast<size_t>(globalIndices[localVertex]) * 3;
+            const size_t localBase = localVertex * 3;
+            if (globalBase + 2 >= expectedFloats) continue;
+
+            tab.blendedVertices[localBase] = vertices[globalBase];
+            tab.blendedVertices[localBase + 1] = vertices[globalBase + 1];
+            tab.blendedVertices[localBase + 2] = vertices[globalBase + 2];
+            tab.blendedNormals[localBase] = normals[globalBase];
+            tab.blendedNormals[localBase + 1] = normals[globalBase + 1];
+            tab.blendedNormals[localBase + 2] = normals[globalBase + 2];
+        }
+
+        const size_t vertexBytes = globalIndices.size() * 3 * sizeof(float);
+        std::memcpy(mesh.vertices, tab.blendedVertices.data(), vertexBytes);
+        std::memcpy(mesh.normals, tab.blendedNormals.data(), vertexBytes);
+        UpdateMeshBuffer(mesh, 0, tab.blendedVertices.data(), static_cast<int>(vertexBytes), 0);
+        UpdateMeshBuffer(mesh, 2, tab.blendedNormals.data(), static_cast<int>(vertexBytes), 0);
+    }
+}
+
 void ApplyAnimatedMeshFrame(ModelTab& tab)
 {
     if (!tab.loaded.hasMesh)
@@ -589,16 +1167,9 @@ void ApplyAnimatedMeshFrame(ModelTab& tab)
     {
         if (tab.appliedClipIndex == -1) return;
 
-        Mesh& mesh = tab.loaded.model.meshes[0];
-        const size_t vertexBytes = tab.loaded.bindVertices.size() * sizeof(float);
-        const size_t normalBytes = tab.loaded.bindNormals.size() * sizeof(float);
-        if (tab.loaded.bindVertices.size() == static_cast<size_t>(mesh.vertexCount) * 3 &&
-            tab.loaded.bindNormals.size() == static_cast<size_t>(mesh.vertexCount) * 3)
+        if (tab.loaded.bindVertices.size() == tab.loaded.bindNormals.size())
         {
-            std::memcpy(mesh.vertices, tab.loaded.bindVertices.data(), vertexBytes);
-            std::memcpy(mesh.normals, tab.loaded.bindNormals.data(), normalBytes);
-            UpdateMeshBuffer(mesh, 0, tab.loaded.bindVertices.data(), static_cast<int>(vertexBytes), 0);
-            UpdateMeshBuffer(mesh, 2, tab.loaded.bindNormals.data(), static_cast<int>(normalBytes), 0);
+            UploadGlobalMeshFrame(tab, tab.loaded.bindVertices.data(), tab.loaded.bindNormals.data(), tab.loaded.bindVertices.size());
         }
         tab.appliedClipIndex = -1;
         tab.appliedMeshFrameIndex = -1;
@@ -621,10 +1192,9 @@ void ApplyAnimatedMeshFrame(ModelTab& tab)
         return;
     }
 
-    Mesh& mesh = tab.loaded.model.meshes[0];
     const MeshFrame& firstFrame = clip.meshFrames[static_cast<size_t>(sample.first)];
     const MeshFrame& secondFrame = clip.meshFrames[static_cast<size_t>(sample.second)];
-    const size_t expectedFloats = static_cast<size_t>(mesh.vertexCount) * 3;
+    const size_t expectedFloats = tab.loaded.bindVertices.size();
 
     if (firstFrame.vertices.size() == expectedFloats &&
         firstFrame.normals.size() == expectedFloats &&
@@ -644,33 +1214,30 @@ void ApplyAnimatedMeshFrame(ModelTab& tab)
 
         if (sample.first != sample.second && alpha > 0.0001f)
         {
-            tab.blendedVertices.resize(expectedFloats);
-            tab.blendedNormals.resize(expectedFloats);
+            static std::vector<float> globalBlendedVertices;
+            static std::vector<float> globalBlendedNormals;
+            globalBlendedVertices.resize(expectedFloats);
+            globalBlendedNormals.resize(expectedFloats);
             for (size_t i = 0; i < expectedFloats; i += 3)
             {
-                tab.blendedVertices[i] = firstFrame.vertices[i] * inverseAlpha + secondFrame.vertices[i] * alpha;
-                tab.blendedVertices[i + 1] = firstFrame.vertices[i + 1] * inverseAlpha + secondFrame.vertices[i + 1] * alpha;
-                tab.blendedVertices[i + 2] = firstFrame.vertices[i + 2] * inverseAlpha + secondFrame.vertices[i + 2] * alpha;
+                globalBlendedVertices[i] = firstFrame.vertices[i] * inverseAlpha + secondFrame.vertices[i] * alpha;
+                globalBlendedVertices[i + 1] = firstFrame.vertices[i + 1] * inverseAlpha + secondFrame.vertices[i + 1] * alpha;
+                globalBlendedVertices[i + 2] = firstFrame.vertices[i + 2] * inverseAlpha + secondFrame.vertices[i + 2] * alpha;
 
                 const Vector3 blendedNormal = NormalizeOrFallback(Vector3{
                     firstFrame.normals[i] * inverseAlpha + secondFrame.normals[i] * alpha,
                     firstFrame.normals[i + 1] * inverseAlpha + secondFrame.normals[i + 1] * alpha,
                     firstFrame.normals[i + 2] * inverseAlpha + secondFrame.normals[i + 2] * alpha
                 }, Vector3{ firstFrame.normals[i], firstFrame.normals[i + 1], firstFrame.normals[i + 2] });
-                tab.blendedNormals[i] = blendedNormal.x;
-                tab.blendedNormals[i + 1] = blendedNormal.y;
-                tab.blendedNormals[i + 2] = blendedNormal.z;
+                globalBlendedNormals[i] = blendedNormal.x;
+                globalBlendedNormals[i + 1] = blendedNormal.y;
+                globalBlendedNormals[i + 2] = blendedNormal.z;
             }
-            vertices = tab.blendedVertices.data();
-            normals = tab.blendedNormals.data();
+            vertices = globalBlendedVertices.data();
+            normals = globalBlendedNormals.data();
         }
 
-        const size_t vertexBytes = expectedFloats * sizeof(float);
-        const size_t normalBytes = expectedFloats * sizeof(float);
-        std::memcpy(mesh.vertices, vertices, vertexBytes);
-        std::memcpy(mesh.normals, normals, normalBytes);
-        UpdateMeshBuffer(mesh, 0, vertices, static_cast<int>(vertexBytes), 0);
-        UpdateMeshBuffer(mesh, 2, normals, static_cast<int>(normalBytes), 0);
+        UploadGlobalMeshFrame(tab, vertices, normals, expectedFloats);
         tab.appliedClipIndex = tab.animation.clipIndex;
         tab.appliedMeshFrameIndex = sample.first;
         tab.appliedNextMeshFrameIndex = sample.second;
@@ -915,8 +1482,9 @@ void DrawEmptyCrosses(const ModelTab& tab)
 
 const float* GetCurrentMeshVertices(const ModelTab& tab)
 {
-    if (!tab.loaded.hasMesh || tab.loaded.model.meshCount <= 0) return nullptr;
-    return tab.loaded.model.meshes[0].vertices;
+    if (!tab.loaded.hasMesh) return nullptr;
+    if (tab.currentVertices.size() == tab.loaded.bindVertices.size()) return tab.currentVertices.data();
+    return tab.loaded.bindVertices.empty() ? nullptr : tab.loaded.bindVertices.data();
 }
 
 void DrawMeshNodeWireframe(const ModelTab& tab, const SceneNode& node, Color color)
@@ -1371,7 +1939,7 @@ void DrawSelectedInfoPanel(Font font, const ModelTab* active)
     constexpr float panelW = 330.0f;
     constexpr float panelH = 154.0f;
     const float panelX = static_cast<float>(GetScreenWidth()) - panelW - 12.0f;
-    const float panelY = static_cast<float>(GetScreenHeight()) - 124.0f - panelH - 12.0f;
+    const float panelY = static_cast<float>(GetScreenHeight()) - gBottomPanelReservedHeight - panelH - 12.0f;
 
     DrawRectangleRec(Rectangle{ panelX, panelY, panelW, panelH }, Color{ 18, 20, 23, 225 });
     DrawRectangleLinesEx(Rectangle{ panelX, panelY, panelW, panelH }, 1.0f, Color{ 70, 78, 88, 255 });
@@ -1422,7 +1990,7 @@ bool IsSceneNodeVisible(const LoadedFbxModel& loaded, const std::vector<bool>& c
 
 float GetHierarchyPanelHeight()
 {
-    return static_cast<float>(GetScreenHeight()) - 61.0f - 124.0f;
+    return static_cast<float>(GetScreenHeight()) - 61.0f - gBottomPanelReservedHeight;
 }
 
 float GetHierarchyContentStartY()
@@ -1590,12 +2158,445 @@ SceneStats CalculateSceneStats(const LoadedFbxModel& loaded)
     return stats;
 }
 
+struct SkeletonEntry
+{
+    std::string name;
+    std::string parentName;
+};
+
+int FindNearestBoneParent(const LoadedFbxModel& loaded, int nodeIndex)
+{
+    int parent = nodeIndex >= 0 && nodeIndex < static_cast<int>(loaded.nodes.size()) ? loaded.nodes[static_cast<size_t>(nodeIndex)].parent : -1;
+    while (parent >= 0 && parent < static_cast<int>(loaded.nodes.size()))
+    {
+        if (loaded.nodes[static_cast<size_t>(parent)].type == SceneNodeType::Bone) return parent;
+        parent = loaded.nodes[static_cast<size_t>(parent)].parent;
+    }
+    return -1;
+}
+
+std::vector<SkeletonEntry> BuildSkeletonSignature(const LoadedFbxModel& loaded)
+{
+    std::vector<SkeletonEntry> entries;
+    for (int i = 0; i < static_cast<int>(loaded.nodes.size()); ++i)
+    {
+        const SceneNode& node = loaded.nodes[static_cast<size_t>(i)];
+        if (node.type != SceneNodeType::Bone) continue;
+
+        const int parent = FindNearestBoneParent(loaded, i);
+        entries.push_back(SkeletonEntry{
+            node.name,
+            parent >= 0 ? loaded.nodes[static_cast<size_t>(parent)].name : std::string{}
+        });
+    }
+    return entries;
+}
+
+const SkeletonEntry* FindSkeletonEntry(const std::vector<SkeletonEntry>& entries, const std::string& name)
+{
+    for (const SkeletonEntry& entry : entries)
+    {
+        if (entry.name == name) return &entry;
+    }
+    return nullptr;
+}
+
+int CountDuplicateBoneNames(const std::vector<SkeletonEntry>& entries)
+{
+    int duplicates = 0;
+    for (size_t i = 0; i < entries.size(); ++i)
+    {
+        for (size_t j = i + 1; j < entries.size(); ++j)
+        {
+            if (entries[i].name == entries[j].name)
+            {
+                ++duplicates;
+                break;
+            }
+        }
+    }
+    return duplicates;
+}
+
+bool CompareSkeletonCompatibility(const LoadedFbxModel& base, const LoadedFbxModel& other, std::string& result)
+{
+    const std::vector<SkeletonEntry> baseBones = BuildSkeletonSignature(base);
+    const std::vector<SkeletonEntry> otherBones = BuildSkeletonSignature(other);
+    const int baseDuplicates = CountDuplicateBoneNames(baseBones);
+    const int otherDuplicates = CountDuplicateBoneNames(otherBones);
+    int missing = 0;
+    int extra = 0;
+    int parentMismatches = 0;
+
+    for (const SkeletonEntry& baseEntry : baseBones)
+    {
+        const SkeletonEntry* otherEntry = FindSkeletonEntry(otherBones, baseEntry.name);
+        if (!otherEntry)
+        {
+            ++missing;
+            continue;
+        }
+        if (otherEntry->parentName != baseEntry.parentName)
+        {
+            ++parentMismatches;
+        }
+    }
+
+    for (const SkeletonEntry& otherEntry : otherBones)
+    {
+        if (!FindSkeletonEntry(baseBones, otherEntry.name))
+        {
+            ++extra;
+        }
+    }
+
+    const bool compatible = !baseBones.empty() &&
+                            baseBones.size() == otherBones.size() &&
+                            missing == 0 &&
+                            extra == 0 &&
+                            parentMismatches == 0 &&
+                            baseDuplicates == 0 &&
+                            otherDuplicates == 0;
+
+    char line[512] = {};
+    std::snprintf(line, sizeof(line),
+                  "%s\nBase bones: %zu\nCompare bones: %zu\nMissing: %d\nExtra: %d\nParent mismatches: %d\nDuplicate names: %d / %d",
+                  compatible ? "Compatible" : "Not compatible",
+                  baseBones.size(),
+                  otherBones.size(),
+                  missing,
+                  extra,
+                  parentMismatches,
+                  baseDuplicates,
+                  otherDuplicates);
+    result = line;
+    return compatible;
+}
+
+const char* GetSceneNodeTypeJsonName(SceneNodeType type)
+{
+    switch (type)
+    {
+    case SceneNodeType::Mesh: return "mesh";
+    case SceneNodeType::Bone: return "bone";
+    case SceneNodeType::Empty: return "empty";
+    }
+
+    return "unknown";
+}
+
+void WriteJsonString(std::ostream& out, const std::string& value)
+{
+    out << '"';
+    for (char c : value)
+    {
+        switch (c)
+        {
+        case '\\': out << "\\\\"; break;
+        case '"': out << "\\\""; break;
+        case '\b': out << "\\b"; break;
+        case '\f': out << "\\f"; break;
+        case '\n': out << "\\n"; break;
+        case '\r': out << "\\r"; break;
+        case '\t': out << "\\t"; break;
+        default:
+            if (static_cast<unsigned char>(c) < 0x20)
+            {
+                out << ' ';
+            }
+            else
+            {
+                out << c;
+            }
+            break;
+        }
+    }
+    out << '"';
+}
+
+void WriteJsonVector3(std::ostream& out, Vector3 value)
+{
+    out << '[' << value.x << ", " << value.y << ", " << value.z << ']';
+}
+
+void WriteJsonBounds(std::ostream& out, const BoundingBox& bounds)
+{
+    out << "{ \"min\": ";
+    WriteJsonVector3(out, bounds.min);
+    out << ", \"max\": ";
+    WriteJsonVector3(out, bounds.max);
+    out << " }";
+}
+
+bool ExportFbxJson(const ModelTab& tab, std::string& outputPath, std::string& error)
+{
+    outputPath = tab.path + ".json";
+    error.clear();
+
+    std::ofstream out(outputPath, std::ios::out | std::ios::trunc);
+    if (!out)
+    {
+        error = "Failed to write JSON: " + outputPath;
+        return false;
+    }
+
+    const LoadedFbxModel& loaded = tab.loaded;
+    const SceneStats stats = CalculateSceneStats(loaded);
+
+    out << "{\n";
+    out << "  \"source\": ";
+    WriteJsonString(out, tab.path);
+    out << ",\n";
+    out << "  \"title\": ";
+    WriteJsonString(out, tab.title);
+    out << ",\n";
+    out << "  \"bounds\": ";
+    WriteJsonBounds(out, loaded.bounds);
+    out << ",\n";
+    out << "  \"stats\": {\n";
+    out << "    \"nodes\": " << stats.nodes << ",\n";
+    out << "    \"meshes\": " << stats.meshes << ",\n";
+    out << "    \"bones\": " << stats.bones << ",\n";
+    out << "    \"empties\": " << stats.empties << ",\n";
+    out << "    \"vertices\": " << stats.vertices << ",\n";
+    out << "    \"triangles\": " << stats.triangles << ",\n";
+    out << "    \"materials\": " << stats.materials << "\n";
+    out << "  },\n";
+
+    out << "  \"nodes\": [\n";
+    for (size_t i = 0; i < loaded.nodes.size(); ++i)
+    {
+        const SceneNode& node = loaded.nodes[i];
+        out << "    {\n";
+        out << "      \"index\": " << i << ",\n";
+        out << "      \"name\": ";
+        WriteJsonString(out, node.name);
+        out << ",\n";
+        out << "      \"type\": \"" << GetSceneNodeTypeJsonName(node.type) << "\",\n";
+        out << "      \"parent\": " << node.parent << ",\n";
+        out << "      \"depth\": " << node.depth << ",\n";
+        out << "      \"position\": ";
+        WriteJsonVector3(out, node.position);
+        out << ",\n";
+        out << "      \"rotation\": ";
+        WriteJsonVector3(out, node.rotation);
+        out << ",\n";
+        out << "      \"scale\": ";
+        WriteJsonVector3(out, node.scale);
+        out << ",\n";
+        out << "      \"axisX\": ";
+        WriteJsonVector3(out, node.axisX);
+        out << ",\n";
+        out << "      \"axisY\": ";
+        WriteJsonVector3(out, node.axisY);
+        out << ",\n";
+        out << "      \"axisZ\": ";
+        WriteJsonVector3(out, node.axisZ);
+        out << ",\n";
+        out << "      \"hasBounds\": " << (node.hasBounds ? "true" : "false") << ",\n";
+        out << "      \"bounds\": ";
+        WriteJsonBounds(out, node.bounds);
+        out << ",\n";
+        out << "      \"meshVertexStart\": " << node.meshVertexStart << ",\n";
+        out << "      \"meshVertexCount\": " << node.meshVertexCount << ",\n";
+        out << "      \"meshTriangleCount\": " << node.meshTriangleCount << ",\n";
+        out << "      \"material\": ";
+        WriteJsonString(out, node.materialName);
+        out << "\n";
+        out << "    }" << (i + 1 < loaded.nodes.size() ? "," : "") << "\n";
+    }
+    out << "  ],\n";
+
+    out << "  \"bones\": [\n";
+    for (size_t i = 0; i < loaded.bones.size(); ++i)
+    {
+        const BoneSegment& bone = loaded.bones[i];
+        out << "    { \"startNode\": " << bone.startNode << ", \"endNode\": " << bone.endNode << ", \"start\": ";
+        WriteJsonVector3(out, bone.start);
+        out << ", \"end\": ";
+        WriteJsonVector3(out, bone.end);
+        out << " }" << (i + 1 < loaded.bones.size() ? "," : "") << "\n";
+    }
+    out << "  ],\n";
+
+    out << "  \"animations\": [\n";
+    for (size_t i = 0; i < loaded.animations.size(); ++i)
+    {
+        const AnimationClip& clip = loaded.animations[i];
+        out << "    {\n";
+        out << "      \"name\": ";
+        WriteJsonString(out, clip.name);
+        out << ",\n";
+        out << "      \"duration\": " << clip.duration << ",\n";
+        out << "      \"boneFrames\": " << clip.frames.size() << ",\n";
+        out << "      \"meshFrames\": " << clip.meshFrames.size() << ",\n";
+        out << "      \"totalFrames\": " << std::max(clip.frames.size(), clip.meshFrames.size()) << "\n";
+        out << "    }" << (i + 1 < loaded.animations.size() ? "," : "") << "\n";
+    }
+    out << "  ]\n";
+    out << "}\n";
+
+    if (!out)
+    {
+        error = "Failed to finish writing JSON: " + outputPath;
+        return false;
+    }
+
+    return true;
+}
+
+std::string ToLower(std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value;
+}
+
+bool IsTextureExtension(const std::filesystem::path& path)
+{
+    const std::string extension = ToLower(path.extension().string());
+    return extension == ".png" || extension == ".jpg" || extension == ".jpeg" ||
+           extension == ".tga" || extension == ".bmp" || extension == ".psd" ||
+           extension == ".gif" || extension == ".hdr";
+}
+
+int ScoreTextureCandidate(const std::string& lowerStem, const std::string& lowerModelStem, const std::string& lowerMaterialName, PbrTextureSlot slot)
+{
+    int score = lowerStem.find(lowerModelStem) != std::string::npos ? 3 : 0;
+    if (!lowerMaterialName.empty() && lowerStem.find(lowerMaterialName) != std::string::npos) score += 5;
+
+    auto hasAny = [&](std::initializer_list<const char*> tokens)
+    {
+        for (const char* token : tokens)
+        {
+            if (lowerStem.find(token) != std::string::npos) return true;
+        }
+        return false;
+    };
+
+    switch (slot)
+    {
+    case PbrTextureSlot::Diffuse:
+        if (hasAny({ "diffuse", "albedo", "basecolor", "base_color", "_col", "color" })) score += 10;
+        if (hasAny({ "normal", "nrm", "rough", "metal", "ao", "occlusion", "opacity", "alpha", "transparency", "mask" })) score -= 8;
+        break;
+    case PbrTextureSlot::Normal:
+        if (hasAny({ "normal", "_nrm", "_nor" })) score += 10;
+        break;
+    case PbrTextureSlot::Roughness:
+        if (hasAny({ "roughness", "_rough", "_rgh" })) score += 10;
+        break;
+    case PbrTextureSlot::Metallic:
+        if (hasAny({ "metallic", "metalness", "_metal", "_mtl" })) score += 10;
+        break;
+    case PbrTextureSlot::AmbientOcclusion:
+        if (hasAny({ "_ao", "ambientocclusion", "ambient_occlusion", "occlusion" })) score += 10;
+        break;
+    case PbrTextureSlot::Emissive:
+        if (hasAny({ "emissive", "emission", "emit", "_ems", "_emiss" })) score += 10;
+        break;
+    case PbrTextureSlot::Opacity:
+        if (hasAny({ "opacity", "alpha", "transparency", "_trans", "_mask", "cutout" })) score += 10;
+        break;
+    case PbrTextureSlot::Count:
+        break;
+    }
+
+    return score;
+}
+
+std::string FindAutoTexturePath(const std::string& modelPath, const std::filesystem::path& directory, const std::string& materialName, PbrTextureSlot slot)
+{
+    const std::filesystem::path sourcePath(modelPath);
+    if (directory.empty() || !std::filesystem::exists(directory)) return {};
+
+    const std::string modelStem = ToLower(sourcePath.stem().string());
+    const std::string materialStem = ToLower(materialName);
+    int bestScore = 0;
+    std::filesystem::path bestPath;
+
+    for (const std::filesystem::directory_entry& entry : std::filesystem::directory_iterator(directory))
+    {
+        if (!entry.is_regular_file() || !IsTextureExtension(entry.path())) continue;
+
+        const std::string stem = ToLower(entry.path().stem().string());
+        const int score = ScoreTextureCandidate(stem, modelStem, materialStem, slot);
+        if (score > bestScore)
+        {
+            bestScore = score;
+            bestPath = entry.path();
+        }
+    }
+
+    return bestScore > 0 ? bestPath.string() : std::string{};
+}
+
+int LoadPbrTexturesFromFolder(ModelTab& tab, int materialIndex, const std::filesystem::path& directory, std::string& error)
+{
+    int loadedCount = 0;
+    error.clear();
+    EnsurePbrMaterialStates(tab);
+    const std::string materialName = materialIndex >= 0 && materialIndex < static_cast<int>(tab.loaded.materialNames.size()) ? tab.loaded.materialNames[static_cast<size_t>(materialIndex)] : std::string{};
+    for (int i = 0; i < static_cast<int>(PbrTextureSlot::Count); ++i)
+    {
+        const PbrTextureSlot slot = static_cast<PbrTextureSlot>(i);
+        const std::string path = FindAutoTexturePath(tab.path, directory, materialName, slot);
+        if (path.empty()) continue;
+
+        std::string loadError;
+        if (LoadPbrTexture(tab, materialIndex, slot, path, loadError))
+        {
+            ++loadedCount;
+        }
+        else if (error.empty())
+        {
+            error = loadError;
+        }
+    }
+
+    return loadedCount;
+}
+
 bool DrawPanelTab(Font font, Rectangle bounds, const char* label, bool selected)
 {
     const Vector2 mouse = GetMousePosition();
     const bool hovered = CheckCollisionPointRec(mouse, bounds);
     DrawRectangleRec(bounds, selected ? Color{ 48, 70, 92, 255 } : hovered ? Color{ 34, 39, 45, 255 } : Color{ 24, 27, 31, 245 });
     DrawUiText(font, label, bounds.x + 10.0f, bounds.y + 5.0f, 15.0f, selected ? RAYWHITE : Color{ 180, 190, 200, 255 });
+    return hovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+}
+
+bool DrawPanelButton(Font font, Rectangle bounds, const char* label)
+{
+    const Vector2 mouse = GetMousePosition();
+    const bool hovered = CheckCollisionPointRec(mouse, bounds);
+    DrawRectangleRec(bounds, hovered ? Color{ 54, 63, 72, 255 } : Color{ 35, 40, 46, 255 });
+    DrawRectangleLinesEx(bounds, 1.0f, Color{ 70, 80, 90, 255 });
+    const Vector2 size = MeasureTextEx(font, label, 14.0f, 1.0f);
+    DrawUiText(font, label, bounds.x + (bounds.width - size.x) * 0.5f, bounds.y + 4.0f, 14.0f, Color{ 205, 213, 220, 255 });
+    return hovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+}
+
+Color GetPackedChannelColor(PackedChannel channel, bool hovered)
+{
+    switch (channel)
+    {
+    case PackedChannel::R: return hovered ? Color{ 185, 56, 56, 255 } : Color{ 140, 42, 42, 255 };
+    case PackedChannel::G: return hovered ? Color{ 62, 160, 76, 255 } : Color{ 45, 118, 58, 255 };
+    case PackedChannel::B: return hovered ? Color{ 66, 106, 200, 255 } : Color{ 50, 78, 152, 255 };
+    }
+
+    return hovered ? Color{ 54, 63, 72, 255 } : Color{ 35, 40, 46, 255 };
+}
+
+bool DrawChannelButton(Font font, Rectangle bounds, PackedChannel channel)
+{
+    const Vector2 mouse = GetMousePosition();
+    const bool hovered = CheckCollisionPointRec(mouse, bounds);
+    DrawRectangleRec(bounds, GetPackedChannelColor(channel, hovered));
+    DrawRectangleLinesEx(bounds, 1.0f, Color{ 205, 213, 220, 120 });
+    const char* label = GetPackedChannelName(channel);
+    const Vector2 size = MeasureTextEx(font, label, 14.0f, 1.0f);
+    DrawUiText(font, label, bounds.x + (bounds.width - size.x) * 0.5f, bounds.y + 4.0f, 14.0f, RAYWHITE);
     return hovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
 }
 
@@ -1651,7 +2652,217 @@ void DrawSceneStatsPanel(Font font, const ModelTab& tab, float panelX, float pan
     DrawUiTextClipped(font, line, contentX, y, 15.0f, panelW - 24.0f, Color{ 205, 213, 220, 255 });
 }
 
-void DrawHierarchyPanel(Font font, ModelTab* active, HierarchyPanelState& panel)
+void DrawPbrTextureRow(Font font, ModelTab& tab, int materialIndex, PbrTextureSlot slot, float panelX, float panelW, float& y, std::string& notice, std::string& error)
+{
+    const float contentX = panelX + 12.0f;
+    EnsurePbrMaterialStates(tab);
+    PbrMaterialState& material = tab.pbrMaterials[static_cast<size_t>(materialIndex)];
+    const PbrTexture& texture = GetPbrTexture(material, slot);
+    char label[128] = {};
+    std::snprintf(label, sizeof(label), "%s", GetPbrTextureSlotName(slot));
+    DrawUiText(font, label, contentX, y, 15.0f, Color{ 205, 213, 220, 255 });
+
+    float buttonRight = panelX + panelW - 14.0f;
+    if (slot == PbrTextureSlot::Roughness || slot == PbrTextureSlot::Metallic || slot == PbrTextureSlot::AmbientOcclusion)
+    {
+        PackedChannel* channel = slot == PbrTextureSlot::Roughness ? &material.roughnessChannel :
+                                 slot == PbrTextureSlot::Metallic ? &material.metallicChannel : &material.aoChannel;
+        const Rectangle channelButton{ buttonRight - 38.0f, y - 2.0f, 34.0f, 22.0f };
+        if (DrawChannelButton(font, channelButton, *channel))
+        {
+            *channel = NextPackedChannel(*channel);
+        }
+        buttonRight -= 44.0f;
+    }
+    else if (slot == PbrTextureSlot::Opacity)
+    {
+        const Rectangle channelButton{ buttonRight - 48.0f, y - 2.0f, 44.0f, 22.0f };
+        if (DrawPanelButton(font, channelButton, GetOpacityChannelName(material.opacityChannel)))
+        {
+            material.opacityChannel = NextOpacityChannel(material.opacityChannel);
+        }
+        buttonRight -= 54.0f;
+    }
+
+    const Rectangle clearButton{ buttonRight - 48.0f, y - 2.0f, 48.0f, 22.0f };
+    const Rectangle loadButton{ buttonRight - 102.0f, y - 2.0f, 48.0f, 22.0f };
+    if (DrawPanelButton(font, loadButton, "Load"))
+    {
+        const std::string path = OpenTextureFileDialog();
+        if (!path.empty())
+        {
+            std::string loadError;
+            if (LoadPbrTexture(tab, materialIndex, slot, path, loadError))
+            {
+                notice = std::string("Loaded ") + GetPbrTextureSlotName(slot) + ": " + path;
+                error.clear();
+            }
+            else
+            {
+                error = loadError;
+                notice.clear();
+            }
+        }
+    }
+    if (DrawPanelButton(font, clearButton, "Clear"))
+    {
+        UnloadPbrTexture(tab, materialIndex, slot);
+        notice = std::string("Cleared ") + GetPbrTextureSlotName(slot) + " map.";
+        error.clear();
+    }
+
+    y += 22.0f;
+    DrawUiTextClipped(font, texture.loaded ? GetFileName(texture.path.c_str()) : "No texture", contentX + 8.0f, y, 13.0f, panelW - 28.0f, texture.loaded ? Color{ 160, 205, 230, 255 } : Color{ 120, 130, 140, 255 });
+    y += 26.0f;
+}
+
+void DrawMaterialsPanel(Font font, ModelTab& tab, float panelX, float panelY, float panelW, std::string& notice, std::string& error)
+{
+    EnsurePbrMaterialStates(tab);
+    const float contentX = panelX + 12.0f;
+    const int materialCount = static_cast<int>(tab.pbrMaterials.size());
+    float y = panelY;
+
+    DrawUiText(font, "MATERIALS", contentX, y, 16.0f, Color{ 165, 182, 196, 255 });
+    y += 28.0f;
+
+    for (int i = 0; i < materialCount; ++i)
+    {
+        const bool selected = i == tab.selectedMaterial;
+        const Rectangle row{ contentX, y, panelW - 24.0f, 22.0f };
+        const Vector2 mouse = GetMousePosition();
+        const bool hovered = CheckCollisionPointRec(mouse, row);
+        DrawRectangleRec(row, selected ? Color{ 48, 70, 92, 255 } : hovered ? Color{ 34, 39, 45, 255 } : Color{ 24, 27, 31, 220 });
+        const std::string name = i < static_cast<int>(tab.loaded.materialNames.size()) ? tab.loaded.materialNames[static_cast<size_t>(i)] : std::string("Material ") + std::to_string(i + 1);
+        DrawUiTextClipped(font, name.c_str(), row.x + 8.0f, row.y + 3.0f, 14.0f, row.width - 16.0f, selected ? RAYWHITE : Color{ 185, 195, 205, 255 });
+        if (hovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+        {
+            tab.selectedMaterial = i;
+        }
+        y += 24.0f;
+    }
+    PbrMaterialState& material = tab.pbrMaterials[static_cast<size_t>(tab.selectedMaterial)];
+
+    const float clearAllW = 74.0f;
+    const Rectangle loadFolderButton{ contentX, y, panelW - 30.0f - clearAllW, 24.0f };
+    const Rectangle clearAllButton{ contentX + loadFolderButton.width + 6.0f, y, clearAllW, 24.0f };
+    if (DrawPanelButton(font, loadFolderButton, "Load Textures From Folder"))
+    {
+        const std::string pickedPath = OpenTextureFileDialog();
+        std::string autoloadError;
+        const int loadedCount = pickedPath.empty() ? 0 : LoadPbrTexturesFromFolder(tab, tab.selectedMaterial, std::filesystem::path(pickedPath).parent_path(), autoloadError);
+        if (!autoloadError.empty())
+        {
+            error = autoloadError;
+            notice.clear();
+        }
+        else
+        {
+            char message[128] = {};
+            std::snprintf(message, sizeof(message), "Loaded %d texture%s from folder.", loadedCount, loadedCount == 1 ? "" : "s");
+            notice = message;
+            error.clear();
+        }
+    }
+    if (DrawPanelButton(font, clearAllButton, "Clear All"))
+    {
+        for (int i = 0; i < static_cast<int>(PbrTextureSlot::Count); ++i)
+        {
+            UnloadPbrTexture(tab, tab.selectedMaterial, static_cast<PbrTextureSlot>(i));
+        }
+        notice = "Cleared all maps for selected material.";
+        error.clear();
+    }
+    y += 34.0f;
+
+    DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Diffuse, panelX, panelW, y, notice, error);
+    DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Normal, panelX, panelW, y, notice, error);
+
+    const Rectangle normalModeButton{ contentX + 112.0f, y - 2.0f, panelW - 136.0f, 22.0f };
+    DrawUiText(font, "Normal mode", contentX, y, 14.0f, Color{ 190, 200, 210, 255 });
+    if (DrawPanelButton(font, normalModeButton, material.normalDirectX ? "DirectX" : "OpenGL"))
+    {
+        material.normalDirectX = !material.normalDirectX;
+    }
+    y += 32.0f;
+
+    DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Roughness, panelX, panelW, y, notice, error);
+    DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Metallic, panelX, panelW, y, notice, error);
+    DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::AmbientOcclusion, panelX, panelW, y, notice, error);
+    DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Emissive, panelX, panelW, y, notice, error);
+    DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Opacity, panelX, panelW, y, notice, error);
+}
+
+void DrawSkeletonCompatibilityPanel(Font font, ModelTab& tab, float panelX, float panelY, float panelW, std::string& notice, std::string& error)
+{
+    const float contentX = panelX + 12.0f;
+    float y = panelY;
+
+    DrawUiText(font, "SKELETON COMPATIBILITY", contentX, y, 16.0f, Color{ 165, 182, 196, 255 });
+    y += 30.0f;
+
+    const std::vector<SkeletonEntry> activeBones = BuildSkeletonSignature(tab.loaded);
+    char activeText[128] = {};
+    std::snprintf(activeText, sizeof(activeText), "Active skeleton bones: %zu", activeBones.size());
+    DrawUiText(font, activeText, contentX, y, 15.0f, Color{ 205, 213, 220, 255 });
+    y += 28.0f;
+
+    if (DrawPanelButton(font, Rectangle{ contentX, y, panelW - 24.0f, 24.0f }, "Locate FBX To Compare"))
+    {
+        const std::string comparePath = OpenFbxFileDialog();
+        if (!comparePath.empty())
+        {
+            LoadedFbxModel compareModel;
+            std::string loadError;
+            if (LoadFbxModel(comparePath, compareModel, loadError))
+            {
+                tab.skeletonComparePath = comparePath;
+                tab.skeletonCompatible = CompareSkeletonCompatibility(tab.loaded, compareModel, tab.skeletonCompareResult);
+                UnloadFbxModel(compareModel);
+                notice = tab.skeletonCompatible ? "Skeletons are compatible." : "Skeletons are not compatible.";
+                error.clear();
+            }
+            else
+            {
+                tab.skeletonComparePath.clear();
+                tab.skeletonCompareResult = "Failed to load comparison FBX.";
+                tab.skeletonCompatible = false;
+                error = loadError;
+                notice.clear();
+            }
+        }
+    }
+    y += 36.0f;
+
+    if (!tab.skeletonComparePath.empty())
+    {
+        DrawUiText(font, "Compared FBX", contentX, y, 15.0f, Color{ 165, 182, 196, 255 });
+        y += 22.0f;
+        DrawUiTextClipped(font, tab.skeletonComparePath.c_str(), contentX, y, 13.0f, panelW - 24.0f, Color{ 160, 205, 230, 255 });
+        y += 30.0f;
+    }
+
+    if (!tab.skeletonCompareResult.empty())
+    {
+        const Color resultColor = tab.skeletonCompatible ? Color{ 150, 225, 170, 255 } : Color{ 255, 170, 135, 255 };
+        std::string remaining = tab.skeletonCompareResult;
+        while (!remaining.empty() && y < panelY + GetHierarchyPanelHeight() - 24.0f)
+        {
+            const size_t newline = remaining.find('\n');
+            const std::string line = newline == std::string::npos ? remaining : remaining.substr(0, newline);
+            DrawUiTextClipped(font, line.c_str(), contentX, y, 15.0f, panelW - 24.0f, resultColor);
+            y += 22.0f;
+            if (newline == std::string::npos) break;
+            remaining.erase(0, newline + 1);
+        }
+    }
+    else
+    {
+        DrawUiTextClipped(font, "Choose another FBX to compare bone names and hierarchy against the active model.", contentX, y, 14.0f, panelW - 24.0f, Color{ 128, 140, 152, 255 });
+    }
+}
+
+void DrawHierarchyPanel(Font font, ModelTab* active, HierarchyPanelState& panel, std::string& notice, std::string& error)
 {
     constexpr float panelX = 0.0f;
     constexpr float panelY = 61.0f;
@@ -1673,8 +2884,11 @@ void DrawHierarchyPanel(Font font, ModelTab* active, HierarchyPanelState& panel)
     DrawUiText(font, "SCENE", panelX + 12.0f, panelY + 10.0f, 16.0f, Color{ 165, 182, 196, 255 });
     DrawUiText(font, "||", panelW - 16.0f, panelY + 8.0f, 16.0f, Color{ 120, 130, 140, 255 });
 
-    const Rectangle hierarchyTab{ panelX + 8.0f, panelY + 34.0f, (panelW - 20.0f) * 0.5f, 24.0f };
-    const Rectangle statsTab{ hierarchyTab.x + hierarchyTab.width + 4.0f, panelY + 34.0f, hierarchyTab.width, 24.0f };
+    const float tabW = (panelW - 28.0f) / 4.0f;
+    const Rectangle hierarchyTab{ panelX + 8.0f, panelY + 34.0f, tabW, 24.0f };
+    const Rectangle statsTab{ hierarchyTab.x + hierarchyTab.width + 4.0f, panelY + 34.0f, tabW, 24.0f };
+    const Rectangle materialsTab{ statsTab.x + statsTab.width + 4.0f, panelY + 34.0f, tabW, 24.0f };
+    const Rectangle skeletonTab{ materialsTab.x + materialsTab.width + 4.0f, panelY + 34.0f, tabW, 24.0f };
     if (DrawPanelTab(font, hierarchyTab, "Hierarchy", panel.activeTab == LeftPanelTab::Hierarchy))
     {
         panel.activeTab = LeftPanelTab::Hierarchy;
@@ -1682,6 +2896,14 @@ void DrawHierarchyPanel(Font font, ModelTab* active, HierarchyPanelState& panel)
     if (DrawPanelTab(font, statsTab, "Stats", panel.activeTab == LeftPanelTab::Stats))
     {
         panel.activeTab = LeftPanelTab::Stats;
+    }
+    if (DrawPanelTab(font, materialsTab, "Materials", panel.activeTab == LeftPanelTab::Materials))
+    {
+        panel.activeTab = LeftPanelTab::Materials;
+    }
+    if (DrawPanelTab(font, skeletonTab, "Skeleton", panel.activeTab == LeftPanelTab::Skeleton))
+    {
+        panel.activeTab = LeftPanelTab::Skeleton;
     }
 
     if (!active)
@@ -1693,6 +2915,17 @@ void DrawHierarchyPanel(Font font, ModelTab* active, HierarchyPanelState& panel)
     if (panel.activeTab == LeftPanelTab::Stats)
     {
         DrawSceneStatsPanel(font, *active, panelX, GetHierarchyContentStartY() + 10.0f, panelW);
+        return;
+    }
+
+    if (panel.activeTab == LeftPanelTab::Materials)
+    {
+        DrawMaterialsPanel(font, *active, panelX, GetHierarchyContentStartY() + 10.0f, panelW, notice, error);
+        return;
+    }
+    if (panel.activeTab == LeftPanelTab::Skeleton)
+    {
+        DrawSkeletonCompatibilityPanel(font, *active, panelX, GetHierarchyContentStartY() + 10.0f, panelW, notice, error);
         return;
     }
 
@@ -1779,7 +3012,7 @@ bool DrawMenuItem(Font font, Rectangle bounds, const char* text, bool selected =
     return hovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
 }
 
-void DrawMenuBar(Font font, OpenMenu& openMenu, bool& openRequested, ViewMode& viewMode, NavigationPreset& navigation, VisibilityState& visibility)
+void DrawMenuBar(Font font, OpenMenu& openMenu, bool& openRequested, bool& exportJsonRequested, bool& quitRequested, ViewMode& viewMode, NavigationPreset& navigation, VisibilityState& visibility)
 {
     const float menuHeight = 28.0f;
     DrawRectangle(0, 0, GetScreenWidth(), static_cast<int>(menuHeight), Color{ 24, 26, 29, 255 });
@@ -1811,23 +3044,33 @@ void DrawMenuBar(Font font, OpenMenu& openMenu, bool& openRequested, ViewMode& v
         }
     }
 
-    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && mouse.y > 260.0f && openMenu != OpenMenu::None)
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && mouse.y > 310.0f && openMenu != OpenMenu::None)
     {
         openMenu = OpenMenu::None;
     }
 
     if (openMenu == OpenMenu::File)
     {
-        DrawRectangle(8, 29, 220, 38, Color{ 28, 31, 35, 245 });
-        if (DrawMenuItem(font, Rectangle{ 8.0f, 29.0f, 220.0f, 30.0f }, "Open FBX...        O"))
+        DrawRectangle(8, 29, 220, 98, Color{ 28, 31, 35, 245 });
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 29.0f, 220.0f, 30.0f }, "Open FBX...        Ctrl+O"))
         {
             openRequested = true;
+            openMenu = OpenMenu::None;
+        }
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 59.0f, 220.0f, 30.0f }, "Export JSON"))
+        {
+            exportJsonRequested = true;
+            openMenu = OpenMenu::None;
+        }
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 89.0f, 220.0f, 30.0f }, "Exit        Ctrl+Q"))
+        {
+            quitRequested = true;
             openMenu = OpenMenu::None;
         }
     }
     else if (openMenu == OpenMenu::View)
     {
-        DrawRectangle(66, 29, 230, 248, Color{ 28, 31, 35, 245 });
+        DrawRectangle(66, 29, 230, 278, Color{ 28, 31, 35, 245 });
         if (DrawMenuItem(font, Rectangle{ 66.0f, 29.0f, 230.0f, 30.0f }, "Shaded", viewMode == ViewMode::Shaded))
         {
             viewMode = ViewMode::Shaded;
@@ -1840,26 +3083,30 @@ void DrawMenuBar(Font font, OpenMenu& openMenu, bool& openRequested, ViewMode& v
         {
             viewMode = ViewMode::Wireframe;
         }
-        if (DrawMenuItem(font, Rectangle{ 66.0f, 127.0f, 230.0f, 30.0f }, visibility.geometry ? "[x] Geometry" : "[ ] Geometry"))
+        if (DrawMenuItem(font, Rectangle{ 66.0f, 127.0f, 230.0f, 30.0f }, visibility.geometry ? "[x] Geometry        G" : "[ ] Geometry        G"))
         {
             visibility.geometry = !visibility.geometry;
         }
-        if (DrawMenuItem(font, Rectangle{ 66.0f, 157.0f, 230.0f, 30.0f }, visibility.bones ? "[x] Bones" : "[ ] Bones"))
+        if (DrawMenuItem(font, Rectangle{ 66.0f, 157.0f, 230.0f, 30.0f }, visibility.textures ? "[x] Textures" : "[ ] Textures"))
+        {
+            visibility.textures = !visibility.textures;
+        }
+        if (DrawMenuItem(font, Rectangle{ 66.0f, 187.0f, 230.0f, 30.0f }, visibility.bones ? "[x] Bones        B" : "[ ] Bones        B"))
         {
             visibility.bones = !visibility.bones;
         }
-        if (DrawMenuItem(font, Rectangle{ 66.0f, 187.0f, 230.0f, 30.0f }, visibility.boneRotations ? "[x] Bone Rotations" : "[ ] Bone Rotations"))
+        if (DrawMenuItem(font, Rectangle{ 66.0f, 217.0f, 230.0f, 30.0f }, visibility.boneRotations ? "[x] Bone Orientation  O" : "[ ] Bone Orientation  O"))
         {
             visibility.boneRotations = !visibility.boneRotations;
         }
-        if (DrawMenuItem(font, Rectangle{ 66.0f, 217.0f, 230.0f, 30.0f }, visibility.empties ? "[x] Empties" : "[ ] Empties"))
+        if (DrawMenuItem(font, Rectangle{ 66.0f, 247.0f, 230.0f, 30.0f }, visibility.empties ? "[x] Empties        E" : "[ ] Empties        E"))
         {
             visibility.empties = !visibility.empties;
         }
     }
     else if (openMenu == OpenMenu::Preferences)
     {
-        DrawRectangle(128, 29, 420, 220, Color{ 28, 31, 35, 245 });
+        DrawRectangle(128, 29, 420, 246, Color{ 28, 31, 35, 245 });
         DrawUiText(font, "NAVIGATION", 140.0f, 39.0f, 16.0f, Color{ 165, 182, 196, 255 });
         if (DrawMenuItem(font, Rectangle{ 138.0f, 64.0f, 185.0f, 30.0f }, "Blender", navigation == NavigationPreset::Blender))
         {
@@ -1871,10 +3118,11 @@ void DrawMenuBar(Font font, OpenMenu& openMenu, bool& openRequested, ViewMode& v
         }
 
         DrawUiText(font, "HOTKEYS", 140.0f, 110.0f, 16.0f, Color{ 165, 182, 196, 255 });
-        DrawUiText(font, "O open FBX    V view mode    F focus    Space play/pause", 140.0f, 136.0f, 15.0f, Color{ 205, 213, 220, 255 });
-        DrawUiText(font, "Blender: MMB orbit, Alt snap, Shift+MMB pan, Wheel zoom", 140.0f, 162.0f, 15.0f, Color{ 205, 213, 220, 255 });
-        DrawUiText(font, "Maya: Alt+LMB orbit, Shift snap, Alt+MMB pan, Alt+RMB/Wheel zoom", 140.0f, 188.0f, 15.0f, Color{ 205, 213, 220, 255 });
-        DrawUiText(font, "Tabs: X closes, middle-click tab closes", 140.0f, 214.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        DrawUiText(font, "Ctrl+O open FBX    V view mode    T textures", 140.0f, 136.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        DrawUiText(font, "C channels    M shaded    O bone orientation", 140.0f, 162.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        DrawUiText(font, "Blender: MMB orbit, Alt snap, Shift+MMB pan, Wheel zoom", 140.0f, 188.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        DrawUiText(font, "Maya: Alt+LMB orbit, Shift snap, Alt+MMB pan, Alt+RMB/Wheel zoom", 140.0f, 214.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        DrawUiText(font, "Esc deselects    Ctrl+Q quits    Tabs: X/middle closes", 140.0f, 240.0f, 15.0f, Color{ 205, 213, 220, 255 });
     }
 }
 
@@ -1882,6 +3130,7 @@ void CloseTab(std::vector<std::unique_ptr<ModelTab>>& tabs, int& activeTab, int 
 {
     if (tabIndex < 0 || tabIndex >= static_cast<int>(tabs.size())) return;
 
+    UnloadPbrTextures(*tabs[static_cast<size_t>(tabIndex)]);
     UnloadFbxModel(tabs[static_cast<size_t>(tabIndex)]->loaded);
     tabs.erase(tabs.begin() + tabIndex);
 
@@ -1968,26 +3217,36 @@ void UpdateAnimation(AnimationState& animation, const LoadedFbxModel& loaded)
     }
 }
 
-void DrawTimeline(Font font, LoadedFbxModel& loaded, AnimationState& animation)
+void DrawTimeline(Font font, LoadedFbxModel& loaded, AnimationState& animation, bool& collapsed)
 {
     const int width = GetScreenWidth();
     const int height = GetScreenHeight();
-    const float panelHeight = 124.0f;
+    const float panelHeight = collapsed ? kTimelineCollapsedHeight : kTimelinePanelHeight;
     const float panelY = static_cast<float>(height) - panelHeight;
     const float listWidth = 300.0f;
+    const Vector2 mouse = GetMousePosition();
+    const Rectangle toggleButton{ static_cast<float>(width) - 34.0f, panelY + 4.0f, 24.0f, 20.0f };
 
     DrawRectangle(0, static_cast<int>(panelY), width, static_cast<int>(panelHeight), Color{ 20, 22, 24, 238 });
     DrawLine(0, static_cast<int>(panelY), width, static_cast<int>(panelY), Color{ 76, 84, 92, 255 });
-    DrawLine(static_cast<int>(listWidth), static_cast<int>(panelY), static_cast<int>(listWidth), height, Color{ 64, 70, 78, 255 });
+    DrawUiText(font, "ANIMATIONS", 12.0f, panelY + 7.0f, 16.0f, Color{ 165, 182, 196, 255 });
+    if (DrawPanelButton(font, toggleButton, collapsed ? "^" : "v"))
+    {
+        collapsed = !collapsed;
+        animation.scrubbing = false;
+    }
+    if (collapsed)
+    {
+        return;
+    }
 
-    DrawUiText(font, "ANIMATIONS", 12.0f, panelY + 10.0f, 16.0f, Color{ 165, 182, 196, 255 });
+    DrawLine(static_cast<int>(listWidth), static_cast<int>(panelY), static_cast<int>(listWidth), height, Color{ 64, 70, 78, 255 });
 
     if (loaded.animations.empty())
     {
         DrawUiText(font, "No FBX animation stacks", 12.0f, panelY + 64.0f, 16.0f, Color{ 128, 136, 144, 255 });
     }
 
-    const Vector2 mouse = GetMousePosition();
     const Rectangle noAnimationRow{ 10.0f, panelY + 34.0f, listWidth - 20.0f, 22.0f };
     const bool noAnimationSelected = animation.clipIndex < 0;
     if (noAnimationSelected)
@@ -2090,6 +3349,7 @@ int main(int argc, char** argv)
 {
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
     InitWindow(1280, 800, "openfbx");
+    SetExitKey(KEY_NULL);
     ApplyWindowIcon();
     SetTargetFPS(60);
 
@@ -2099,11 +3359,15 @@ int main(int argc, char** argv)
     std::vector<std::unique_ptr<ModelTab>> tabs;
     int activeTab = -1;
     ViewMode viewMode = ViewMode::Shaded;
+    MaterialPreviewMode materialPreviewMode = MaterialPreviewMode::Shaded;
     NavigationPreset navigation = NavigationPreset::Blender;
     OpenMenu openMenu = OpenMenu::None;
     HierarchyPanelState hierarchyPanel;
     VisibilityState visibility;
     std::string error;
+    std::string notice;
+    bool quitRequested = false;
+    bool animationPanelCollapsed = false;
 
     auto openPathInNewTab = [&](const std::string& path)
     {
@@ -2114,12 +3378,14 @@ int main(int argc, char** argv)
         if (!LoadFbxModel(path, tab->loaded, loadError))
         {
             error = loadError;
+            notice.clear();
             std::cerr << error << "\n";
             return;
         }
 
         ApplyNeutralMaterial(tab->loaded);
         ApplyLitShader(tab->loaded, litShader);
+        EnsurePbrMaterialStates(*tab);
         tab->orbit = CreateDefaultCamera();
         FocusCameraOnBounds(tab->orbit, tab->loaded.bounds);
         tab->animation.clipIndex = -1;
@@ -2135,6 +3401,7 @@ int main(int argc, char** argv)
         tabs.push_back(std::move(tab));
         activeTab = static_cast<int>(tabs.size()) - 1;
         error.clear();
+        notice.clear();
     };
 
     for (int i = 1; i < argc; ++i)
@@ -2142,9 +3409,10 @@ int main(int argc, char** argv)
         openPathInNewTab(argv[i]);
     }
 
-    while (!WindowShouldClose())
+    while (!WindowShouldClose() && !quitRequested)
     {
-        bool openRequested = IsKeyPressed(KEY_O);
+        const bool controlDown = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
+        bool openRequested = controlDown && IsKeyPressed(KEY_O);
 
         if (openRequested)
         {
@@ -2166,10 +3434,25 @@ int main(int argc, char** argv)
         }
 
         ModelTab* active = activeTab >= 0 && activeTab < static_cast<int>(tabs.size()) ? tabs[static_cast<size_t>(activeTab)].get() : nullptr;
+        gBottomPanelReservedHeight = animationPanelCollapsed ? kTimelineCollapsedHeight : kTimelinePanelHeight;
         const Vector2 mouse = GetMousePosition();
         UpdateHierarchyPanelInteraction(hierarchyPanel, active);
         const float hierarchyBlockW = GetHierarchyPanelBlockWidth(hierarchyPanel);
-        const bool mouseInViewport = mouse.x > hierarchyBlockW && mouse.y >= 61.0f && mouse.y < static_cast<float>(GetScreenHeight()) - 124.0f && openMenu == OpenMenu::None && !hierarchyPanel.resizing;
+        const bool mouseInViewport = mouse.x > hierarchyBlockW && mouse.y >= 61.0f && mouse.y < static_cast<float>(GetScreenHeight()) - gBottomPanelReservedHeight && openMenu == OpenMenu::None && !hierarchyPanel.resizing;
+
+        if (controlDown && IsKeyPressed(KEY_Q))
+        {
+            quitRequested = true;
+            continue;
+        }
+        if (IsKeyPressed(KEY_ESCAPE))
+        {
+            openMenu = OpenMenu::None;
+            if (active)
+            {
+                active->selectedNode = -1;
+            }
+        }
 
         if (active && IsKeyPressed(KEY_F) && active->loaded.valid)
         {
@@ -2182,6 +3465,34 @@ int main(int argc, char** argv)
         if (IsKeyPressed(KEY_V))
         {
             viewMode = NextViewMode(viewMode);
+        }
+        if (IsKeyPressed(KEY_C))
+        {
+            materialPreviewMode = NextMaterialPreviewMode(materialPreviewMode);
+        }
+        if (IsKeyPressed(KEY_M))
+        {
+            materialPreviewMode = MaterialPreviewMode::Shaded;
+        }
+        if (IsKeyPressed(KEY_T))
+        {
+            visibility.textures = !visibility.textures;
+        }
+        if (IsKeyPressed(KEY_G))
+        {
+            visibility.geometry = !visibility.geometry;
+        }
+        if (IsKeyPressed(KEY_B))
+        {
+            visibility.bones = !visibility.bones;
+        }
+        if (!controlDown && IsKeyPressed(KEY_O))
+        {
+            visibility.boneRotations = !visibility.boneRotations;
+        }
+        if (IsKeyPressed(KEY_E))
+        {
+            visibility.empties = !visibility.empties;
         }
 
         if (active && mouseInViewport && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
@@ -2211,6 +3522,8 @@ int main(int argc, char** argv)
             ApplyAnimatedMeshFrame(*active);
             ApplyAnimatedBoneFrame(*active);
             UpdateLitShader(litShader, active->orbit);
+            EnsurePbrMaterialStates(*active);
+            UpdateMaterialShader(litShader, &GetSelectedPbrMaterial(*active), materialPreviewMode, visibility.textures);
         }
         else
         {
@@ -2223,20 +3536,24 @@ int main(int argc, char** argv)
                 UpdateOrbitCameraTransform(emptyOrbit);
             }
             UpdateLitShader(litShader, emptyOrbit);
+            UpdateMaterialShader(litShader, nullptr, MaterialPreviewMode::Shaded, false);
         }
 
         BeginDrawing();
         ClearBackground(Color{ 38, 40, 43, 255 });
 
-        BeginMode3D(active ? active->orbit.camera : emptyOrbit.camera);
-        DrawGrid(20, 1.0f);
+        const OrbitCamera& drawOrbit = active ? active->orbit : emptyOrbit;
+        BeginMode3D(drawOrbit.camera);
+        DrawMeterGrid(drawOrbit);
         if (active && active->loaded.valid)
         {
             if (active->loaded.hasMesh && visibility.geometry)
             {
                 if (viewMode == ViewMode::Shaded || viewMode == ViewMode::ShadedWireframe)
                 {
-                    DrawModel(active->loaded.model, Vector3{ 0.0f, 0.0f, 0.0f }, 1.0f, WHITE);
+                    BeginBlendMode(BLEND_ALPHA);
+                    DrawMaterialModel(*active, litShader, materialPreviewMode, visibility.textures);
+                    EndBlendMode();
                 }
 
                 if (viewMode == ViewMode::ShadedWireframe || viewMode == ViewMode::Wireframe)
@@ -2269,12 +3586,19 @@ int main(int argc, char** argv)
         EndMode3D();
 
         char statusText[256] = {};
-        std::snprintf(statusText, sizeof(statusText), "VIEW: %s    NAV: %s", GetViewModeName(viewMode), GetNavigationPresetName(navigation));
+        std::snprintf(statusText, sizeof(statusText), "VIEW: %s    MAT: %s    NAV: %s", GetViewModeName(viewMode), GetMaterialPreviewModeName(materialPreviewMode), GetNavigationPresetName(navigation));
         DrawUiText(uiFont, statusText, static_cast<float>(GetScreenWidth() - 360), 8, 16, Color{ 165, 220, 255, 255 });
 
         if (active)
         {
             DrawUiText(uiFont, active->path.c_str(), hierarchyBlockW + 12.0f, 66, 16, Color{ 190, 190, 190, 255 });
+            char channelText[128] = {};
+            std::snprintf(channelText, sizeof(channelText), "Material Channel: %s", GetMaterialPreviewModeName(materialPreviewMode));
+            const Vector2 channelSize = MeasureTextEx(uiFont, channelText, 16.0f, 1.0f);
+            const Rectangle channelBadge{ hierarchyBlockW + 12.0f, 90.0f, channelSize.x + 18.0f, 26.0f };
+            DrawRectangleRec(channelBadge, Color{ 24, 27, 31, 210 });
+            DrawRectangleLinesEx(channelBadge, 1.0f, Color{ 78, 88, 98, 220 });
+            DrawUiText(uiFont, channelText, channelBadge.x + 9.0f, channelBadge.y + 5.0f, 16.0f, Color{ 205, 224, 238, 255 });
         }
         else
         {
@@ -2285,29 +3609,45 @@ int main(int argc, char** argv)
         {
             DrawUiText(uiFont, error.c_str(), 12, static_cast<float>(GetScreenHeight() - 154), 18, Color{ 255, 140, 120, 255 });
         }
+        else if (!notice.empty())
+        {
+            DrawUiText(uiFont, notice.c_str(), 12, static_cast<float>(GetScreenHeight() - 154), 18, Color{ 150, 225, 170, 255 });
+        }
 
         DrawSelectedInfoPanel(uiFont, active);
 
         if (active)
         {
-            DrawTimeline(uiFont, active->loaded, active->animation);
+            DrawTimeline(uiFont, active->loaded, active->animation, animationPanelCollapsed);
         }
         else
         {
-            DrawRectangle(0, GetScreenHeight() - 124, GetScreenWidth(), 124, Color{ 20, 22, 24, 238 });
-            DrawLine(0, GetScreenHeight() - 124, GetScreenWidth(), GetScreenHeight() - 124, Color{ 76, 84, 92, 255 });
-            DrawUiText(uiFont, "ANIMATIONS", 12.0f, static_cast<float>(GetScreenHeight() - 114), 16.0f, Color{ 165, 182, 196, 255 });
-            DrawUiText(uiFont, "Open an FBX file to show animation stacks", 12.0f, static_cast<float>(GetScreenHeight() - 86), 16.0f, Color{ 128, 136, 144, 255 });
+            const float panelHeight = animationPanelCollapsed ? kTimelineCollapsedHeight : kTimelinePanelHeight;
+            const float panelY = static_cast<float>(GetScreenHeight()) - panelHeight;
+            const Rectangle toggleButton{ static_cast<float>(GetScreenWidth()) - 34.0f, panelY + 4.0f, 24.0f, 20.0f };
+            DrawRectangle(0, static_cast<int>(panelY), GetScreenWidth(), static_cast<int>(panelHeight), Color{ 20, 22, 24, 238 });
+            DrawLine(0, static_cast<int>(panelY), GetScreenWidth(), static_cast<int>(panelY), Color{ 76, 84, 92, 255 });
+            DrawUiText(uiFont, "ANIMATIONS", 12.0f, panelY + 7.0f, 16.0f, Color{ 165, 182, 196, 255 });
+            if (DrawPanelButton(uiFont, toggleButton, animationPanelCollapsed ? "^" : "v"))
+            {
+                animationPanelCollapsed = !animationPanelCollapsed;
+            }
+            if (!animationPanelCollapsed)
+            {
+                DrawUiText(uiFont, "Open an FBX file to show animation stacks", 12.0f, panelY + 38.0f, 16.0f, Color{ 128, 136, 144, 255 });
+            }
         }
+        gBottomPanelReservedHeight = animationPanelCollapsed ? kTimelineCollapsedHeight : kTimelinePanelHeight;
 
-        DrawHierarchyPanel(uiFont, active, hierarchyPanel);
+        DrawHierarchyPanel(uiFont, active, hierarchyPanel, notice, error);
         DrawOrientationGizmo(uiFont, active ? active->orbit.camera : emptyOrbit.camera);
 
         DrawTabs(uiFont, tabs, activeTab);
         active = activeTab >= 0 && activeTab < static_cast<int>(tabs.size()) ? tabs[static_cast<size_t>(activeTab)].get() : nullptr;
 
         bool menuOpenRequested = false;
-        DrawMenuBar(uiFont, openMenu, menuOpenRequested, viewMode, navigation, visibility);
+        bool exportJsonRequested = false;
+        DrawMenuBar(uiFont, openMenu, menuOpenRequested, exportJsonRequested, quitRequested, viewMode, navigation, visibility);
         EndDrawing();
 
         if (menuOpenRequested)
@@ -2318,10 +3658,35 @@ int main(int argc, char** argv)
                 openPathInNewTab(selectedPath);
             }
         }
+
+        if (exportJsonRequested)
+        {
+            if (!active || !active->loaded.valid)
+            {
+                error = "No active FBX to export.";
+                notice.clear();
+            }
+            else
+            {
+                std::string outputPath;
+                std::string exportError;
+                if (ExportFbxJson(*active, outputPath, exportError))
+                {
+                    notice = "Exported JSON: " + outputPath;
+                    error.clear();
+                }
+                else
+                {
+                    error = exportError;
+                    notice.clear();
+                }
+            }
+        }
     }
 
     for (std::unique_ptr<ModelTab>& tab : tabs)
     {
+        UnloadPbrTextures(*tab);
         UnloadFbxModel(tab->loaded);
     }
     if (litShader.valid)

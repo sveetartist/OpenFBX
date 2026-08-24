@@ -38,6 +38,9 @@ struct MeshBuilder
     std::vector<float> texcoords;
     std::vector<unsigned int> indices;
     std::vector<RenderVertexRef> renderVertices;
+    std::vector<int> vertexMaterialIndices;
+    std::vector<std::string> materialNames;
+    std::unordered_map<std::string, int> materialNameToIndex;
     std::vector<BoneSegment> bones;
     std::vector<BonePose> bonePoses;
     std::vector<SceneNode> nodes;
@@ -105,7 +108,7 @@ Vector3 ToVector3(const FbxVector4& v)
 
 Vector2 ToVector2(const FbxVector2& v)
 {
-    return Vector2{ static_cast<float>(v[0]), static_cast<float>(v[1]) };
+    return Vector2{ static_cast<float>(v[0]), 1.0f - static_cast<float>(v[1]) };
 }
 
 Vector3 NormalizeOrFallback(Vector3 n, Vector3 fallback)
@@ -204,6 +207,7 @@ void AddTriangle(MeshBuilder& out,
                  const Vector3 normals[3],
                  const Vector2 uvs[3],
                  const RenderVertexRef refs[3],
+                 int materialIndex,
                  bool hasNormals,
                  bool hasUvs)
 {
@@ -219,6 +223,7 @@ void AddTriangle(MeshBuilder& out,
 
         out.indices.push_back(index);
         out.renderVertices.push_back(refs[i]);
+        out.vertexMaterialIndices.push_back(materialIndex);
 
         out.vertices.push_back(points[i].x);
         out.vertices.push_back(points[i].y);
@@ -237,6 +242,50 @@ void AddTriangle(MeshBuilder& out,
             ExpandSceneNodeBounds(out, refs[i].node, points[i]);
         }
     }
+}
+
+int GetOrAddMaterialIndex(MeshBuilder& out, const std::string& name)
+{
+    const std::string materialName = name.empty() ? "Default" : name;
+    const auto found = out.materialNameToIndex.find(materialName);
+    if (found != out.materialNameToIndex.end()) return found->second;
+
+    const int index = static_cast<int>(out.materialNames.size());
+    out.materialNames.push_back(materialName);
+    out.materialNameToIndex[materialName] = index;
+    return index;
+}
+
+std::string GetNodeMaterialName(FbxNode* node, int localMaterialIndex)
+{
+    FbxSurfaceMaterial* material = node && localMaterialIndex >= 0 && localMaterialIndex < node->GetMaterialCount() ? node->GetMaterial(localMaterialIndex) : nullptr;
+    return material && material->GetName() && material->GetName()[0] ? material->GetName() : "Default";
+}
+
+int GetPolygonMaterialLocalIndex(FbxMesh* mesh, int polygon)
+{
+    if (!mesh || mesh->GetElementMaterialCount() <= 0) return 0;
+
+    FbxGeometryElementMaterial* materialElement = mesh->GetElementMaterial(0);
+    if (!materialElement) return 0;
+
+    if (materialElement->GetMappingMode() == FbxGeometryElement::eByPolygon)
+    {
+        if (materialElement->GetReferenceMode() == FbxGeometryElement::eIndexToDirect ||
+            materialElement->GetReferenceMode() == FbxGeometryElement::eIndex)
+        {
+            return polygon < materialElement->GetIndexArray().GetCount() ? materialElement->GetIndexArray().GetAt(polygon) : 0;
+        }
+        return 0;
+    }
+
+    if (materialElement->GetReferenceMode() == FbxGeometryElement::eIndexToDirect ||
+        materialElement->GetReferenceMode() == FbxGeometryElement::eIndex)
+    {
+        return materialElement->GetIndexArray().GetCount() > 0 ? materialElement->GetIndexArray().GetAt(0) : 0;
+    }
+
+    return 0;
 }
 
 FbxVector4 TransformVector(const FbxAMatrix& matrix, FbxVector4 vector);
@@ -267,6 +316,8 @@ void AppendMesh(FbxNode* node, FbxMesh* mesh, MeshBuilder& out)
         RenderVertexRef refs[3]{};
         bool triangleHasNormals = true;
         bool triangleHasUvs = uvSetName != nullptr;
+        const int localMaterialIndex = GetPolygonMaterialLocalIndex(mesh, polygon);
+        const int materialIndex = GetOrAddMaterialIndex(out, GetNodeMaterialName(node, localMaterialIndex));
 
         for (int vertex = 0; vertex < 3; ++vertex)
         {
@@ -302,7 +353,7 @@ void AppendMesh(FbxNode* node, FbxMesh* mesh, MeshBuilder& out)
             }
         }
 
-        AddTriangle(out, points, normals, uvs, refs, triangleHasNormals, triangleHasUvs);
+        AddTriangle(out, points, normals, uvs, refs, materialIndex, triangleHasNormals, triangleHasUvs);
     }
 
     const int meshVertexCount = out.VertexCount() - meshVertexStart;
@@ -897,6 +948,7 @@ bool BuildRaylibModel(const MeshBuilder& builder, LoadedFbxModel& outModel, std:
     outModel.animations = builder.animations;
     outModel.bindVertices = builder.vertices;
     outModel.bindNormals = builder.normals;
+    outModel.materialNames = builder.materialNames.empty() ? std::vector<std::string>{ "Default" } : builder.materialNames;
     outModel.bounds = builder.hasBounds ? builder.bounds : BoundingBox{ { -1.0f, -1.0f, -1.0f }, { 1.0f, 1.0f, 1.0f } };
     outModel.valid = true;
 
@@ -905,25 +957,79 @@ bool BuildRaylibModel(const MeshBuilder& builder, LoadedFbxModel& outModel, std:
         return true;
     }
 
-    Mesh mesh{};
-    mesh.vertexCount = builder.VertexCount();
-    mesh.triangleCount = mesh.vertexCount / 3;
-    mesh.vertices = CopyToRaylibBuffer(builder.vertices);
-    mesh.normals = CopyToRaylibBuffer(builder.normals);
-    mesh.texcoords = CopyToRaylibBuffer(builder.texcoords);
-
-    if (!mesh.vertices || !mesh.normals || !mesh.texcoords)
+    std::vector<std::vector<int>> verticesByMaterial(outModel.materialNames.size());
+    for (int vertex = 0; vertex < builder.VertexCount(); ++vertex)
     {
-        if (mesh.vertices) MemFree(mesh.vertices);
-        if (mesh.normals) MemFree(mesh.normals);
-        if (mesh.texcoords) MemFree(mesh.texcoords);
-        error = "Failed to allocate raylib mesh buffers.";
-        return false;
+        int materialIndex = vertex < static_cast<int>(builder.vertexMaterialIndices.size()) ? builder.vertexMaterialIndices[static_cast<size_t>(vertex)] : 0;
+        materialIndex = std::max(0, std::min(materialIndex, static_cast<int>(verticesByMaterial.size()) - 1));
+        verticesByMaterial[static_cast<size_t>(materialIndex)].push_back(vertex);
     }
 
-    UploadMesh(&mesh, true);
+    std::vector<Mesh> meshes;
+    std::vector<int> meshMaterials;
+    for (int materialIndex = 0; materialIndex < static_cast<int>(verticesByMaterial.size()); ++materialIndex)
+    {
+        const std::vector<int>& globalIndices = verticesByMaterial[static_cast<size_t>(materialIndex)];
+        if (globalIndices.empty()) continue;
 
-    outModel.model = LoadModelFromMesh(mesh);
+        std::vector<float> vertices;
+        std::vector<float> normals;
+        std::vector<float> texcoords;
+        vertices.reserve(globalIndices.size() * 3);
+        normals.reserve(globalIndices.size() * 3);
+        texcoords.reserve(globalIndices.size() * 2);
+
+        for (int globalVertex : globalIndices)
+        {
+            const int vertexIndex = globalVertex * 3;
+            const int texcoordIndex = globalVertex * 2;
+            vertices.push_back(builder.vertices[static_cast<size_t>(vertexIndex)]);
+            vertices.push_back(builder.vertices[static_cast<size_t>(vertexIndex + 1)]);
+            vertices.push_back(builder.vertices[static_cast<size_t>(vertexIndex + 2)]);
+            normals.push_back(builder.normals[static_cast<size_t>(vertexIndex)]);
+            normals.push_back(builder.normals[static_cast<size_t>(vertexIndex + 1)]);
+            normals.push_back(builder.normals[static_cast<size_t>(vertexIndex + 2)]);
+            texcoords.push_back(builder.texcoords[static_cast<size_t>(texcoordIndex)]);
+            texcoords.push_back(builder.texcoords[static_cast<size_t>(texcoordIndex + 1)]);
+        }
+
+        Mesh mesh{};
+        mesh.vertexCount = static_cast<int>(globalIndices.size());
+        mesh.triangleCount = mesh.vertexCount / 3;
+        mesh.vertices = CopyToRaylibBuffer(vertices);
+        mesh.normals = CopyToRaylibBuffer(normals);
+        mesh.texcoords = CopyToRaylibBuffer(texcoords);
+
+        if (!mesh.vertices || !mesh.normals || !mesh.texcoords)
+        {
+            if (mesh.vertices) MemFree(mesh.vertices);
+            if (mesh.normals) MemFree(mesh.normals);
+            if (mesh.texcoords) MemFree(mesh.texcoords);
+            error = "Failed to allocate raylib mesh buffers.";
+            return false;
+        }
+
+        UploadMesh(&mesh, true);
+        meshes.push_back(mesh);
+        meshMaterials.push_back(materialIndex);
+        outModel.meshGlobalVertexIndices.push_back(globalIndices);
+    }
+
+    outModel.model.transform = MatrixIdentity();
+    outModel.model.meshCount = static_cast<int>(meshes.size());
+    outModel.model.materialCount = static_cast<int>(outModel.materialNames.size());
+    outModel.model.meshes = CopyToRaylibBuffer(meshes);
+    outModel.model.materials = static_cast<Material*>(MemAlloc(static_cast<unsigned int>(sizeof(Material) * outModel.model.materialCount)));
+    outModel.model.meshMaterial = CopyToRaylibBuffer(meshMaterials);
+    if (!outModel.model.meshes || !outModel.model.materials || !outModel.model.meshMaterial)
+    {
+        error = "Failed to allocate raylib model.";
+        return false;
+    }
+    for (int i = 0; i < outModel.model.materialCount; ++i)
+    {
+        outModel.model.materials[i] = LoadMaterialDefault();
+    }
     outModel.hasMesh = true;
     return true;
 }
