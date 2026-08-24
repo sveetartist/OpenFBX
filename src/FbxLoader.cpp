@@ -100,6 +100,19 @@ Vector3 NormalizeOrFallback(Vector3 n, Vector3 fallback)
     return fallback;
 }
 
+void SetSceneNodeTransform(SceneNode& sceneNode, const FbxAMatrix& transform)
+{
+    const FbxVector4 origin = transform.MultT(FbxVector4(0.0, 0.0, 0.0, 1.0));
+    const FbxVector4 rotation = transform.GetR();
+    const FbxVector4 scale = transform.GetS();
+    sceneNode.position = ToVector3(origin);
+    sceneNode.axisX = NormalizeOrFallback(ToVector3(transform.MultT(FbxVector4(1.0, 0.0, 0.0, 1.0)) - origin), Vector3{ 1.0f, 0.0f, 0.0f });
+    sceneNode.axisY = NormalizeOrFallback(ToVector3(transform.MultT(FbxVector4(0.0, 1.0, 0.0, 1.0)) - origin), Vector3{ 0.0f, 1.0f, 0.0f });
+    sceneNode.axisZ = NormalizeOrFallback(ToVector3(transform.MultT(FbxVector4(0.0, 0.0, 1.0, 1.0)) - origin), Vector3{ 0.0f, 0.0f, 1.0f });
+    sceneNode.rotation = ToVector3(rotation);
+    sceneNode.scale = ToVector3(scale);
+}
+
 FbxAMatrix GetNodeGeometryTransform(const FbxNode* node)
 {
     FbxAMatrix geometry;
@@ -137,7 +150,7 @@ int AddSceneNode(FbxNode* node, int parentIndex, int depth, MeshBuilder& out)
     sceneNode.parent = parentIndex;
     sceneNode.depth = depth;
     sceneNode.type = GetSceneNodeType(node);
-    sceneNode.position = ToVector3(node->EvaluateGlobalTransform().GetT());
+    SetSceneNodeTransform(sceneNode, node->EvaluateGlobalTransform());
 
     const int index = static_cast<int>(out.nodes.size());
     out.nodes.push_back(sceneNode);
@@ -198,6 +211,7 @@ void AppendMesh(FbxNode* node, FbxMesh* mesh, MeshBuilder& out)
 {
     const int polygonCount = mesh->GetPolygonCount();
     if (polygonCount <= 0) return;
+    const int meshVertexStart = out.VertexCount();
 
     FbxStringList uvSetNames;
     mesh->GetUVSetNames(uvSetNames);
@@ -256,13 +270,30 @@ void AppendMesh(FbxNode* node, FbxMesh* mesh, MeshBuilder& out)
 
         AddTriangle(out, points, normals, uvs, refs, triangleHasNormals, triangleHasUvs);
     }
-}
 
-void AddBoundsFromMeshFrame(const MeshFrame& frame, MeshBuilder& out)
-{
-    for (size_t i = 0; i + 2 < frame.vertices.size(); i += 3)
+    const int meshVertexCount = out.VertexCount() - meshVertexStart;
+    const auto foundNode = out.nodeToIndex.find(node);
+    if (meshVertexCount > 0 && foundNode != out.nodeToIndex.end())
     {
-        out.AddBounds(Vector3{ frame.vertices[i], frame.vertices[i + 1], frame.vertices[i + 2] });
+        SceneNode& sceneNode = out.nodes[static_cast<size_t>(foundNode->second)];
+        if (sceneNode.meshVertexStart < 0)
+        {
+            sceneNode.meshVertexStart = meshVertexStart;
+        }
+        sceneNode.meshVertexCount += meshVertexCount;
+        sceneNode.meshTriangleCount += meshVertexCount / 3;
+
+        if (sceneNode.materialName.empty())
+        {
+            FbxSurfaceMaterial* material = node->GetMaterialCount() > 0 ? node->GetMaterial(0) : nullptr;
+            sceneNode.materialName = material && material->GetName() && material->GetName()[0] ? material->GetName() : "None";
+            if (node->GetMaterialCount() > 1)
+            {
+                sceneNode.materialName += " (+";
+                sceneNode.materialName += std::to_string(node->GetMaterialCount() - 1);
+                sceneNode.materialName += ")";
+            }
+        }
     }
 }
 
@@ -409,7 +440,14 @@ MeshFrame SampleMeshFrame(const MeshBuilder& builder, const FbxTime& time)
     frame.vertices.reserve(builder.vertices.size());
     frame.normals.reserve(builder.normals.size());
 
-    std::unordered_map<FbxMesh*, std::vector<FbxVector4>> deformedByMesh;
+    struct MeshSampleCache
+    {
+        std::vector<FbxVector4> localPoints;
+        FbxAMatrix meshTransform;
+        FbxAMatrix normalTransform;
+    };
+
+    std::unordered_map<FbxNode*, MeshSampleCache> sampleByNode;
 
     for (const RenderVertexRef& ref : builder.renderVertices)
     {
@@ -421,13 +459,18 @@ MeshFrame SampleMeshFrame(const MeshBuilder& builder, const FbxTime& time)
             continue;
         }
 
-        auto found = deformedByMesh.find(ref.mesh);
-        if (found == deformedByMesh.end())
+        auto found = sampleByNode.find(ref.node);
+        if (found == sampleByNode.end())
         {
-            found = deformedByMesh.emplace(ref.mesh, DeformControlPointsLocal(ref.node, ref.mesh, time)).first;
+            MeshSampleCache cache;
+            cache.localPoints = DeformControlPointsLocal(ref.node, ref.mesh, time);
+            cache.meshTransform = ref.node->EvaluateGlobalTransform(time) * GetNodeGeometryTransform(ref.node);
+            cache.normalTransform = cache.meshTransform.Inverse().Transpose();
+            found = sampleByNode.emplace(ref.node, std::move(cache)).first;
         }
 
-        const std::vector<FbxVector4>& localPoints = found->second;
+        const MeshSampleCache& cache = found->second;
+        const std::vector<FbxVector4>& localPoints = cache.localPoints;
         if (ref.controlPointIndex < 0 || ref.controlPointIndex >= static_cast<int>(localPoints.size()))
         {
             frame.vertices.push_back(0.0f);
@@ -436,9 +479,7 @@ MeshFrame SampleMeshFrame(const MeshBuilder& builder, const FbxTime& time)
             continue;
         }
 
-        const FbxAMatrix meshTransform = ref.node->EvaluateGlobalTransform(time) * GetNodeGeometryTransform(ref.node);
-        const FbxAMatrix normalTransform = meshTransform.Inverse().Transpose();
-        const Vector3 point = ToVector3(meshTransform.MultT(localPoints[static_cast<size_t>(ref.controlPointIndex)]));
+        const Vector3 point = ToVector3(cache.meshTransform.MultT(localPoints[static_cast<size_t>(ref.controlPointIndex)]));
         frame.vertices.push_back(point.x);
         frame.vertices.push_back(point.y);
         frame.vertices.push_back(point.z);
@@ -447,7 +488,7 @@ MeshFrame SampleMeshFrame(const MeshBuilder& builder, const FbxTime& time)
         {
             FbxVector4 normal = ref.localNormal;
             normal[3] = 0.0;
-            const Vector3 sampledNormal = NormalizeOrFallback(ToVector3(normalTransform.MultT(normal)), Vector3{ 0.0f, 1.0f, 0.0f });
+            const Vector3 sampledNormal = NormalizeOrFallback(ToVector3(cache.normalTransform.MultT(normal)), Vector3{ 0.0f, 1.0f, 0.0f });
             frame.normals.push_back(sampledNormal.x);
             frame.normals.push_back(sampledNormal.y);
             frame.normals.push_back(sampledNormal.z);
@@ -566,7 +607,7 @@ void RebuildBindSkeleton(FbxNode* node, MeshBuilder& out, const std::unordered_m
         const auto nodeIndex = out.nodeToIndex.find(node);
         if (nodeIndex != out.nodeToIndex.end())
         {
-            out.nodes[static_cast<size_t>(nodeIndex->second)].position = ToVector3(GetBindOrEvaluatedGlobal(node, bindMatrices).GetT());
+            SetSceneNodeTransform(out.nodes[static_cast<size_t>(nodeIndex->second)], GetBindOrEvaluatedGlobal(node, bindMatrices));
         }
 
         FbxNode* parent = node->GetParent();
@@ -635,8 +676,8 @@ void SampleAnimations(FbxScene* scene, MeshBuilder& out)
     FbxArray<FbxString*> stackNames;
     scene->FillAnimStackNameArray(stackNames);
 
-    constexpr double kSampleRate = 30.0;
-    constexpr int kMaxFramesPerClip = 900;
+    constexpr double kSampleRate = 15.0;
+    constexpr int kMaxFramesPerClip = 240;
 
     for (int stackIndex = 0; stackIndex < stackNames.GetCount(); ++stackIndex)
     {
@@ -669,6 +710,7 @@ void SampleAnimations(FbxScene* scene, MeshBuilder& out)
 
         const int frameCount = std::max(2, std::min(kMaxFramesPerClip, static_cast<int>(std::ceil(duration * kSampleRate)) + 1));
         clip.frames.reserve(static_cast<size_t>(frameCount));
+        clip.meshFrames.reserve(static_cast<size_t>(frameCount));
 
         for (int frameIndex = 0; frameIndex < frameCount; ++frameIndex)
         {
@@ -680,10 +722,6 @@ void SampleAnimations(FbxScene* scene, MeshBuilder& out)
         }
 
         AddAnimationBounds(clip, out);
-        for (const MeshFrame& meshFrame : clip.meshFrames)
-        {
-            AddBoundsFromMeshFrame(meshFrame, out);
-        }
         out.animations.push_back(std::move(clip));
     }
 

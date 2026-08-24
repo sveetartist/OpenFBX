@@ -39,8 +39,17 @@ struct SceneNode
     int depth = 0;
     SceneNodeType type = SceneNodeType::Empty;
     Vector3 position{};
+    Vector3 axisX{ 1.0f, 0.0f, 0.0f };
+    Vector3 axisY{ 0.0f, 1.0f, 0.0f };
+    Vector3 axisZ{ 0.0f, 0.0f, 1.0f };
+    Vector3 rotation{};
+    Vector3 scale{ 1.0f, 1.0f, 1.0f };
     BoundingBox bounds{};
     bool hasBounds = false;
+    int meshVertexStart = -1;
+    int meshVertexCount = 0;
+    int meshTriangleCount = 0;
+    std::string materialName;
 };
 
 struct AnimationClip

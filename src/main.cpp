@@ -110,6 +110,21 @@ struct ModelTab
     std::string title;
 };
 
+struct HierarchyPanelState
+{
+    float width = 320.0f;
+    float scroll = 0.0f;
+    bool hidden = false;
+    bool resizing = false;
+};
+
+struct VisibilityState
+{
+    bool geometry = true;
+    bool bones = true;
+    bool empties = true;
+};
+
 struct LitShader
 {
     Shader shader{};
@@ -159,6 +174,14 @@ void FocusCameraOnBounds(OrbitCamera& orbit, const BoundingBox& bounds)
 {
     orbit.target = Vector3Scale(Vector3Add(bounds.min, bounds.max), 0.5f);
     orbit.focusDistance = GetFocusDistanceForBounds(bounds);
+    orbit.distance = orbit.focusDistance;
+    UpdateOrbitCameraTransform(orbit);
+}
+
+void FocusCameraOnPoint(OrbitCamera& orbit, Vector3 point, float sceneScale)
+{
+    orbit.target = point;
+    orbit.focusDistance = std::max(0.25f, sceneScale * 0.18f);
     orbit.distance = orbit.focusDistance;
     UpdateOrbitCameraTransform(orbit);
 }
@@ -524,7 +547,7 @@ void DrawMayaBone(Vector3 start, Vector3 end, float radius, Color color)
     DrawLine3D(points[3], points[0], color);
 }
 
-void DrawBones(const std::vector<BoneSegment>& bones, const Camera3D& camera)
+void DrawBones(const std::vector<BoneSegment>& bones, const Camera3D& camera, int selectedNode)
 {
     float radius = 0.035f;
     if (!bones.empty())
@@ -539,13 +562,78 @@ void DrawBones(const std::vector<BoneSegment>& bones, const Camera3D& camera)
 
     for (const BoneSegment& bone : bones)
     {
-        DrawMayaBone(bone.start, bone.end, radius, Color{ 255, 205, 64, 255 });
+        const bool selected = bone.endNode == selectedNode;
+        DrawMayaBone(bone.start, bone.end, radius, selected ? Color{ 255, 214, 80, 255 } : Color{ 100, 185, 255, 255 });
     }
 
     for (const BoneSegment& bone : bones)
     {
-        DrawJointBillboard(camera, bone.start, radius, Color{ 255, 232, 126, 255 });
-        DrawJointBillboard(camera, bone.end, radius, Color{ 255, 232, 126, 255 });
+        DrawJointBillboard(camera, bone.start, radius, Color{ 142, 210, 255, 255 });
+        DrawJointBillboard(camera, bone.end, radius, bone.endNode == selectedNode ? Color{ 255, 214, 80, 255 } : Color{ 142, 210, 255, 255 });
+    }
+}
+
+float GetBoundsDiagonal(const BoundingBox& bounds)
+{
+    return Vector3Length(Vector3Subtract(bounds.max, bounds.min));
+}
+
+void DrawAxisLine(Vector3 origin, Vector3 axis, float length, Color color)
+{
+    const Vector3 end = Vector3Add(origin, Vector3Scale(axis, length));
+    DrawLine3D(origin, end, color);
+    DrawSphere(end, length * 0.045f, color);
+}
+
+void DrawNodeAxes(const SceneNode& node, float length, unsigned char alpha)
+{
+    DrawAxisLine(node.position, node.axisX, length, Color{ 235, 74, 74, alpha });
+    DrawAxisLine(node.position, node.axisY, length, Color{ 92, 210, 94, alpha });
+    DrawAxisLine(node.position, node.axisZ, length, Color{ 86, 142, 255, alpha });
+}
+
+void DrawEmptyCross(const SceneNode& node, float length, Color color)
+{
+    DrawLine3D(Vector3Subtract(node.position, Vector3Scale(node.axisX, length)), Vector3Add(node.position, Vector3Scale(node.axisX, length)), color);
+    DrawLine3D(Vector3Subtract(node.position, Vector3Scale(node.axisY, length)), Vector3Add(node.position, Vector3Scale(node.axisY, length)), color);
+    DrawLine3D(Vector3Subtract(node.position, Vector3Scale(node.axisZ, length)), Vector3Add(node.position, Vector3Scale(node.axisZ, length)), color);
+}
+
+void DrawEmptyCrosses(const ModelTab& tab)
+{
+    const float length = ClampFloat(GetBoundsDiagonal(tab.loaded.bounds) * 0.035f, 0.06f, 0.6f);
+    for (int i = 0; i < static_cast<int>(tab.loaded.nodes.size()); ++i)
+    {
+        const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(i)];
+        if (node.type != SceneNodeType::Empty || node.parent < 0) continue;
+        DrawEmptyCross(node, length, i == tab.selectedNode ? Color{ 255, 214, 80, 255 } : Color{ 100, 185, 255, 230 });
+    }
+}
+
+const float* GetCurrentMeshVertices(const ModelTab& tab)
+{
+    if (!tab.loaded.hasMesh || tab.loaded.model.meshCount <= 0) return nullptr;
+    return tab.loaded.model.meshes[0].vertices;
+}
+
+void DrawMeshNodeWireframe(const ModelTab& tab, const SceneNode& node, Color color)
+{
+    const float* vertices = GetCurrentMeshVertices(tab);
+    if (!vertices || node.meshVertexStart < 0 || node.meshVertexCount < 3) return;
+
+    const int start = node.meshVertexStart;
+    const int end = node.meshVertexStart + node.meshVertexCount;
+    for (int vertex = start; vertex + 2 < end; vertex += 3)
+    {
+        const int i0 = vertex * 3;
+        const int i1 = (vertex + 1) * 3;
+        const int i2 = (vertex + 2) * 3;
+        const Vector3 p0{ vertices[i0], vertices[i0 + 1], vertices[i0 + 2] };
+        const Vector3 p1{ vertices[i1], vertices[i1 + 1], vertices[i1 + 2] };
+        const Vector3 p2{ vertices[i2], vertices[i2 + 1], vertices[i2 + 2] };
+        DrawLine3D(p0, p1, color);
+        DrawLine3D(p1, p2, color);
+        DrawLine3D(p2, p0, color);
     }
 }
 
@@ -556,42 +644,62 @@ float DistancePointToRay(Vector3 point, Ray ray)
     return Vector3Length(Vector3Subtract(toPoint, projected));
 }
 
-float DistanceSegmentToRay(Vector3 a, Vector3 b, Ray ray)
+float DistancePointToScreenSegment(Vector2 point, Vector2 a, Vector2 b)
 {
-    constexpr int kSteps = 12;
-    float best = std::numeric_limits<float>::max();
-    for (int i = 0; i <= kSteps; ++i)
+    const Vector2 ab = Vector2Subtract(b, a);
+    const float lengthSq = Vector2DotProduct(ab, ab);
+    if (lengthSq <= 0.0001f)
     {
-        const float t = static_cast<float>(i) / static_cast<float>(kSteps);
-        const Vector3 point = Vector3Lerp(a, b, t);
-        best = std::min(best, DistancePointToRay(point, ray));
+        return Vector2Distance(point, a);
     }
-    return best;
+
+    const float t = ClampFloat(Vector2DotProduct(Vector2Subtract(point, a), ab) / lengthSq, 0.0f, 1.0f);
+    const Vector2 closest = Vector2Add(a, Vector2Scale(ab, t));
+    return Vector2Distance(point, closest);
 }
 
-void SelectNodeFromViewport(ModelTab& tab, Vector2 mouse)
+bool SelectNodeFromViewport(ModelTab& tab, Vector2 mouse, const VisibilityState& visibility)
 {
-    if (!tab.loaded.valid || tab.loaded.nodes.empty()) return;
+    if (!tab.loaded.valid || tab.loaded.nodes.empty()) return false;
 
     const Ray ray = GetScreenToWorldRay(mouse, tab.orbit.camera);
     int bestNode = -1;
     float bestDistance = std::numeric_limits<float>::max();
-    const float bonePickRadius = std::max(0.04f, tab.orbit.distance * 0.012f);
+    int bestBoneNode = -1;
+    float bestBoneScreenDistance = std::numeric_limits<float>::max();
+    float bestBoneDepth = std::numeric_limits<float>::max();
+    constexpr float bonePickRadiusPixels = 18.0f;
 
-    for (const BoneSegment& bone : GetVisibleBones(tab.loaded, tab.animation))
+    if (visibility.bones)
     {
-        const float distance = DistanceSegmentToRay(bone.start, bone.end, ray);
-        if (distance < bonePickRadius)
+        for (const BoneSegment& bone : GetVisibleBones(tab.loaded, tab.animation))
         {
             const float startDepth = Vector3DotProduct(Vector3Subtract(bone.start, ray.position), ray.direction);
             const float endDepth = Vector3DotProduct(Vector3Subtract(bone.end, ray.position), ray.direction);
-            const float depth = std::max(0.0f, std::min(startDepth, endDepth));
-            if (depth < bestDistance)
+            if (startDepth <= 0.0f && endDepth <= 0.0f) continue;
+
+            const Vector2 startScreen = GetWorldToScreen(bone.start, tab.orbit.camera);
+            const Vector2 endScreen = GetWorldToScreen(bone.end, tab.orbit.camera);
+            const float screenDistance = DistancePointToScreenSegment(mouse, startScreen, endScreen);
+            if (screenDistance <= bonePickRadiusPixels)
             {
-                bestDistance = depth;
-                bestNode = bone.endNode >= 0 ? bone.endNode : bone.startNode;
+                const float depth = std::max(0.0f, std::min(startDepth, endDepth));
+                const bool closerOnScreen = screenDistance < bestBoneScreenDistance - 1.0f;
+                const bool sameScreenDistanceButCloser = std::fabs(screenDistance - bestBoneScreenDistance) <= 1.0f && depth < bestBoneDepth;
+                if (closerOnScreen || sameScreenDistanceButCloser)
+                {
+                    bestBoneScreenDistance = screenDistance;
+                    bestBoneDepth = depth;
+                    bestBoneNode = bone.endNode >= 0 ? bone.endNode : bone.startNode;
+                }
             }
         }
+    }
+
+    if (bestBoneNode >= 0)
+    {
+        tab.selectedNode = bestBoneNode;
+        return true;
     }
 
     for (int i = 0; i < static_cast<int>(tab.loaded.nodes.size()); ++i)
@@ -600,6 +708,7 @@ void SelectNodeFromViewport(ModelTab& tab, Vector2 mouse)
 
         if (node.type == SceneNodeType::Mesh && node.hasBounds)
         {
+            if (!visibility.geometry) continue;
             const RayCollision hit = GetRayCollisionBox(ray, node.bounds);
             if (hit.hit && hit.distance < bestDistance)
             {
@@ -609,6 +718,11 @@ void SelectNodeFromViewport(ModelTab& tab, Vector2 mouse)
         }
         else
         {
+            if ((node.type == SceneNodeType::Bone && !visibility.bones) ||
+                (node.type == SceneNodeType::Empty && !visibility.empties))
+            {
+                continue;
+            }
             const float handleRadius = std::max(0.03f, tab.orbit.distance * 0.015f);
             const float distance = DistancePointToRay(node.position, ray);
             if (distance < handleRadius)
@@ -626,25 +740,82 @@ void SelectNodeFromViewport(ModelTab& tab, Vector2 mouse)
     if (bestNode >= 0)
     {
         tab.selectedNode = bestNode;
+        return true;
     }
+
+    return false;
 }
 
-void DrawSelectedNodeOverlay(const ModelTab& tab)
+bool GetSelectedNodePosition(const ModelTab& tab, Vector3& outPosition)
 {
-    if (tab.selectedNode < 0 || tab.selectedNode >= static_cast<int>(tab.loaded.nodes.size())) return;
+    if (tab.selectedNode < 0 || tab.selectedNode >= static_cast<int>(tab.loaded.nodes.size())) return false;
+
+    const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(tab.selectedNode)];
+    if (node.type == SceneNodeType::Bone)
+    {
+        for (const BoneSegment& bone : GetVisibleBones(tab.loaded, tab.animation))
+        {
+            if (bone.endNode == tab.selectedNode)
+            {
+                outPosition = bone.end;
+                return true;
+            }
+            if (bone.startNode == tab.selectedNode)
+            {
+                outPosition = bone.start;
+                return true;
+            }
+        }
+    }
+
+    outPosition = node.hasBounds ? Vector3Scale(Vector3Add(node.bounds.min, node.bounds.max), 0.5f) : node.position;
+    return true;
+}
+
+bool FocusCameraOnSelection(ModelTab& tab)
+{
+    if (tab.selectedNode < 0 || tab.selectedNode >= static_cast<int>(tab.loaded.nodes.size())) return false;
 
     const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(tab.selectedNode)];
     if (node.type == SceneNodeType::Mesh && node.hasBounds)
     {
-        DrawBoundingBox(node.bounds, Color{ 100, 185, 255, 255 });
+        FocusCameraOnBounds(tab.orbit, node.bounds);
+        return true;
+    }
+
+    Vector3 position{};
+    if (!GetSelectedNodePosition(tab, position)) return false;
+
+    FocusCameraOnPoint(tab.orbit, position, GetBoundsDiagonal(tab.loaded.bounds));
+    return true;
+}
+
+void DrawSelectedNodeOverlay(const ModelTab& tab, const VisibilityState& visibility)
+{
+    if (tab.selectedNode < 0 || tab.selectedNode >= static_cast<int>(tab.loaded.nodes.size())) return;
+
+    const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(tab.selectedNode)];
+    const float selectedAxisLength = ClampFloat(GetBoundsDiagonal(tab.loaded.bounds) * 0.12f, 0.16f, tab.orbit.distance * 0.35f);
+    if (node.type == SceneNodeType::Mesh && node.hasBounds)
+    {
+        if (!visibility.geometry) return;
+        DrawMeshNodeWireframe(tab, node, Color{ 100, 185, 255, 255 });
+        DrawNodeAxes(node, selectedAxisLength, 255);
         return;
     }
 
-    const float radius = std::max(0.04f, tab.orbit.distance * 0.012f);
-    DrawJointBillboard(tab.orbit.camera, node.position, radius * 1.8f, Color{ 100, 185, 255, 255 });
-    DrawLine3D(Vector3Subtract(node.position, Vector3{ radius, 0.0f, 0.0f }), Vector3Add(node.position, Vector3{ radius, 0.0f, 0.0f }), Color{ 100, 185, 255, 255 });
-    DrawLine3D(Vector3Subtract(node.position, Vector3{ 0.0f, radius, 0.0f }), Vector3Add(node.position, Vector3{ 0.0f, radius, 0.0f }), Color{ 100, 185, 255, 255 });
-    DrawLine3D(Vector3Subtract(node.position, Vector3{ 0.0f, 0.0f, radius }), Vector3Add(node.position, Vector3{ 0.0f, 0.0f, radius }), Color{ 100, 185, 255, 255 });
+    if (node.type == SceneNodeType::Bone)
+    {
+        if (!visibility.bones) return;
+        return;
+    }
+
+    if (node.type == SceneNodeType::Empty)
+    {
+        if (!visibility.empties) return;
+        const float length = ClampFloat(GetBoundsDiagonal(tab.loaded.bounds) * 0.055f, 0.08f, 0.8f);
+        DrawEmptyCross(node, length, Color{ 255, 214, 80, 255 });
+    }
 }
 
 Font LoadTechnicalFont()
@@ -697,6 +868,43 @@ void DrawUiTextClipped(Font font, const char* text, float x, float y, float size
             DrawUiText(font, candidate.c_str(), x, y, size, color);
             return;
         }
+    }
+}
+
+void DrawOrientationGizmo(Font font, const Camera3D& camera)
+{
+    const Vector2 center{ static_cast<float>(GetScreenWidth()) - 70.0f, 96.0f };
+    constexpr float axisLength = 38.0f;
+    const Vector3 forward = Vector3Normalize(Vector3Subtract(camera.target, camera.position));
+    Vector3 right = Vector3CrossProduct(forward, camera.up);
+    if (Vector3Length(right) < 0.0001f) right = Vector3{ 1.0f, 0.0f, 0.0f };
+    right = Vector3Normalize(right);
+    const Vector3 up = Vector3Normalize(Vector3CrossProduct(right, forward));
+
+    struct GizmoAxis
+    {
+        Vector3 world;
+        const char* label;
+        Color color;
+    };
+
+    const GizmoAxis axes[] = {
+        { Vector3{ 1.0f, 0.0f, 0.0f }, "X", Color{ 235, 74, 74, 255 } },
+        { Vector3{ 0.0f, 1.0f, 0.0f }, "Y", Color{ 92, 210, 94, 255 } },
+        { Vector3{ 0.0f, 0.0f, 1.0f }, "Z", Color{ 86, 142, 255, 255 } }
+    };
+
+    DrawCircleV(center, 4.0f, Color{ 220, 226, 232, 255 });
+    for (const GizmoAxis& axis : axes)
+    {
+        const Vector2 dir{
+            Vector3DotProduct(axis.world, right),
+            -Vector3DotProduct(axis.world, up)
+        };
+        const Vector2 end{ center.x + dir.x * axisLength, center.y + dir.y * axisLength };
+        DrawLineEx(center, end, 2.0f, axis.color);
+        DrawCircleV(end, 5.0f, axis.color);
+        DrawUiText(font, axis.label, end.x + 7.0f, end.y - 8.0f, 14.0f, axis.color);
     }
 }
 
@@ -782,10 +990,56 @@ const char* GetSceneNodeIcon(SceneNodeType type)
     return "[?]";
 }
 
+const char* GetSceneNodeTypeName(SceneNodeType type)
+{
+    switch (type)
+    {
+    case SceneNodeType::Mesh: return "Mesh";
+    case SceneNodeType::Bone: return "Bone";
+    case SceneNodeType::Empty: return "Empty";
+    }
+
+    return "Node";
+}
+
 std::string MakeTabTitle(const std::string& path)
 {
     const char* fileName = GetFileName(path.c_str());
     return fileName && fileName[0] ? fileName : path;
+}
+
+void DrawSelectedInfoPanel(Font font, const ModelTab* active)
+{
+    if (!active || active->selectedNode < 0 || active->selectedNode >= static_cast<int>(active->loaded.nodes.size())) return;
+
+    const SceneNode& node = active->loaded.nodes[static_cast<size_t>(active->selectedNode)];
+    constexpr float panelW = 330.0f;
+    constexpr float panelH = 154.0f;
+    const float panelX = static_cast<float>(GetScreenWidth()) - panelW - 12.0f;
+    const float panelY = static_cast<float>(GetScreenHeight()) - 124.0f - panelH - 12.0f;
+
+    DrawRectangleRec(Rectangle{ panelX, panelY, panelW, panelH }, Color{ 18, 20, 23, 225 });
+    DrawRectangleLinesEx(Rectangle{ panelX, panelY, panelW, panelH }, 1.0f, Color{ 70, 78, 88, 255 });
+
+    DrawUiText(font, "SELECTION", panelX + 12.0f, panelY + 10.0f, 15.0f, Color{ 165, 182, 196, 255 });
+    DrawUiTextClipped(font, node.name.c_str(), panelX + 100.0f, panelY + 10.0f, 15.0f, panelW - 112.0f, RAYWHITE);
+
+    char line[256] = {};
+    std::snprintf(line, sizeof(line), "Type: %s", GetSceneNodeTypeName(node.type));
+    DrawUiText(font, line, panelX + 12.0f, panelY + 36.0f, 14.0f, Color{ 205, 213, 220, 255 });
+
+    std::snprintf(line, sizeof(line), "Pos:  %.3f  %.3f  %.3f", node.position.x, node.position.y, node.position.z);
+    DrawUiText(font, line, panelX + 12.0f, panelY + 58.0f, 14.0f, Color{ 205, 213, 220, 255 });
+
+    std::snprintf(line, sizeof(line), "Rot:  %.2f  %.2f  %.2f", node.rotation.x, node.rotation.y, node.rotation.z);
+    DrawUiText(font, line, panelX + 12.0f, panelY + 80.0f, 14.0f, Color{ 205, 213, 220, 255 });
+
+    std::snprintf(line, sizeof(line), "Scale: %.3f  %.3f  %.3f", node.scale.x, node.scale.y, node.scale.z);
+    DrawUiText(font, line, panelX + 12.0f, panelY + 102.0f, 14.0f, Color{ 205, 213, 220, 255 });
+
+    std::snprintf(line, sizeof(line), "Polys: %d", node.meshTriangleCount);
+    DrawUiText(font, line, panelX + 12.0f, panelY + 124.0f, 14.0f, Color{ 205, 213, 220, 255 });
+    DrawUiTextClipped(font, node.materialName.empty() ? "Material: None" : (std::string("Material: ") + node.materialName).c_str(), panelX + 120.0f, panelY + 124.0f, 14.0f, panelW - 132.0f, Color{ 205, 213, 220, 255 });
 }
 
 bool HasSceneNodeChildren(const LoadedFbxModel& loaded, int nodeIndex)
@@ -811,16 +1065,149 @@ bool IsSceneNodeVisible(const LoadedFbxModel& loaded, const std::vector<bool>& c
     return true;
 }
 
-void DrawHierarchyPanel(Font font, ModelTab* active)
+float GetHierarchyPanelHeight()
+{
+    return static_cast<float>(GetScreenHeight()) - 61.0f - 124.0f;
+}
+
+int CountVisibleSceneNodes(const LoadedFbxModel& loaded, const std::vector<bool>& collapsed)
+{
+    int count = 0;
+    for (int i = 0; i < static_cast<int>(loaded.nodes.size()); ++i)
+    {
+        if (IsSceneNodeVisible(loaded, collapsed, i)) ++count;
+    }
+    return count;
+}
+
+int GetVisibleSceneNodeRow(const LoadedFbxModel& loaded, const std::vector<bool>& collapsed, int nodeIndex)
+{
+    int row = 0;
+    for (int i = 0; i < static_cast<int>(loaded.nodes.size()); ++i)
+    {
+        if (!IsSceneNodeVisible(loaded, collapsed, i)) continue;
+        if (i == nodeIndex) return row;
+        ++row;
+    }
+    return -1;
+}
+
+void RevealNodeInHierarchy(ModelTab& tab, HierarchyPanelState& panel, int nodeIndex)
+{
+    if (nodeIndex < 0 || nodeIndex >= static_cast<int>(tab.loaded.nodes.size())) return;
+
+    int parent = tab.loaded.nodes[static_cast<size_t>(nodeIndex)].parent;
+    while (parent >= 0)
+    {
+        if (parent < static_cast<int>(tab.collapsedNodes.size()))
+        {
+            tab.collapsedNodes[static_cast<size_t>(parent)] = false;
+        }
+        parent = tab.loaded.nodes[static_cast<size_t>(parent)].parent;
+    }
+
+    const int row = GetVisibleSceneNodeRow(tab.loaded, tab.collapsedNodes, nodeIndex);
+    if (row < 0) return;
+
+    constexpr float rowH = 22.0f;
+    const float panelH = GetHierarchyPanelHeight();
+    const float visibleRows = std::max(1.0f, std::floor((panelH - 34.0f) / rowH));
+    const float maxScroll = std::max(0.0f, static_cast<float>(CountVisibleSceneNodes(tab.loaded, tab.collapsedNodes)) - visibleRows);
+
+    if (static_cast<float>(row) < panel.scroll)
+    {
+        panel.scroll = static_cast<float>(row);
+    }
+    else if (static_cast<float>(row) >= panel.scroll + visibleRows)
+    {
+        panel.scroll = static_cast<float>(row) - visibleRows + 1.0f;
+    }
+
+    panel.scroll = ClampFloat(panel.scroll, 0.0f, maxScroll);
+}
+
+void UpdateHierarchyPanelInteraction(HierarchyPanelState& panel, const ModelTab* active)
 {
     constexpr float panelX = 0.0f;
     constexpr float panelY = 61.0f;
-    constexpr float panelW = 320.0f;
-    const float panelH = static_cast<float>(GetScreenHeight()) - panelY - 124.0f;
+    constexpr float collapsedW = 28.0f;
+    constexpr float headerH = 32.0f;
+    constexpr float rowH = 22.0f;
+    const float panelH = GetHierarchyPanelHeight();
+    const Vector2 mouse = GetMousePosition();
+
+    if (panel.hidden)
+    {
+        const Rectangle restoreRect{ panelX, panelY, collapsedW, panelH };
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, restoreRect))
+        {
+            panel.hidden = false;
+        }
+        return;
+    }
+
+    panel.width = ClampFloat(panel.width, 220.0f, std::min(620.0f, static_cast<float>(GetScreenWidth()) - 160.0f));
+
+    const Rectangle titleRect{ panelX, panelY, panel.width, headerH };
+    const Rectangle resizeRect{ panel.width - 5.0f, panelY, 10.0f, panelH };
+
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, resizeRect))
+    {
+        panel.resizing = true;
+    }
+    if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT))
+    {
+        panel.resizing = false;
+    }
+    if (panel.resizing)
+    {
+        panel.width = ClampFloat(mouse.x, 220.0f, std::min(620.0f, static_cast<float>(GetScreenWidth()) - 160.0f));
+    }
+    else if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, titleRect))
+    {
+        panel.hidden = true;
+        return;
+    }
+
+    const Rectangle panelRect{ panelX, panelY, panel.width, panelH };
+    if (active && CheckCollisionPointRec(mouse, panelRect))
+    {
+        const float wheel = GetMouseWheelMove();
+        if (std::fabs(wheel) > 0.0f)
+        {
+            const float visibleRows = std::max(0.0f, std::floor((panelH - 34.0f) / rowH));
+            const float maxScroll = std::max(0.0f, static_cast<float>(CountVisibleSceneNodes(active->loaded, active->collapsedNodes)) - visibleRows);
+            panel.scroll = ClampFloat(panel.scroll - wheel * 3.0f, 0.0f, maxScroll);
+        }
+    }
+}
+
+float GetHierarchyPanelBlockWidth(const HierarchyPanelState& panel)
+{
+    return panel.hidden ? 28.0f : panel.width;
+}
+
+void DrawHierarchyPanel(Font font, ModelTab* active, HierarchyPanelState& panel)
+{
+    constexpr float panelX = 0.0f;
+    constexpr float panelY = 61.0f;
+    constexpr float rowH = 22.0f;
+    const float panelH = GetHierarchyPanelHeight();
+
+    if (panel.hidden)
+    {
+        DrawRectangle(static_cast<int>(panelX), static_cast<int>(panelY), 28, static_cast<int>(panelH), Color{ 18, 20, 23, 235 });
+        DrawLine(28, static_cast<int>(panelY), 28, static_cast<int>(panelY + panelH), Color{ 64, 70, 78, 255 });
+        DrawUiText(font, ">", panelX + 9.0f, panelY + 10.0f, 16.0f, Color{ 190, 198, 206, 255 });
+        return;
+    }
+
+    const float panelW = panel.width;
 
     DrawRectangle(static_cast<int>(panelX), static_cast<int>(panelY), static_cast<int>(panelW), static_cast<int>(panelH), Color{ 18, 20, 23, 235 });
     DrawLine(static_cast<int>(panelW), static_cast<int>(panelY), static_cast<int>(panelW), static_cast<int>(panelY + panelH), Color{ 64, 70, 78, 255 });
     DrawUiText(font, "SCENE HIERARCHY", panelX + 12.0f, panelY + 10.0f, 16.0f, Color{ 165, 182, 196, 255 });
+    DrawUiText(font, "||", panelW - 16.0f, panelY + 8.0f, 16.0f, Color{ 120, 130, 140, 255 });
 
     if (!active)
     {
@@ -835,11 +1222,13 @@ void DrawHierarchyPanel(Font font, ModelTab* active)
 
     const Vector2 mouse = GetMousePosition();
     float rowY = panelY + 34.0f;
-    constexpr float rowH = 22.0f;
+    int visibleRow = 0;
+    const int firstRow = static_cast<int>(std::floor(panel.scroll));
 
     for (int i = 0; i < static_cast<int>(active->loaded.nodes.size()); ++i)
     {
         if (!IsSceneNodeVisible(active->loaded, active->collapsedNodes, i)) continue;
+        if (visibleRow++ < firstRow) continue;
         if (rowY + rowH > panelY + panelH) break;
 
         const SceneNode& node = active->loaded.nodes[static_cast<size_t>(i)];
@@ -883,6 +1272,21 @@ void DrawHierarchyPanel(Font font, ModelTab* active)
 
         rowY += rowH;
     }
+
+    const int visibleCount = CountVisibleSceneNodes(active->loaded, active->collapsedNodes);
+    const float visibleRows = std::max(1.0f, std::floor((panelH - 34.0f) / rowH));
+    const float maxScroll = std::max(0.0f, static_cast<float>(visibleCount) - visibleRows);
+    panel.scroll = ClampFloat(panel.scroll, 0.0f, maxScroll);
+
+    if (maxScroll > 0.0f)
+    {
+        const float trackY = panelY + 34.0f;
+        const float trackH = panelH - 38.0f;
+        const float thumbH = std::max(28.0f, trackH * (visibleRows / static_cast<float>(visibleCount)));
+        const float thumbY = trackY + (trackH - thumbH) * (panel.scroll / maxScroll);
+        DrawRectangle(static_cast<int>(panelW - 8.0f), static_cast<int>(trackY), 4, static_cast<int>(trackH), Color{ 44, 49, 55, 255 });
+        DrawRectangle(static_cast<int>(panelW - 9.0f), static_cast<int>(thumbY), 6, static_cast<int>(thumbH), Color{ 112, 124, 136, 255 });
+    }
 }
 
 bool DrawMenuItem(Font font, Rectangle bounds, const char* text, bool selected = false)
@@ -894,7 +1298,7 @@ bool DrawMenuItem(Font font, Rectangle bounds, const char* text, bool selected =
     return hovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
 }
 
-void DrawMenuBar(Font font, OpenMenu& openMenu, bool& openRequested, ViewMode& viewMode, NavigationPreset& navigation)
+void DrawMenuBar(Font font, OpenMenu& openMenu, bool& openRequested, ViewMode& viewMode, NavigationPreset& navigation, VisibilityState& visibility)
 {
     const float menuHeight = 28.0f;
     DrawRectangle(0, 0, GetScreenWidth(), static_cast<int>(menuHeight), Color{ 24, 26, 29, 255 });
@@ -926,7 +1330,7 @@ void DrawMenuBar(Font font, OpenMenu& openMenu, bool& openRequested, ViewMode& v
         }
     }
 
-    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && mouse.y > 220.0f && openMenu != OpenMenu::None)
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && mouse.y > 260.0f && openMenu != OpenMenu::None)
     {
         openMenu = OpenMenu::None;
     }
@@ -942,7 +1346,7 @@ void DrawMenuBar(Font font, OpenMenu& openMenu, bool& openRequested, ViewMode& v
     }
     else if (openMenu == OpenMenu::View)
     {
-        DrawRectangle(66, 29, 230, 98, Color{ 28, 31, 35, 245 });
+        DrawRectangle(66, 29, 230, 218, Color{ 28, 31, 35, 245 });
         if (DrawMenuItem(font, Rectangle{ 66.0f, 29.0f, 230.0f, 30.0f }, "Shaded", viewMode == ViewMode::Shaded))
         {
             viewMode = ViewMode::Shaded;
@@ -954,6 +1358,18 @@ void DrawMenuBar(Font font, OpenMenu& openMenu, bool& openRequested, ViewMode& v
         if (DrawMenuItem(font, Rectangle{ 66.0f, 89.0f, 230.0f, 30.0f }, "Wireframe", viewMode == ViewMode::Wireframe))
         {
             viewMode = ViewMode::Wireframe;
+        }
+        if (DrawMenuItem(font, Rectangle{ 66.0f, 127.0f, 230.0f, 30.0f }, visibility.geometry ? "[x] Geometry" : "[ ] Geometry"))
+        {
+            visibility.geometry = !visibility.geometry;
+        }
+        if (DrawMenuItem(font, Rectangle{ 66.0f, 157.0f, 230.0f, 30.0f }, visibility.bones ? "[x] Bones" : "[ ] Bones"))
+        {
+            visibility.bones = !visibility.bones;
+        }
+        if (DrawMenuItem(font, Rectangle{ 66.0f, 187.0f, 230.0f, 30.0f }, visibility.empties ? "[x] Empties" : "[ ] Empties"))
+        {
+            visibility.empties = !visibility.empties;
         }
     }
     else if (openMenu == OpenMenu::Preferences)
@@ -1186,6 +1602,8 @@ int main(int argc, char** argv)
     ViewMode viewMode = ViewMode::Shaded;
     NavigationPreset navigation = NavigationPreset::Blender;
     OpenMenu openMenu = OpenMenu::None;
+    HierarchyPanelState hierarchyPanel;
+    VisibilityState visibility;
     std::string error;
 
     auto openPathInNewTab = [&](const std::string& path)
@@ -1248,11 +1666,16 @@ int main(int argc, char** argv)
 
         ModelTab* active = activeTab >= 0 && activeTab < static_cast<int>(tabs.size()) ? tabs[static_cast<size_t>(activeTab)].get() : nullptr;
         const Vector2 mouse = GetMousePosition();
-        const bool mouseInViewport = mouse.x > 320.0f && mouse.y >= 61.0f && mouse.y < static_cast<float>(GetScreenHeight()) - 124.0f && openMenu == OpenMenu::None;
+        UpdateHierarchyPanelInteraction(hierarchyPanel, active);
+        const float hierarchyBlockW = GetHierarchyPanelBlockWidth(hierarchyPanel);
+        const bool mouseInViewport = mouse.x > hierarchyBlockW && mouse.y >= 61.0f && mouse.y < static_cast<float>(GetScreenHeight()) - 124.0f && openMenu == OpenMenu::None && !hierarchyPanel.resizing;
 
         if (active && IsKeyPressed(KEY_F) && active->loaded.valid)
         {
-            FocusCameraOnBounds(active->orbit, active->loaded.bounds);
+            if (!FocusCameraOnSelection(*active))
+            {
+                FocusCameraOnBounds(active->orbit, active->loaded.bounds);
+            }
         }
 
         if (IsKeyPressed(KEY_V))
@@ -1262,7 +1685,14 @@ int main(int argc, char** argv)
 
         if (active && mouseInViewport && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
         {
-            SelectNodeFromViewport(*active, mouse);
+            if (SelectNodeFromViewport(*active, mouse, visibility))
+            {
+                RevealNodeInHierarchy(*active, hierarchyPanel, active->selectedNode);
+            }
+            else
+            {
+                active->selectedNode = -1;
+            }
         }
 
         if (active)
@@ -1300,7 +1730,7 @@ int main(int argc, char** argv)
         DrawGrid(20, 1.0f);
         if (active && active->loaded.valid)
         {
-            if (active->loaded.hasMesh)
+            if (active->loaded.hasMesh && visibility.geometry)
             {
                 if (viewMode == ViewMode::Shaded || viewMode == ViewMode::ShadedWireframe)
                 {
@@ -1316,8 +1746,15 @@ int main(int argc, char** argv)
             }
             rlDrawRenderBatchActive();
             rlDisableDepthTest();
-            DrawBones(GetVisibleBones(active->loaded, active->animation), active->orbit.camera);
-            DrawSelectedNodeOverlay(*active);
+            if (visibility.empties)
+            {
+                DrawEmptyCrosses(*active);
+            }
+            if (visibility.bones)
+            {
+                DrawBones(GetVisibleBones(active->loaded, active->animation), active->orbit.camera, active->selectedNode);
+            }
+            DrawSelectedNodeOverlay(*active, visibility);
             rlDrawRenderBatchActive();
             rlEnableDepthTest();
         }
@@ -1329,17 +1766,19 @@ int main(int argc, char** argv)
 
         if (active)
         {
-            DrawUiText(uiFont, active->path.c_str(), 12, 66, 16, Color{ 190, 190, 190, 255 });
+            DrawUiText(uiFont, active->path.c_str(), hierarchyBlockW + 12.0f, 66, 16, Color{ 190, 190, 190, 255 });
         }
         else
         {
-            DrawUiText(uiFont, "No FBX loaded", 12, 66, 16, Color{ 190, 190, 190, 255 });
+            DrawUiText(uiFont, "No FBX loaded", hierarchyBlockW + 12.0f, 66, 16, Color{ 190, 190, 190, 255 });
         }
 
         if (!error.empty())
         {
             DrawUiText(uiFont, error.c_str(), 12, static_cast<float>(GetScreenHeight() - 154), 18, Color{ 255, 140, 120, 255 });
         }
+
+        DrawSelectedInfoPanel(uiFont, active);
 
         if (active)
         {
@@ -1353,13 +1792,14 @@ int main(int argc, char** argv)
             DrawUiText(uiFont, "Open an FBX file to show animation stacks", 12.0f, static_cast<float>(GetScreenHeight() - 86), 16.0f, Color{ 128, 136, 144, 255 });
         }
 
-        DrawHierarchyPanel(uiFont, active);
+        DrawHierarchyPanel(uiFont, active, hierarchyPanel);
+        DrawOrientationGizmo(uiFont, active ? active->orbit.camera : emptyOrbit.camera);
 
         DrawTabs(uiFont, tabs, activeTab);
         active = activeTab >= 0 && activeTab < static_cast<int>(tabs.size()) ? tabs[static_cast<size_t>(activeTab)].get() : nullptr;
 
         bool menuOpenRequested = false;
-        DrawMenuBar(uiFont, openMenu, menuOpenRequested, viewMode, navigation);
+        DrawMenuBar(uiFont, openMenu, menuOpenRequested, viewMode, navigation, visibility);
         EndDrawing();
 
         if (menuOpenRequested)
