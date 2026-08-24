@@ -1,11 +1,13 @@
 #include "FbxLoader.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstring>
 #include <limits>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 #include <string>
 #include <vector>
 
@@ -36,6 +38,9 @@ struct MeshBuilder
     std::vector<float> vertices;
     std::vector<float> normals;
     std::vector<float> texcoords;
+    std::vector<std::string> uvSetNames;
+    std::vector<std::vector<float>> uvSets;
+    std::vector<SkinnedVertex> skinnedVertices;
     std::vector<unsigned int> indices;
     std::vector<RenderVertexRef> renderVertices;
     std::vector<int> vertexMaterialIndices;
@@ -82,6 +87,21 @@ struct SkinSample
     FbxCluster::ELinkMode linkMode = FbxCluster::eNormalize;
     bool hasCluster = false;
 };
+
+struct ControlPointBindInfluence
+{
+    std::string boneName;
+    float weight = 0.0f;
+    FbxAMatrix inverseBindLink;
+};
+
+struct SkinBindData
+{
+    std::vector<std::vector<ControlPointBindInfluence>> influences;
+};
+
+FbxVector4 TransformVector(const FbxAMatrix& matrix, FbxVector4 vector);
+SkinBindData BuildSkinBindData(FbxMesh* mesh);
 
 void ExpandBounds(BoundingBox& bounds, Vector3 p, bool& hasBounds)
 {
@@ -206,7 +226,9 @@ void AddTriangle(MeshBuilder& out,
                  const Vector3 points[3],
                  const Vector3 normals[3],
                  const Vector2 uvs[3],
+                 const std::vector<std::array<Vector2, 3>>& uvSetValues,
                  const RenderVertexRef refs[3],
+                 const SkinBindData& skinBind,
                  int materialIndex,
                  bool hasNormals,
                  bool hasUvs)
@@ -233,8 +255,35 @@ void AddTriangle(MeshBuilder& out,
         out.normals.push_back(normal.y);
         out.normals.push_back(normal.z);
 
+        SkinnedVertex skinned;
+        skinned.bindPosition = points[i];
+        skinned.bindNormal = normal;
+        if (refs[i].controlPointIndex >= 0 && refs[i].controlPointIndex < static_cast<int>(skinBind.influences.size()))
+        {
+            const FbxVector4 bindPosition(points[i].x, points[i].y, points[i].z, 1.0);
+            const FbxVector4 bindNormal(normal.x, normal.y, normal.z, 0.0);
+            for (const ControlPointBindInfluence& influence : skinBind.influences[static_cast<size_t>(refs[i].controlPointIndex)])
+            {
+                const FbxVector4 positionInBone = influence.inverseBindLink.MultT(bindPosition);
+                const FbxVector4 normalInBone = TransformVector(influence.inverseBindLink, bindNormal);
+                skinned.influences.push_back(SkinnedVertexInfluence{
+                    influence.boneName,
+                    influence.weight,
+                    ToVector3(positionInBone),
+                    NormalizeOrFallback(ToVector3(normalInBone), normal)
+                });
+            }
+        }
+        out.skinnedVertices.push_back(std::move(skinned));
+
         out.texcoords.push_back(uv.x);
         out.texcoords.push_back(uv.y);
+        for (size_t uvSet = 0; uvSet < out.uvSets.size(); ++uvSet)
+        {
+            const Vector2 uvSetValue = uvSet < uvSetValues.size() ? uvSetValues[uvSet][i] : Vector2{ 0.0f, 0.0f };
+            out.uvSets[uvSet].push_back(uvSetValue.x);
+            out.uvSets[uvSet].push_back(uvSetValue.y);
+        }
 
         out.AddBounds(points[i]);
         if (refs[i].node)
@@ -242,6 +291,19 @@ void AddTriangle(MeshBuilder& out,
             ExpandSceneNodeBounds(out, refs[i].node, points[i]);
         }
     }
+}
+
+int GetOrAddUvSetIndex(MeshBuilder& out, const std::string& name)
+{
+    const std::string uvSetName = name.empty() ? "UV Set" : name;
+    for (int i = 0; i < static_cast<int>(out.uvSetNames.size()); ++i)
+    {
+        if (out.uvSetNames[static_cast<size_t>(i)] == uvSetName) return i;
+    }
+
+    out.uvSetNames.push_back(uvSetName);
+    out.uvSets.push_back(std::vector<float>(static_cast<size_t>(out.VertexCount()) * 2, 0.0f));
+    return static_cast<int>(out.uvSets.size()) - 1;
 }
 
 int GetOrAddMaterialIndex(MeshBuilder& out, const std::string& name)
@@ -299,12 +361,19 @@ void AppendMesh(FbxNode* node, FbxMesh* mesh, MeshBuilder& out)
     FbxStringList uvSetNames;
     mesh->GetUVSetNames(uvSetNames);
     const char* uvSetName = uvSetNames.GetCount() > 0 ? uvSetNames.GetStringAt(0) : nullptr;
+    std::vector<int> meshUvSetIndices;
+    meshUvSetIndices.reserve(static_cast<size_t>(uvSetNames.GetCount()));
+    for (int i = 0; i < uvSetNames.GetCount(); ++i)
+    {
+        meshUvSetIndices.push_back(GetOrAddUvSetIndex(out, uvSetNames.GetStringAt(i)));
+    }
     const FbxVector4* controlPoints = mesh->GetControlPoints();
 
     const FbxAMatrix nodeGlobal = node->EvaluateGlobalTransform();
     const FbxAMatrix geometry = GetNodeGeometryTransform(node);
     const FbxAMatrix meshTransform = nodeGlobal * geometry;
     const FbxAMatrix normalTransform = meshTransform.Inverse().Transpose();
+    const SkinBindData skinBind = BuildSkinBindData(mesh);
 
     for (int polygon = 0; polygon < polygonCount; ++polygon)
     {
@@ -313,6 +382,7 @@ void AppendMesh(FbxNode* node, FbxMesh* mesh, MeshBuilder& out)
         Vector3 points[3]{};
         Vector3 normals[3]{};
         Vector2 uvs[3]{};
+        std::vector<std::array<Vector2, 3>> uvSetValues(out.uvSets.size());
         RenderVertexRef refs[3]{};
         bool triangleHasNormals = true;
         bool triangleHasUvs = uvSetName != nullptr;
@@ -351,9 +421,22 @@ void AppendMesh(FbxNode* node, FbxMesh* mesh, MeshBuilder& out)
                     triangleHasUvs = false;
                 }
             }
+
+            for (int uvSet = 0; uvSet < uvSetNames.GetCount(); ++uvSet)
+            {
+                const int globalUvSet = uvSet < static_cast<int>(meshUvSetIndices.size()) ? meshUvSetIndices[static_cast<size_t>(uvSet)] : -1;
+                if (globalUvSet < 0 || globalUvSet >= static_cast<int>(uvSetValues.size())) continue;
+
+                FbxVector2 uv;
+                bool unmapped = false;
+                if (mesh->GetPolygonVertexUV(polygon, vertex, uvSetNames.GetStringAt(uvSet), uv, unmapped) && !unmapped)
+                {
+                    uvSetValues[static_cast<size_t>(globalUvSet)][vertex] = ToVector2(uv);
+                }
+            }
         }
 
-        AddTriangle(out, points, normals, uvs, refs, materialIndex, triangleHasNormals, triangleHasUvs);
+        AddTriangle(out, points, normals, uvs, uvSetValues, refs, skinBind, materialIndex, triangleHasNormals, triangleHasUvs);
     }
 
     const int meshVertexCount = out.VertexCount() - meshVertexStart;
@@ -397,6 +480,51 @@ FbxVector4 TransformVector(const FbxAMatrix& matrix, FbxVector4 vector)
     const FbxVector4 origin = matrix.MultT(FbxVector4(0.0, 0.0, 0.0, 1.0));
     const FbxVector4 end = matrix.MultT(FbxVector4(vector[0], vector[1], vector[2], 1.0));
     return FbxVector4(end[0] - origin[0], end[1] - origin[1], end[2] - origin[2], 0.0);
+}
+
+SkinBindData BuildSkinBindData(FbxMesh* mesh)
+{
+    SkinBindData data;
+    if (!mesh) return data;
+
+    const int controlPointCount = mesh->GetControlPointsCount();
+    data.influences.resize(static_cast<size_t>(controlPointCount));
+
+    const int skinCount = mesh->GetDeformerCount(FbxDeformer::eSkin);
+    for (int skinIndex = 0; skinIndex < skinCount; ++skinIndex)
+    {
+        FbxSkin* fbxSkin = static_cast<FbxSkin*>(mesh->GetDeformer(skinIndex, FbxDeformer::eSkin));
+        if (!fbxSkin) continue;
+
+        for (int clusterIndex = 0; clusterIndex < fbxSkin->GetClusterCount(); ++clusterIndex)
+        {
+            FbxCluster* cluster = fbxSkin->GetCluster(clusterIndex);
+            FbxNode* link = cluster ? cluster->GetLink() : nullptr;
+            if (!cluster || !link || !link->GetName() || !link->GetName()[0]) continue;
+
+            FbxAMatrix bindLink;
+            cluster->GetTransformLinkMatrix(bindLink);
+            const FbxAMatrix inverseBindLink = bindLink.Inverse();
+
+            const int* indices = cluster->GetControlPointIndices();
+            const double* weights = cluster->GetControlPointWeights();
+            const int indexCount = cluster->GetControlPointIndicesCount();
+            for (int i = 0; i < indexCount; ++i)
+            {
+                const int controlPointIndex = indices[i];
+                if (controlPointIndex < 0 || controlPointIndex >= controlPointCount) continue;
+                if (weights[i] == 0.0) continue;
+
+                data.influences[static_cast<size_t>(controlPointIndex)].push_back(ControlPointBindInfluence{
+                    link->GetName(),
+                    static_cast<float>(weights[i]),
+                    inverseBindLink
+                });
+            }
+        }
+    }
+
+    return data;
 }
 
 FbxAMatrix GetClusterDeformationMatrix(FbxNode* meshNode, FbxCluster* cluster, const FbxTime& time)
@@ -872,6 +1000,139 @@ void SampleAnimations(FbxScene* scene, MeshBuilder& out)
     FbxArrayDelete(stackNames);
 }
 
+FbxAMatrix MatrixFromPose(const BonePose& pose)
+{
+    FbxAMatrix matrix;
+    matrix.SetIdentity();
+    matrix.SetRow(0, FbxVector4(pose.axisX.x * pose.scale.x, pose.axisX.y * pose.scale.x, pose.axisX.z * pose.scale.x, 0.0));
+    matrix.SetRow(1, FbxVector4(pose.axisY.x * pose.scale.y, pose.axisY.y * pose.scale.y, pose.axisY.z * pose.scale.y, 0.0));
+    matrix.SetRow(2, FbxVector4(pose.axisZ.x * pose.scale.z, pose.axisZ.y * pose.scale.z, pose.axisZ.z * pose.scale.z, 0.0));
+    matrix.SetRow(3, FbxVector4(pose.position.x, pose.position.y, pose.position.z, 1.0));
+    return matrix;
+}
+
+const BonePose* FindFramePose(const BoneFrame& frame, int nodeIndex)
+{
+    for (const BonePose& pose : frame.poses)
+    {
+        if (pose.node == nodeIndex) return &pose;
+    }
+    return nullptr;
+}
+
+void AddSkeletonNodesByName(FbxNode* node, std::unordered_map<std::string, FbxNode*>& nodesByName)
+{
+    if (!node) return;
+    if (IsSkeletonNode(node) && node->GetName() && node->GetName()[0])
+    {
+        nodesByName.emplace(node->GetName(), node);
+    }
+    for (int i = 0; i < node->GetChildCount(); ++i)
+    {
+        AddSkeletonNodesByName(node->GetChild(i), nodesByName);
+    }
+}
+
+void AddCurveKey(FbxAnimCurve* curve, const FbxTime& time, float value)
+{
+    if (!curve) return;
+    const int keyIndex = curve->KeyAdd(time);
+    curve->KeySet(keyIndex, time, value, FbxAnimCurveDef::eInterpolationLinear);
+}
+
+void AddVectorKey(FbxPropertyT<FbxDouble3>& property, FbxAnimLayer* layer, const FbxTime& time, const FbxVector4& value)
+{
+    AddCurveKey(property.GetCurve(layer, FBXSDK_CURVENODE_COMPONENT_X, true), time, static_cast<float>(value[0]));
+    AddCurveKey(property.GetCurve(layer, FBXSDK_CURVENODE_COMPONENT_Y, true), time, static_cast<float>(value[1]));
+    AddCurveKey(property.GetCurve(layer, FBXSDK_CURVENODE_COMPONENT_Z, true), time, static_cast<float>(value[2]));
+}
+
+std::string MakeUniqueAnimationName(const std::string& name, std::unordered_set<std::string>& usedNames)
+{
+    std::string result = name.empty() ? "Animation" : name;
+    if (usedNames.insert(result).second) return result;
+
+    for (int suffix = 2; suffix < 10000; ++suffix)
+    {
+        const std::string candidate = result + "_" + std::to_string(suffix);
+        if (usedNames.insert(candidate).second) return candidate;
+    }
+    return result + "_copy";
+}
+
+bool WriteAnimationStacks(FbxScene* scene, const LoadedFbxModel& model, std::string& error)
+{
+    FbxArray<FbxString*> stackNames;
+    scene->FillAnimStackNameArray(stackNames);
+    for (int i = 0; i < stackNames.GetCount(); ++i)
+    {
+        FbxAnimStack* stack = scene->FindMember<FbxAnimStack>(stackNames[i]->Buffer());
+        if (stack)
+        {
+            scene->RemoveMember(stack);
+            stack->Destroy(true);
+        }
+    }
+    FbxArrayDelete(stackNames);
+
+    std::unordered_map<std::string, FbxNode*> nodesByName;
+    AddSkeletonNodesByName(scene->GetRootNode(), nodesByName);
+
+    std::unordered_set<std::string> usedNames;
+    for (const AnimationClip& clip : model.animations)
+    {
+        if (clip.frames.empty()) continue;
+
+        const std::string stackName = MakeUniqueAnimationName(clip.name, usedNames);
+        FbxAnimStack* stack = FbxAnimStack::Create(scene, stackName.c_str());
+        FbxAnimLayer* layer = FbxAnimLayer::Create(scene, "BaseLayer");
+        if (!stack || !layer)
+        {
+            error = "Failed to create FBX animation stack.";
+            return false;
+        }
+        stack->AddMember(layer);
+
+        FbxTimeSpan timeSpan;
+        FbxTime startTime;
+        FbxTime stopTime;
+        startTime.SetSecondDouble(0.0);
+        stopTime.SetSecondDouble(std::max(0.0f, clip.duration));
+        timeSpan.Set(startTime, stopTime);
+        stack->SetLocalTimeSpan(timeSpan);
+
+        for (const BoneFrame& frame : clip.frames)
+        {
+            FbxTime time;
+            time.SetSecondDouble(frame.time);
+
+            for (const BonePose& pose : frame.poses)
+            {
+                if (pose.node < 0 || pose.node >= static_cast<int>(model.nodes.size())) continue;
+                const SceneNode& sceneNode = model.nodes[static_cast<size_t>(pose.node)];
+                const auto target = nodesByName.find(sceneNode.name);
+                if (target == nodesByName.end() || !target->second) continue;
+
+                FbxAMatrix global = MatrixFromPose(pose);
+                FbxAMatrix local = global;
+                const int parentIndex = sceneNode.parent;
+                const BonePose* parentPose = parentIndex >= 0 ? FindFramePose(frame, parentIndex) : nullptr;
+                if (parentPose)
+                {
+                    local = MatrixFromPose(*parentPose).Inverse() * global;
+                }
+
+                FbxNode* targetNode = target->second;
+                AddVectorKey(targetNode->LclTranslation, layer, time, local.GetT());
+                AddVectorKey(targetNode->LclRotation, layer, time, local.GetR());
+                AddVectorKey(targetNode->LclScaling, layer, time, local.GetS());
+            }
+        }
+    }
+
+    return true;
+}
+
 void TraverseNode(FbxNode* node, int parentIndex, int depth, MeshBuilder& out)
 {
     if (!node) return;
@@ -934,6 +1195,68 @@ T* CopyToRaylibBuffer(const std::vector<T>& values)
     return static_cast<T*>(memory);
 }
 
+Vector3 ChoosePerpendicular(Vector3 normal)
+{
+    const Vector3 axis = std::fabs(normal.y) < 0.9f ? Vector3{ 0.0f, 1.0f, 0.0f } : Vector3{ 1.0f, 0.0f, 0.0f };
+    return NormalizeOrFallback(Vector3CrossProduct(axis, normal), Vector3{ 1.0f, 0.0f, 0.0f });
+}
+
+std::vector<float> BuildTangents(const std::vector<float>& vertices, const std::vector<float>& normals, const std::vector<float>& texcoords)
+{
+    const size_t vertexCount = vertices.size() / 3;
+    std::vector<float> tangents(vertexCount * 4, 0.0f);
+    if (normals.size() < vertexCount * 3 || texcoords.size() < vertexCount * 2) return tangents;
+
+    for (size_t vertex = 0; vertex + 2 < vertexCount; vertex += 3)
+    {
+        const size_t p0 = vertex * 3;
+        const size_t p1 = (vertex + 1) * 3;
+        const size_t p2 = (vertex + 2) * 3;
+        const size_t uv0 = vertex * 2;
+        const size_t uv1 = (vertex + 1) * 2;
+        const size_t uv2 = (vertex + 2) * 2;
+
+        const Vector3 v0{ vertices[p0], vertices[p0 + 1], vertices[p0 + 2] };
+        const Vector3 v1{ vertices[p1], vertices[p1 + 1], vertices[p1 + 2] };
+        const Vector3 v2{ vertices[p2], vertices[p2 + 1], vertices[p2 + 2] };
+        const Vector2 t0{ texcoords[uv0], texcoords[uv0 + 1] };
+        const Vector2 t1{ texcoords[uv1], texcoords[uv1 + 1] };
+        const Vector2 t2{ texcoords[uv2], texcoords[uv2 + 1] };
+
+        const Vector3 edge1 = Vector3Subtract(v1, v0);
+        const Vector3 edge2 = Vector3Subtract(v2, v0);
+        const Vector2 delta1{ t1.x - t0.x, t1.y - t0.y };
+        const Vector2 delta2{ t2.x - t0.x, t2.y - t0.y };
+        const float determinant = delta1.x * delta2.y - delta2.x * delta1.y;
+
+        Vector3 tangent{};
+        Vector3 bitangent{};
+        if (std::fabs(determinant) > 0.00000001f)
+        {
+            const float inverseDeterminant = 1.0f / determinant;
+            tangent = Vector3Scale(Vector3Subtract(Vector3Scale(edge1, delta2.y), Vector3Scale(edge2, delta1.y)), inverseDeterminant);
+            bitangent = Vector3Scale(Vector3Subtract(Vector3Scale(edge2, delta1.x), Vector3Scale(edge1, delta2.x)), inverseDeterminant);
+        }
+
+        for (size_t local = 0; local < 3; ++local)
+        {
+            const size_t global = vertex + local;
+            const size_t normalBase = global * 3;
+            const Vector3 normal = NormalizeOrFallback(Vector3{ normals[normalBase], normals[normalBase + 1], normals[normalBase + 2] }, Vector3{ 0.0f, 1.0f, 0.0f });
+            Vector3 orthogonalTangent = Vector3Subtract(tangent, Vector3Scale(normal, Vector3DotProduct(normal, tangent)));
+            orthogonalTangent = NormalizeOrFallback(orthogonalTangent, ChoosePerpendicular(normal));
+            const float handedness = Vector3DotProduct(Vector3CrossProduct(normal, orthogonalTangent), bitangent) < 0.0f ? -1.0f : 1.0f;
+            const size_t tangentBase = global * 4;
+            tangents[tangentBase] = orthogonalTangent.x;
+            tangents[tangentBase + 1] = orthogonalTangent.y;
+            tangents[tangentBase + 2] = orthogonalTangent.z;
+            tangents[tangentBase + 3] = handedness;
+        }
+    }
+
+    return tangents;
+}
+
 bool BuildRaylibModel(const MeshBuilder& builder, LoadedFbxModel& outModel, std::string& error)
 {
     if (builder.vertices.empty() && builder.bones.empty())
@@ -948,6 +1271,9 @@ bool BuildRaylibModel(const MeshBuilder& builder, LoadedFbxModel& outModel, std:
     outModel.animations = builder.animations;
     outModel.bindVertices = builder.vertices;
     outModel.bindNormals = builder.normals;
+    outModel.skinnedVertices = builder.skinnedVertices;
+    outModel.uvSetNames = builder.uvSetNames;
+    outModel.uvSets = builder.uvSets;
     outModel.materialNames = builder.materialNames.empty() ? std::vector<std::string>{ "Default" } : builder.materialNames;
     outModel.bounds = builder.hasBounds ? builder.bounds : BoundingBox{ { -1.0f, -1.0f, -1.0f }, { 1.0f, 1.0f, 1.0f } };
     outModel.valid = true;
@@ -992,6 +1318,7 @@ bool BuildRaylibModel(const MeshBuilder& builder, LoadedFbxModel& outModel, std:
             texcoords.push_back(builder.texcoords[static_cast<size_t>(texcoordIndex)]);
             texcoords.push_back(builder.texcoords[static_cast<size_t>(texcoordIndex + 1)]);
         }
+        std::vector<float> tangents = BuildTangents(vertices, normals, texcoords);
 
         Mesh mesh{};
         mesh.vertexCount = static_cast<int>(globalIndices.size());
@@ -999,12 +1326,14 @@ bool BuildRaylibModel(const MeshBuilder& builder, LoadedFbxModel& outModel, std:
         mesh.vertices = CopyToRaylibBuffer(vertices);
         mesh.normals = CopyToRaylibBuffer(normals);
         mesh.texcoords = CopyToRaylibBuffer(texcoords);
+        mesh.tangents = CopyToRaylibBuffer(tangents);
 
-        if (!mesh.vertices || !mesh.normals || !mesh.texcoords)
+        if (!mesh.vertices || !mesh.normals || !mesh.texcoords || !mesh.tangents)
         {
             if (mesh.vertices) MemFree(mesh.vertices);
             if (mesh.normals) MemFree(mesh.normals);
             if (mesh.texcoords) MemFree(mesh.texcoords);
+            if (mesh.tangents) MemFree(mesh.tangents);
             error = "Failed to allocate raylib mesh buffers.";
             return false;
         }
@@ -1088,6 +1417,69 @@ bool LoadFbxModel(const std::string& path, LoadedFbxModel& outModel, std::string
     SampleAnimations(scene, builder);
 
     return BuildRaylibModel(builder, outModel, error);
+}
+
+bool SaveFbxModelAnimations(const std::string& sourcePath, const std::string& outputPath, const LoadedFbxModel& model, std::string& error)
+{
+    error.clear();
+    if (sourcePath.empty() || outputPath.empty())
+    {
+        error = "Missing FBX save path.";
+        return false;
+    }
+
+    std::unique_ptr<FbxManager, FbxManagerDestroy> manager(FbxManager::Create());
+    if (!manager)
+    {
+        error = "Failed to create FBX SDK manager.";
+        return false;
+    }
+
+    FbxIOSettings* ioSettings = FbxIOSettings::Create(manager.get(), IOSROOT);
+    manager->SetIOSettings(ioSettings);
+
+    FbxImporter* importer = FbxImporter::Create(manager.get(), "");
+    if (!importer->Initialize(sourcePath.c_str(), -1, manager->GetIOSettings()))
+    {
+        error = std::string("Failed to open source FBX: ") + importer->GetStatus().GetErrorString();
+        importer->Destroy();
+        return false;
+    }
+
+    FbxScene* scene = FbxScene::Create(manager.get(), "scene");
+    if (!importer->Import(scene))
+    {
+        error = std::string("Failed to import source FBX: ") + importer->GetStatus().GetErrorString();
+        importer->Destroy();
+        return false;
+    }
+    importer->Destroy();
+
+    FbxAxisSystem::OpenGL.ConvertScene(scene);
+    FbxSystemUnit::m.ConvertScene(scene);
+
+    if (!WriteAnimationStacks(scene, model, error))
+    {
+        return false;
+    }
+
+    FbxExporter* exporter = FbxExporter::Create(manager.get(), "");
+    if (!exporter->Initialize(outputPath.c_str(), -1, manager->GetIOSettings()))
+    {
+        error = std::string("Failed to initialize FBX exporter: ") + exporter->GetStatus().GetErrorString();
+        exporter->Destroy();
+        return false;
+    }
+
+    const bool exported = exporter->Export(scene);
+    if (!exported)
+    {
+        error = std::string("Failed to export FBX: ") + exporter->GetStatus().GetErrorString();
+        exporter->Destroy();
+        return false;
+    }
+    exporter->Destroy();
+    return true;
 }
 
 void UnloadFbxModel(LoadedFbxModel& model)

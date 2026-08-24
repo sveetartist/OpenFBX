@@ -10,6 +10,7 @@
 #include <memory>
 #include <filesystem>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #ifdef _WIN32
@@ -50,10 +51,12 @@ struct WindowsOpenFileNameA
 };
 
 extern "C" __declspec(dllimport) WindowsBool __stdcall GetOpenFileNameA(WindowsOpenFileNameA* dialog);
+extern "C" __declspec(dllimport) WindowsBool __stdcall GetSaveFileNameA(WindowsOpenFileNameA* dialog);
 
 constexpr WindowsDword kOfnFileMustExist = 0x00001000;
 constexpr WindowsDword kOfnPathMustExist = 0x00000800;
 constexpr WindowsDword kOfnNoChangeDir = 0x00000008;
+constexpr WindowsDword kOfnOverwritePrompt = 0x00000002;
 #endif
 
 #include "FbxLoader.h"
@@ -66,6 +69,8 @@ namespace
 constexpr float kTimelinePanelHeight = 124.0f;
 constexpr float kTimelineCollapsedHeight = 28.0f;
 constexpr float kMetersPerGridCell = 1.0f;
+constexpr double kNearClipPlane = 0.0005;
+constexpr double kFarClipPlane = 10000.0;
 float gBottomPanelReservedHeight = kTimelinePanelHeight;
 
 struct OrbitCamera
@@ -85,6 +90,11 @@ struct OrbitCamera
 struct AnimationState
 {
     int clipIndex = -1;
+    int clipScroll = 0;
+    int contextClipIndex = -1;
+    Vector2 contextPosition{};
+    bool contextMenuOpen = false;
+    bool contextMenuJustOpened = false;
     float time = 0.0f;
     bool playing = false;
     bool scrubbing = false;
@@ -116,7 +126,7 @@ enum class LeftPanelTab
     Hierarchy,
     Stats,
     Materials,
-    Skeleton
+    UV
 };
 
 enum class PbrTextureSlot
@@ -173,6 +183,16 @@ struct PbrMaterialState
     OpacityChannel opacityChannel = OpacityChannel::A;
 };
 
+struct TextureClipboard
+{
+    std::string path;
+    bool menuOpen = false;
+    bool justOpened = false;
+    int materialIndex = -1;
+    PbrTextureSlot slot = PbrTextureSlot::Diffuse;
+    Vector2 position{};
+};
+
 struct ModelTab
 {
     LoadedFbxModel loaded;
@@ -181,15 +201,14 @@ struct ModelTab
     std::vector<bool> collapsedNodes;
     std::vector<float> blendedVertices;
     std::vector<float> blendedNormals;
+    std::vector<float> blendedTangents;
     std::vector<float> currentVertices;
     std::vector<float> currentNormals;
     std::vector<BoneSegment> visibleBones;
     std::vector<BonePose> visibleBonePoses;
     std::vector<PbrMaterialState> pbrMaterials;
     int selectedMaterial = 0;
-    std::string skeletonComparePath;
-    std::string skeletonCompareResult;
-    bool skeletonCompatible = false;
+    int selectedUvSet = 0;
     int appliedClipIndex = -2;
     int appliedMeshFrameIndex = -1;
     int appliedNextMeshFrameIndex = -1;
@@ -246,6 +265,11 @@ struct LitShader
 };
 
 float ClampFloat(float value, float minimum, float maximum)
+{
+    return std::max(minimum, std::min(maximum, value));
+}
+
+int ClampInt(int value, int minimum, int maximum)
 {
     return std::max(minimum, std::min(maximum, value));
 }
@@ -320,6 +344,66 @@ Vector3 NormalizeOrFallback(Vector3 value, Vector3 fallback)
     const float length = Vector3Length(value);
     if (length > 0.000001f) return Vector3Scale(value, 1.0f / length);
     return fallback;
+}
+
+Vector3 ChoosePerpendicular(Vector3 normal)
+{
+    const Vector3 axis = std::fabs(normal.y) < 0.9f ? Vector3{ 0.0f, 1.0f, 0.0f } : Vector3{ 1.0f, 0.0f, 0.0f };
+    return NormalizeOrFallback(Vector3CrossProduct(axis, normal), Vector3{ 1.0f, 0.0f, 0.0f });
+}
+
+void BuildMeshTangents(const std::vector<float>& vertices, const std::vector<float>& normals, const float* texcoords, std::vector<float>& tangents)
+{
+    const size_t vertexCount = vertices.size() / 3;
+    tangents.assign(vertexCount * 4, 0.0f);
+    if (normals.size() < vertexCount * 3 || !texcoords) return;
+
+    for (size_t vertex = 0; vertex + 2 < vertexCount; vertex += 3)
+    {
+        const size_t p0 = vertex * 3;
+        const size_t p1 = (vertex + 1) * 3;
+        const size_t p2 = (vertex + 2) * 3;
+        const size_t uv0 = vertex * 2;
+        const size_t uv1 = (vertex + 1) * 2;
+        const size_t uv2 = (vertex + 2) * 2;
+
+        const Vector3 v0{ vertices[p0], vertices[p0 + 1], vertices[p0 + 2] };
+        const Vector3 v1{ vertices[p1], vertices[p1 + 1], vertices[p1 + 2] };
+        const Vector3 v2{ vertices[p2], vertices[p2 + 1], vertices[p2 + 2] };
+        const Vector2 t0{ texcoords[uv0], texcoords[uv0 + 1] };
+        const Vector2 t1{ texcoords[uv1], texcoords[uv1 + 1] };
+        const Vector2 t2{ texcoords[uv2], texcoords[uv2 + 1] };
+
+        const Vector3 edge1 = Vector3Subtract(v1, v0);
+        const Vector3 edge2 = Vector3Subtract(v2, v0);
+        const Vector2 delta1{ t1.x - t0.x, t1.y - t0.y };
+        const Vector2 delta2{ t2.x - t0.x, t2.y - t0.y };
+        const float determinant = delta1.x * delta2.y - delta2.x * delta1.y;
+
+        Vector3 tangent{};
+        Vector3 bitangent{};
+        if (std::fabs(determinant) > 0.00000001f)
+        {
+            const float inverseDeterminant = 1.0f / determinant;
+            tangent = Vector3Scale(Vector3Subtract(Vector3Scale(edge1, delta2.y), Vector3Scale(edge2, delta1.y)), inverseDeterminant);
+            bitangent = Vector3Scale(Vector3Subtract(Vector3Scale(edge2, delta1.x), Vector3Scale(edge1, delta2.x)), inverseDeterminant);
+        }
+
+        for (size_t local = 0; local < 3; ++local)
+        {
+            const size_t global = vertex + local;
+            const size_t normalBase = global * 3;
+            const Vector3 normal = NormalizeOrFallback(Vector3{ normals[normalBase], normals[normalBase + 1], normals[normalBase + 2] }, Vector3{ 0.0f, 1.0f, 0.0f });
+            Vector3 orthogonalTangent = Vector3Subtract(tangent, Vector3Scale(normal, Vector3DotProduct(normal, tangent)));
+            orthogonalTangent = NormalizeOrFallback(orthogonalTangent, ChoosePerpendicular(normal));
+            const float handedness = Vector3DotProduct(Vector3CrossProduct(normal, orthogonalTangent), bitangent) < 0.0f ? -1.0f : 1.0f;
+            const size_t tangentBase = global * 4;
+            tangents[tangentBase] = orthogonalTangent.x;
+            tangents[tangentBase + 1] = orthogonalTangent.y;
+            tangents[tangentBase + 2] = orthogonalTangent.z;
+            tangents[tangentBase + 3] = handedness;
+        }
+    }
 }
 
 Vector3 LerpVector3(Vector3 a, Vector3 b, float alpha)
@@ -510,6 +594,35 @@ std::string OpenFbxFileDialog()
     return {};
 }
 
+std::string SaveAsFbxFileDialog(const std::string& sourcePath)
+{
+#ifdef _WIN32
+    char filePath[4096] = {};
+    std::filesystem::path defaultPath(sourcePath);
+    if (!defaultPath.empty())
+    {
+        defaultPath.replace_extension("");
+        const std::string suggested = defaultPath.string() + "_edited.fbx";
+        std::snprintf(filePath, sizeof(filePath), "%s", suggested.c_str());
+    }
+
+    WindowsOpenFileNameA dialog{};
+    dialog.lStructSize = sizeof(dialog);
+    dialog.lpstrFilter = "FBX files (*.fbx)\0*.fbx\0All files (*.*)\0*.*\0";
+    dialog.lpstrFile = filePath;
+    dialog.nMaxFile = sizeof(filePath);
+    dialog.Flags = kOfnPathMustExist | kOfnNoChangeDir | kOfnOverwritePrompt;
+    dialog.lpstrDefExt = "fbx";
+
+    if (GetSaveFileNameA(&dialog))
+    {
+        return filePath;
+    }
+#endif
+
+    return {};
+}
+
 std::string OpenTextureFileDialog()
 {
 #ifdef _WIN32
@@ -549,6 +662,7 @@ LitShader LoadBasicLitShader()
 in vec3 vertexPosition;
 in vec2 vertexTexCoord;
 in vec3 vertexNormal;
+in vec4 vertexTangent;
 in vec4 vertexColor;
 
 uniform mat4 mvp;
@@ -557,6 +671,7 @@ uniform mat4 matNormal;
 
 out vec3 fragPosition;
 out vec3 fragNormal;
+out vec4 fragTangent;
 out vec2 fragTexCoord;
 out vec4 fragColor;
 
@@ -564,6 +679,7 @@ void main()
 {
     fragPosition = vec3(matModel*vec4(vertexPosition, 1.0));
     fragNormal = normalize(vec3(matNormal*vec4(vertexNormal, 0.0)));
+    fragTangent = vec4(normalize(vec3(matNormal*vec4(vertexTangent.xyz, 0.0))), vertexTangent.w);
     fragTexCoord = vertexTexCoord;
     fragColor = vertexColor;
     gl_Position = mvp*vec4(vertexPosition, 1.0);
@@ -574,6 +690,7 @@ void main()
 #version 330
 in vec3 fragPosition;
 in vec3 fragNormal;
+in vec4 fragTangent;
 in vec2 fragTexCoord;
 in vec4 fragColor;
 
@@ -628,16 +745,12 @@ void main()
     if (normalDirectX == 1) normalTexel.g = 1.0 - normalTexel.g;
     if (texturesVisible == 1 && hasNormalMap == 1)
     {
-        vec3 dp1 = dFdx(fragPosition);
-        vec3 dp2 = dFdy(fragPosition);
-        vec2 duv1 = dFdx(fragTexCoord);
-        vec2 duv2 = dFdy(fragTexCoord);
-        float det = duv1.x*duv2.y - duv1.y*duv2.x;
-        if (abs(det) > 0.000001)
+        vec3 tangent = fragTangent.xyz - normal*dot(normal, fragTangent.xyz);
+        float tangentLen = dot(tangent, tangent);
+        if (tangentLen > 0.000000000001)
         {
-            vec3 tangent = normalize((dp1*duv2.y - dp2*duv1.y) / det);
-            tangent = normalize(tangent - normal*dot(normal, tangent));
-            vec3 bitangent = normalize(cross(normal, tangent) * sign(det));
+            tangent = normalize(tangent);
+            vec3 bitangent = normalize(cross(normal, tangent) * fragTangent.w);
             vec3 tangentNormal = normalTexel.xyz*2.0 - 1.0;
             normal = normalize(mat3(tangent, bitangent, normal)*tangentNormal);
         }
@@ -675,6 +788,7 @@ void main()
 
     LitShader lit;
     lit.shader = LoadShaderFromMemory(vertexShader, fragmentShader);
+    lit.shader.locs[SHADER_LOC_VERTEX_TANGENT] = GetShaderLocation(lit.shader, "vertexTangent");
     lit.viewPositionLoc = GetShaderLocation(lit.shader, "viewPos");
     lit.lightDirectionLoc = GetShaderLocation(lit.shader, "lightDir");
     lit.lightColorLoc = GetShaderLocation(lit.shader, "lightColor");
@@ -1131,8 +1245,8 @@ void UploadGlobalMeshFrame(ModelTab& tab, const float* vertices, const float* no
         const std::vector<int>& globalIndices = tab.loaded.meshGlobalVertexIndices[static_cast<size_t>(meshIndex)];
         if (globalIndices.size() != static_cast<size_t>(mesh.vertexCount)) continue;
 
-        tab.blendedVertices.resize(std::max(tab.blendedVertices.size(), globalIndices.size() * 3));
-        tab.blendedNormals.resize(std::max(tab.blendedNormals.size(), globalIndices.size() * 3));
+        tab.blendedVertices.resize(globalIndices.size() * 3);
+        tab.blendedNormals.resize(globalIndices.size() * 3);
 
         for (size_t localVertex = 0; localVertex < globalIndices.size(); ++localVertex)
         {
@@ -1148,11 +1262,21 @@ void UploadGlobalMeshFrame(ModelTab& tab, const float* vertices, const float* no
             tab.blendedNormals[localBase + 2] = normals[globalBase + 2];
         }
 
+        BuildMeshTangents(tab.blendedVertices, tab.blendedNormals, mesh.texcoords, tab.blendedTangents);
         const size_t vertexBytes = globalIndices.size() * 3 * sizeof(float);
+        const size_t tangentBytes = globalIndices.size() * 4 * sizeof(float);
         std::memcpy(mesh.vertices, tab.blendedVertices.data(), vertexBytes);
         std::memcpy(mesh.normals, tab.blendedNormals.data(), vertexBytes);
+        if (mesh.tangents && tab.blendedTangents.size() >= globalIndices.size() * 4)
+        {
+            std::memcpy(mesh.tangents, tab.blendedTangents.data(), tangentBytes);
+        }
         UpdateMeshBuffer(mesh, 0, tab.blendedVertices.data(), static_cast<int>(vertexBytes), 0);
         UpdateMeshBuffer(mesh, 2, tab.blendedNormals.data(), static_cast<int>(vertexBytes), 0);
+        if (mesh.tangents && tab.blendedTangents.size() >= globalIndices.size() * 4)
+        {
+            UpdateMeshBuffer(mesh, 4, tab.blendedTangents.data(), static_cast<int>(tangentBytes), 0);
+        }
     }
 }
 
@@ -1508,6 +1632,40 @@ void DrawMeshNodeWireframe(const ModelTab& tab, const SceneNode& node, Color col
     }
 }
 
+bool GetRayCollisionMeshNodeTriangles(const ModelTab& tab, const SceneNode& node, Ray ray, RayCollision& outHit)
+{
+    const float* vertices = GetCurrentMeshVertices(tab);
+    if (!vertices || node.meshVertexStart < 0 || node.meshVertexCount < 3) return false;
+
+    bool hitAny = false;
+    RayCollision bestHit{};
+    bestHit.distance = std::numeric_limits<float>::max();
+
+    const int start = node.meshVertexStart;
+    const int end = node.meshVertexStart + node.meshVertexCount;
+    for (int vertex = start; vertex + 2 < end; vertex += 3)
+    {
+        const int i0 = vertex * 3;
+        const int i1 = (vertex + 1) * 3;
+        const int i2 = (vertex + 2) * 3;
+        const Vector3 p0{ vertices[i0], vertices[i0 + 1], vertices[i0 + 2] };
+        const Vector3 p1{ vertices[i1], vertices[i1 + 1], vertices[i1 + 2] };
+        const Vector3 p2{ vertices[i2], vertices[i2 + 1], vertices[i2 + 2] };
+        const RayCollision hit = GetRayCollisionTriangle(ray, p0, p1, p2);
+        if (hit.hit && hit.distance > 0.0f && hit.distance < bestHit.distance)
+        {
+            bestHit = hit;
+            hitAny = true;
+        }
+    }
+
+    if (hitAny)
+    {
+        outHit = bestHit;
+    }
+    return hitAny;
+}
+
 float DistancePointToRay(Vector3 point, Ray ray)
 {
     const Vector3 toPoint = Vector3Subtract(point, ray.position);
@@ -1604,10 +1762,11 @@ bool SelectNodeFromViewport(ModelTab& tab, Vector2 mouse, const VisibilityState&
     {
         const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(i)];
 
-        if (node.type == SceneNodeType::Mesh && node.hasBounds)
+        if (node.type == SceneNodeType::Mesh)
         {
             if (!visibility.geometry) continue;
-            const RayCollision hit = GetRayCollisionBox(ray, node.bounds);
+            RayCollision hit{};
+            if (!GetRayCollisionMeshNodeTriangles(tab, node, ray, hit)) continue;
             if (hit.hit && hit.distance < bestDistance)
             {
                 bestDistance = hit.distance;
@@ -2273,6 +2432,370 @@ bool CompareSkeletonCompatibility(const LoadedFbxModel& base, const LoadedFbxMod
     return compatible;
 }
 
+std::unordered_map<std::string, int> BuildBoneNodeNameMap(const LoadedFbxModel& loaded)
+{
+    std::unordered_map<std::string, int> result;
+    for (int i = 0; i < static_cast<int>(loaded.nodes.size()); ++i)
+    {
+        const SceneNode& node = loaded.nodes[static_cast<size_t>(i)];
+        if (node.type == SceneNodeType::Bone && !node.name.empty())
+        {
+            result.emplace(node.name, i);
+        }
+    }
+    return result;
+}
+
+std::string MakeUniqueClipName(const LoadedFbxModel& loaded, const std::string& desiredName)
+{
+    const std::string baseName = desiredName.empty() ? "Imported Animation" : desiredName;
+    auto exists = [&](const std::string& name)
+    {
+        return std::any_of(loaded.animations.begin(), loaded.animations.end(), [&](const AnimationClip& clip) { return clip.name == name; });
+    };
+
+    if (!exists(baseName)) return baseName;
+    for (int suffix = 2; suffix < 10000; ++suffix)
+    {
+        const std::string candidate = baseName + "_" + std::to_string(suffix);
+        if (!exists(candidate)) return candidate;
+    }
+    return baseName + "_copy";
+}
+
+Matrix MatrixFromPose(const BonePose& pose)
+{
+    Matrix matrix = MatrixIdentity();
+    matrix.m0 = pose.axisX.x * pose.scale.x;
+    matrix.m1 = pose.axisX.y * pose.scale.x;
+    matrix.m2 = pose.axisX.z * pose.scale.x;
+    matrix.m4 = pose.axisY.x * pose.scale.y;
+    matrix.m5 = pose.axisY.y * pose.scale.y;
+    matrix.m6 = pose.axisY.z * pose.scale.y;
+    matrix.m8 = pose.axisZ.x * pose.scale.z;
+    matrix.m9 = pose.axisZ.y * pose.scale.z;
+    matrix.m10 = pose.axisZ.z * pose.scale.z;
+    matrix.m12 = pose.position.x;
+    matrix.m13 = pose.position.y;
+    matrix.m14 = pose.position.z;
+    return matrix;
+}
+
+BonePose PoseFromMatrix(Matrix matrix, int nodeIndex)
+{
+    const Vector3 xColumn{ matrix.m0, matrix.m1, matrix.m2 };
+    const Vector3 yColumn{ matrix.m4, matrix.m5, matrix.m6 };
+    const Vector3 zColumn{ matrix.m8, matrix.m9, matrix.m10 };
+
+    BonePose pose;
+    pose.position = Vector3{ matrix.m12, matrix.m13, matrix.m14 };
+    pose.scale = Vector3{
+        std::max(0.000001f, Vector3Length(xColumn)),
+        std::max(0.000001f, Vector3Length(yColumn)),
+        std::max(0.000001f, Vector3Length(zColumn))
+    };
+    pose.axisX = NormalizeOrFallback(xColumn, Vector3{ 1.0f, 0.0f, 0.0f });
+    pose.axisY = NormalizeOrFallback(yColumn, Vector3{ 0.0f, 1.0f, 0.0f });
+    pose.axisZ = NormalizeOrFallback(zColumn, Vector3{ 0.0f, 0.0f, 1.0f });
+
+    Matrix rotationMatrix = matrix;
+    rotationMatrix.m0 = pose.axisX.x;
+    rotationMatrix.m1 = pose.axisX.y;
+    rotationMatrix.m2 = pose.axisX.z;
+    rotationMatrix.m4 = pose.axisY.x;
+    rotationMatrix.m5 = pose.axisY.y;
+    rotationMatrix.m6 = pose.axisY.z;
+    rotationMatrix.m8 = pose.axisZ.x;
+    rotationMatrix.m9 = pose.axisZ.y;
+    rotationMatrix.m10 = pose.axisZ.z;
+    rotationMatrix.m12 = 0.0f;
+    rotationMatrix.m13 = 0.0f;
+    rotationMatrix.m14 = 0.0f;
+    const Vector3 euler = QuaternionToEuler(QuaternionFromMatrix(rotationMatrix));
+    pose.rotation = Vector3Scale(euler, RAD2DEG);
+    pose.node = nodeIndex;
+    return pose;
+}
+
+Matrix GetPoseMatrixByNode(const std::vector<Matrix>& matrices, int nodeIndex)
+{
+    if (nodeIndex >= 0 && nodeIndex < static_cast<int>(matrices.size())) return matrices[static_cast<size_t>(nodeIndex)];
+    return MatrixIdentity();
+}
+
+Matrix ComposeMatrix(Vector3 translation, Quaternion rotation, Vector3 scale)
+{
+    Matrix matrix = QuaternionToMatrix(rotation);
+    matrix.m0 *= scale.x;
+    matrix.m1 *= scale.x;
+    matrix.m2 *= scale.x;
+    matrix.m4 *= scale.y;
+    matrix.m5 *= scale.y;
+    matrix.m6 *= scale.y;
+    matrix.m8 *= scale.z;
+    matrix.m9 *= scale.z;
+    matrix.m10 *= scale.z;
+    matrix.m12 = translation.x;
+    matrix.m13 = translation.y;
+    matrix.m14 = translation.z;
+    matrix.m15 = 1.0f;
+    return matrix;
+}
+
+Matrix RetargetLocalMatrix(Matrix sourceBindLocal, Matrix sourceAnimLocal, Matrix targetBindLocal, bool isRoot)
+{
+    Vector3 sourceBindT{};
+    Vector3 sourceAnimT{};
+    Vector3 targetBindT{};
+    Vector3 sourceBindS{};
+    Vector3 sourceAnimS{};
+    Vector3 targetBindS{};
+    Quaternion sourceBindR{};
+    Quaternion sourceAnimR{};
+    Quaternion targetBindR{};
+    MatrixDecompose(sourceBindLocal, &sourceBindT, &sourceBindR, &sourceBindS);
+    MatrixDecompose(sourceAnimLocal, &sourceAnimT, &sourceAnimR, &sourceAnimS);
+    MatrixDecompose(targetBindLocal, &targetBindT, &targetBindR, &targetBindS);
+
+    const Quaternion rotationDelta = QuaternionMultiply(QuaternionInvert(sourceBindR), sourceAnimR);
+    const Quaternion targetAnimR = QuaternionNormalize(QuaternionMultiply(targetBindR, rotationDelta));
+    Vector3 targetAnimT = targetBindT;
+    if (isRoot)
+    {
+        targetAnimT = Vector3Add(targetBindT, Vector3Subtract(sourceAnimT, sourceBindT));
+    }
+
+    Vector3 targetAnimS = targetBindS;
+    if (std::fabs(sourceBindS.x) > 0.000001f) targetAnimS.x *= sourceAnimS.x / sourceBindS.x;
+    if (std::fabs(sourceBindS.y) > 0.000001f) targetAnimS.y *= sourceAnimS.y / sourceBindS.y;
+    if (std::fabs(sourceBindS.z) > 0.000001f) targetAnimS.z *= sourceAnimS.z / sourceBindS.z;
+    return ComposeMatrix(targetAnimT, targetAnimR, targetAnimS);
+}
+
+std::vector<Matrix> BuildBindPoseMatrices(const LoadedFbxModel& loaded)
+{
+    std::vector<Matrix> matrices(loaded.nodes.size(), MatrixIdentity());
+    for (int i = 0; i < static_cast<int>(loaded.nodes.size()); ++i)
+    {
+        const SceneNode& node = loaded.nodes[static_cast<size_t>(i)];
+        BonePose pose;
+        pose.position = node.position;
+        pose.axisX = node.axisX;
+        pose.axisY = node.axisY;
+        pose.axisZ = node.axisZ;
+        pose.rotation = node.rotation;
+        pose.scale = node.scale;
+        pose.node = i;
+        matrices[static_cast<size_t>(i)] = MatrixFromPose(pose);
+    }
+
+    for (const BonePose& pose : loaded.bonePoses)
+    {
+        if (pose.node >= 0 && pose.node < static_cast<int>(matrices.size()))
+        {
+            matrices[static_cast<size_t>(pose.node)] = MatrixFromPose(pose);
+        }
+    }
+    return matrices;
+}
+
+std::vector<Matrix> BuildFramePoseMatrices(const LoadedFbxModel& loaded, const BoneFrame& frame)
+{
+    std::vector<Matrix> matrices = BuildBindPoseMatrices(loaded);
+    for (const BonePose& pose : frame.poses)
+    {
+        if (pose.node >= 0 && pose.node < static_cast<int>(matrices.size()))
+        {
+            matrices[static_cast<size_t>(pose.node)] = MatrixFromPose(pose);
+        }
+    }
+    return matrices;
+}
+
+BoneFrame RetargetImportedBoneFrame(const BoneFrame& sourceFrame,
+                                    const LoadedFbxModel& source,
+                                    const LoadedFbxModel& target,
+                                    const std::vector<Matrix>& sourceBindMatrices,
+                                    const std::vector<Matrix>& targetBindMatrices)
+{
+    BoneFrame frame;
+    frame.time = sourceFrame.time;
+    const std::vector<Matrix> sourceFrameMatrices = BuildFramePoseMatrices(source, sourceFrame);
+    std::vector<Matrix> targetFrameMatrices = targetBindMatrices;
+
+    for (int targetNodeIndex = 0; targetNodeIndex < static_cast<int>(target.nodes.size()); ++targetNodeIndex)
+    {
+        const SceneNode& targetNode = target.nodes[static_cast<size_t>(targetNodeIndex)];
+        if (targetNode.type != SceneNodeType::Bone) continue;
+
+        int sourceNodeIndex = -1;
+        for (int i = 0; i < static_cast<int>(source.nodes.size()); ++i)
+        {
+            if (source.nodes[static_cast<size_t>(i)].type == SceneNodeType::Bone &&
+                source.nodes[static_cast<size_t>(i)].name == targetNode.name)
+            {
+                sourceNodeIndex = i;
+                break;
+            }
+        }
+        if (sourceNodeIndex < 0) continue;
+
+        const int sourceParent = FindNearestBoneParent(source, sourceNodeIndex);
+        const int targetParent = FindNearestBoneParent(target, targetNodeIndex);
+
+        const Matrix sourceBindGlobal = GetPoseMatrixByNode(sourceBindMatrices, sourceNodeIndex);
+        const Matrix sourceAnimGlobal = GetPoseMatrixByNode(sourceFrameMatrices, sourceNodeIndex);
+        const Matrix sourceBindParent = sourceParent >= 0 ? GetPoseMatrixByNode(sourceBindMatrices, sourceParent) : MatrixIdentity();
+        const Matrix sourceAnimParent = sourceParent >= 0 ? GetPoseMatrixByNode(sourceFrameMatrices, sourceParent) : MatrixIdentity();
+        const Matrix sourceBindLocal = MatrixMultiply(MatrixInvert(sourceBindParent), sourceBindGlobal);
+        const Matrix sourceAnimLocal = MatrixMultiply(MatrixInvert(sourceAnimParent), sourceAnimGlobal);
+        const Matrix targetBindGlobal = GetPoseMatrixByNode(targetBindMatrices, targetNodeIndex);
+        const Matrix targetBindParent = targetParent >= 0 ? GetPoseMatrixByNode(targetBindMatrices, targetParent) : MatrixIdentity();
+        const Matrix targetBindLocal = MatrixMultiply(MatrixInvert(targetBindParent), targetBindGlobal);
+        const Matrix targetAnimLocal = RetargetLocalMatrix(sourceBindLocal, sourceAnimLocal, targetBindLocal, targetParent < 0);
+        const Matrix targetAnimParent = targetParent >= 0 ? GetPoseMatrixByNode(targetFrameMatrices, targetParent) : MatrixIdentity();
+        targetFrameMatrices[static_cast<size_t>(targetNodeIndex)] = MatrixMultiply(targetAnimParent, targetAnimLocal);
+        frame.poses.push_back(PoseFromMatrix(targetFrameMatrices[static_cast<size_t>(targetNodeIndex)], targetNodeIndex));
+    }
+
+    for (int targetNodeIndex = 0; targetNodeIndex < static_cast<int>(target.nodes.size()); ++targetNodeIndex)
+    {
+        const int parent = FindNearestBoneParent(target, targetNodeIndex);
+        if (parent < 0) continue;
+        if (target.nodes[static_cast<size_t>(targetNodeIndex)].type != SceneNodeType::Bone) continue;
+
+        const Vector3 parentPosition = Vector3Transform(Vector3Zero(), GetPoseMatrixByNode(targetFrameMatrices, parent));
+        const Vector3 nodePosition = Vector3Transform(Vector3Zero(), GetPoseMatrixByNode(targetFrameMatrices, targetNodeIndex));
+        frame.bones.push_back(BoneSegment{ parentPosition, nodePosition, parent, targetNodeIndex });
+    }
+
+    return frame;
+}
+
+Vector3 TransformPosePoint(const BonePose& pose, Vector3 point)
+{
+    return Vector3Add(pose.position,
+                      Vector3Add(Vector3Scale(pose.axisX, point.x * pose.scale.x),
+                                 Vector3Add(Vector3Scale(pose.axisY, point.y * pose.scale.y),
+                                            Vector3Scale(pose.axisZ, point.z * pose.scale.z))));
+}
+
+Vector3 TransformPoseVector(const BonePose& pose, Vector3 vector)
+{
+    return Vector3Add(Vector3Scale(pose.axisX, vector.x * pose.scale.x),
+                      Vector3Add(Vector3Scale(pose.axisY, vector.y * pose.scale.y),
+                                 Vector3Scale(pose.axisZ, vector.z * pose.scale.z)));
+}
+
+MeshFrame BuildSkinnedMeshFrame(const LoadedFbxModel& target, const BoneFrame& boneFrame)
+{
+    MeshFrame meshFrame;
+    if (target.skinnedVertices.size() != target.bindVertices.size() / 3)
+    {
+        meshFrame.vertices = target.bindVertices;
+        meshFrame.normals = target.bindNormals;
+        return meshFrame;
+    }
+
+    std::unordered_map<std::string, const BonePose*> posesByName;
+    for (const BonePose& pose : boneFrame.poses)
+    {
+        if (pose.node >= 0 && pose.node < static_cast<int>(target.nodes.size()))
+        {
+            posesByName[target.nodes[static_cast<size_t>(pose.node)].name] = &pose;
+        }
+    }
+
+    meshFrame.vertices.reserve(target.bindVertices.size());
+    meshFrame.normals.reserve(target.bindNormals.size());
+    for (const SkinnedVertex& vertex : target.skinnedVertices)
+    {
+        Vector3 position{};
+        Vector3 normal{};
+        float totalWeight = 0.0f;
+
+        for (const SkinnedVertexInfluence& influence : vertex.influences)
+        {
+            const auto pose = posesByName.find(influence.boneName);
+            if (pose == posesByName.end() || !pose->second) continue;
+            position = Vector3Add(position, Vector3Scale(TransformPosePoint(*pose->second, influence.bindPositionInBone), influence.weight));
+            normal = Vector3Add(normal, Vector3Scale(TransformPoseVector(*pose->second, influence.bindNormalInBone), influence.weight));
+            totalWeight += influence.weight;
+        }
+
+        if (totalWeight > 0.000001f)
+        {
+            position = Vector3Scale(position, 1.0f / totalWeight);
+            normal = NormalizeOrFallback(Vector3Scale(normal, 1.0f / totalWeight), vertex.bindNormal);
+        }
+        else
+        {
+            position = vertex.bindPosition;
+            normal = vertex.bindNormal;
+        }
+
+        meshFrame.vertices.push_back(position.x);
+        meshFrame.vertices.push_back(position.y);
+        meshFrame.vertices.push_back(position.z);
+        meshFrame.normals.push_back(normal.x);
+        meshFrame.normals.push_back(normal.y);
+        meshFrame.normals.push_back(normal.z);
+    }
+
+    return meshFrame;
+}
+
+bool ImportAnimationsFromFbx(ModelTab& targetTab, const std::string& importPath, int& importedCount, std::string& error)
+{
+    importedCount = 0;
+    error.clear();
+
+    LoadedFbxModel source;
+    if (!LoadFbxModel(importPath, source, error))
+    {
+        return false;
+    }
+
+    std::string compatibility;
+    if (!CompareSkeletonCompatibility(targetTab.loaded, source, compatibility))
+    {
+        error = "Skeletons are not compatible.\n" + compatibility;
+        UnloadFbxModel(source);
+        return false;
+    }
+
+    const std::vector<Matrix> sourceBindMatrices = BuildBindPoseMatrices(source);
+    const std::vector<Matrix> targetBindMatrices = BuildBindPoseMatrices(targetTab.loaded);
+    for (const AnimationClip& sourceClip : source.animations)
+    {
+        AnimationClip clip;
+        clip.name = MakeUniqueClipName(targetTab.loaded, sourceClip.name);
+        clip.duration = sourceClip.duration;
+        clip.frames.reserve(sourceClip.frames.size());
+        for (const BoneFrame& sourceFrame : sourceClip.frames)
+        {
+            clip.frames.push_back(RetargetImportedBoneFrame(sourceFrame, source, targetTab.loaded, sourceBindMatrices, targetBindMatrices));
+        }
+        clip.meshFrames.reserve(clip.frames.size());
+        for (const BoneFrame& frame : clip.frames)
+        {
+            clip.meshFrames.push_back(BuildSkinnedMeshFrame(targetTab.loaded, frame));
+        }
+
+        targetTab.loaded.animations.push_back(std::move(clip));
+        ++importedCount;
+    }
+
+    UnloadFbxModel(source);
+    if (importedCount == 0)
+    {
+        error = "Compatible FBX loaded, but it contains no animation stacks.";
+        return false;
+    }
+
+    return true;
+}
+
 const char* GetSceneNodeTypeJsonName(SceneNodeType type)
 {
     switch (type)
@@ -2600,6 +3123,85 @@ bool DrawChannelButton(Font font, Rectangle bounds, PackedChannel channel)
     return hovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
 }
 
+void DrawTextureThumbnail(Font font, Rectangle bounds, const PbrTexture& texture, bool dropTarget)
+{
+    DrawRectangleRec(bounds, dropTarget ? Color{ 42, 62, 74, 255 } : Color{ 18, 21, 25, 255 });
+    if (texture.loaded)
+    {
+        const Rectangle source{ 0.0f, 0.0f, static_cast<float>(texture.texture.width), static_cast<float>(texture.texture.height) };
+        DrawTexturePro(texture.texture, source, Rectangle{ bounds.x + 2.0f, bounds.y + 2.0f, bounds.width - 4.0f, bounds.height - 4.0f }, Vector2{}, 0.0f, WHITE);
+    }
+    else
+    {
+        const Vector2 size = MeasureTextEx(font, "-", 18.0f, 1.0f);
+        DrawUiText(font, "-", bounds.x + (bounds.width - size.x) * 0.5f, bounds.y + (bounds.height - size.y) * 0.5f, 18.0f, Color{ 120, 132, 144, 255 });
+    }
+    DrawRectangleLinesEx(bounds, 1.0f, dropTarget ? Color{ 120, 190, 230, 255 } : Color{ 70, 80, 90, 255 });
+}
+
+void DrawTextureContextMenu(Font font, ModelTab& tab, TextureClipboard& clipboard, std::string& notice, std::string& error)
+{
+    if (!clipboard.menuOpen) return;
+
+    const Rectangle menu{ clipboard.position.x, clipboard.position.y, 116.0f, 62.0f };
+    DrawRectangleRec(menu, Color{ 24, 27, 31, 248 });
+    DrawRectangleLinesEx(menu, 1.0f, Color{ 80, 90, 100, 255 });
+
+    const Rectangle copyButton{ menu.x, menu.y, menu.width, 30.0f };
+    const Rectangle pasteButton{ menu.x, menu.y + 30.0f, menu.width, 30.0f };
+    const bool validMaterial = clipboard.materialIndex >= 0 && clipboard.materialIndex < static_cast<int>(tab.pbrMaterials.size());
+    const PbrTexture* texture = validMaterial ? &GetPbrTexture(tab.pbrMaterials[static_cast<size_t>(clipboard.materialIndex)], clipboard.slot) : nullptr;
+    const bool canCopy = texture && texture->loaded;
+    const bool canPaste = !clipboard.path.empty();
+
+    if (clipboard.justOpened)
+    {
+        clipboard.justOpened = false;
+    }
+    else
+    {
+        if (canCopy && DrawPanelButton(font, copyButton, "Copy"))
+        {
+            clipboard.path = texture->path;
+            clipboard.menuOpen = false;
+            notice = "Copied texture: " + std::string(GetFileName(clipboard.path.c_str()));
+            error.clear();
+            return;
+        }
+        if (canPaste && DrawPanelButton(font, pasteButton, "Paste"))
+        {
+            std::string loadError;
+            if (LoadPbrTexture(tab, clipboard.materialIndex, clipboard.slot, clipboard.path, loadError))
+            {
+                notice = std::string("Pasted texture to ") + GetPbrTextureSlotName(clipboard.slot) + ".";
+                error.clear();
+            }
+            else
+            {
+                error = loadError;
+                notice.clear();
+            }
+            clipboard.menuOpen = false;
+            return;
+        }
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !CheckCollisionPointRec(GetMousePosition(), menu))
+        {
+            clipboard.menuOpen = false;
+        }
+    }
+
+    if (!canCopy)
+    {
+        DrawRectangleRec(copyButton, Color{ 28, 31, 35, 245 });
+        DrawUiText(font, "Copy", copyButton.x + 10.0f, copyButton.y + 5.0f, 16.0f, Color{ 105, 115, 124, 255 });
+    }
+    if (!canPaste)
+    {
+        DrawRectangleRec(pasteButton, Color{ 28, 31, 35, 245 });
+        DrawUiText(font, "Paste", pasteButton.x + 10.0f, pasteButton.y + 5.0f, 16.0f, Color{ 105, 115, 124, 255 });
+    }
+}
+
 void DrawSceneStatsPanel(Font font, const ModelTab& tab, float panelX, float panelY, float panelW)
 {
     const SceneStats stats = CalculateSceneStats(tab.loaded);
@@ -2652,15 +3254,61 @@ void DrawSceneStatsPanel(Font font, const ModelTab& tab, float panelX, float pan
     DrawUiTextClipped(font, line, contentX, y, 15.0f, panelW - 24.0f, Color{ 205, 213, 220, 255 });
 }
 
-void DrawPbrTextureRow(Font font, ModelTab& tab, int materialIndex, PbrTextureSlot slot, float panelX, float panelW, float& y, std::string& notice, std::string& error)
+void DrawPbrTextureRow(Font font,
+                       ModelTab& tab,
+                       int materialIndex,
+                       PbrTextureSlot slot,
+                       float panelX,
+                       float panelW,
+                       float& y,
+                       const std::vector<std::string>& droppedPaths,
+                       bool& droppedTextureHandled,
+                       TextureClipboard& clipboard,
+                       std::string& notice,
+                       std::string& error)
 {
     const float contentX = panelX + 12.0f;
     EnsurePbrMaterialStates(tab);
     PbrMaterialState& material = tab.pbrMaterials[static_cast<size_t>(materialIndex)];
     const PbrTexture& texture = GetPbrTexture(material, slot);
+    const Rectangle thumbnail{ contentX, y - 2.0f, 44.0f, 44.0f };
+    const bool thumbnailHovered = CheckCollisionPointRec(GetMousePosition(), thumbnail);
+    DrawTextureThumbnail(font, thumbnail, texture, thumbnailHovered && !droppedPaths.empty());
+
+    if (!droppedTextureHandled && thumbnailHovered)
+    {
+        for (const std::string& droppedPath : droppedPaths)
+        {
+            if (!IsTextureExtension(std::filesystem::path(droppedPath))) continue;
+
+            std::string loadError;
+            if (LoadPbrTexture(tab, materialIndex, slot, droppedPath, loadError))
+            {
+                notice = std::string("Dropped ") + GetPbrTextureSlotName(slot) + ": " + droppedPath;
+                error.clear();
+            }
+            else
+            {
+                error = loadError;
+                notice.clear();
+            }
+            droppedTextureHandled = true;
+            break;
+        }
+    }
+
+    if (thumbnailHovered && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT))
+    {
+        clipboard.menuOpen = true;
+        clipboard.justOpened = true;
+        clipboard.materialIndex = materialIndex;
+        clipboard.slot = slot;
+        clipboard.position = GetMousePosition();
+    }
+
     char label[128] = {};
     std::snprintf(label, sizeof(label), "%s", GetPbrTextureSlotName(slot));
-    DrawUiText(font, label, contentX, y, 15.0f, Color{ 205, 213, 220, 255 });
+    DrawUiText(font, label, contentX + 52.0f, y, 15.0f, Color{ 205, 213, 220, 255 });
 
     float buttonRight = panelX + panelW - 14.0f;
     if (slot == PbrTextureSlot::Roughness || slot == PbrTextureSlot::Metallic || slot == PbrTextureSlot::AmbientOcclusion)
@@ -2712,11 +3360,20 @@ void DrawPbrTextureRow(Font font, ModelTab& tab, int materialIndex, PbrTextureSl
     }
 
     y += 22.0f;
-    DrawUiTextClipped(font, texture.loaded ? GetFileName(texture.path.c_str()) : "No texture", contentX + 8.0f, y, 13.0f, panelW - 28.0f, texture.loaded ? Color{ 160, 205, 230, 255 } : Color{ 120, 130, 140, 255 });
-    y += 26.0f;
+    DrawUiTextClipped(font, texture.loaded ? GetFileName(texture.path.c_str()) : "No texture", contentX + 52.0f, y, 13.0f, panelW - 80.0f, texture.loaded ? Color{ 160, 205, 230, 255 } : Color{ 120, 130, 140, 255 });
+    y += 34.0f;
 }
 
-void DrawMaterialsPanel(Font font, ModelTab& tab, float panelX, float panelY, float panelW, std::string& notice, std::string& error)
+void DrawMaterialsPanel(Font font,
+                        ModelTab& tab,
+                        float panelX,
+                        float panelY,
+                        float panelW,
+                        const std::vector<std::string>& droppedPaths,
+                        bool& droppedTextureHandled,
+                        TextureClipboard& clipboard,
+                        std::string& notice,
+                        std::string& error)
 {
     EnsurePbrMaterialStates(tab);
     const float contentX = panelX + 12.0f;
@@ -2775,8 +3432,8 @@ void DrawMaterialsPanel(Font font, ModelTab& tab, float panelX, float panelY, fl
     }
     y += 34.0f;
 
-    DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Diffuse, panelX, panelW, y, notice, error);
-    DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Normal, panelX, panelW, y, notice, error);
+    DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Diffuse, panelX, panelW, y, droppedPaths, droppedTextureHandled, clipboard, notice, error);
+    DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Normal, panelX, panelW, y, droppedPaths, droppedTextureHandled, clipboard, notice, error);
 
     const Rectangle normalModeButton{ contentX + 112.0f, y - 2.0f, panelW - 136.0f, 22.0f };
     DrawUiText(font, "Normal mode", contentX, y, 14.0f, Color{ 190, 200, 210, 255 });
@@ -2786,83 +3443,97 @@ void DrawMaterialsPanel(Font font, ModelTab& tab, float panelX, float panelY, fl
     }
     y += 32.0f;
 
-    DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Roughness, panelX, panelW, y, notice, error);
-    DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Metallic, panelX, panelW, y, notice, error);
-    DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::AmbientOcclusion, panelX, panelW, y, notice, error);
-    DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Emissive, panelX, panelW, y, notice, error);
-    DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Opacity, panelX, panelW, y, notice, error);
+    DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Roughness, panelX, panelW, y, droppedPaths, droppedTextureHandled, clipboard, notice, error);
+    DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Metallic, panelX, panelW, y, droppedPaths, droppedTextureHandled, clipboard, notice, error);
+    DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::AmbientOcclusion, panelX, panelW, y, droppedPaths, droppedTextureHandled, clipboard, notice, error);
+    DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Emissive, panelX, panelW, y, droppedPaths, droppedTextureHandled, clipboard, notice, error);
+    DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Opacity, panelX, panelW, y, droppedPaths, droppedTextureHandled, clipboard, notice, error);
+    DrawTextureContextMenu(font, tab, clipboard, notice, error);
 }
 
-void DrawSkeletonCompatibilityPanel(Font font, ModelTab& tab, float panelX, float panelY, float panelW, std::string& notice, std::string& error)
+void DrawUvPanel(Font font, ModelTab& tab, float panelX, float panelY, float panelW)
 {
     const float contentX = panelX + 12.0f;
     float y = panelY;
 
-    DrawUiText(font, "SKELETON COMPATIBILITY", contentX, y, 16.0f, Color{ 165, 182, 196, 255 });
+    DrawUiText(font, "UV EDITOR", contentX, y, 16.0f, Color{ 165, 182, 196, 255 });
     y += 30.0f;
 
-    const std::vector<SkeletonEntry> activeBones = BuildSkeletonSignature(tab.loaded);
-    char activeText[128] = {};
-    std::snprintf(activeText, sizeof(activeText), "Active skeleton bones: %zu", activeBones.size());
-    DrawUiText(font, activeText, contentX, y, 15.0f, Color{ 205, 213, 220, 255 });
-    y += 28.0f;
-
-    if (DrawPanelButton(font, Rectangle{ contentX, y, panelW - 24.0f, 24.0f }, "Locate FBX To Compare"))
+    if (tab.loaded.uvSetNames.empty() || tab.loaded.uvSets.empty())
     {
-        const std::string comparePath = OpenFbxFileDialog();
-        if (!comparePath.empty())
-        {
-            LoadedFbxModel compareModel;
-            std::string loadError;
-            if (LoadFbxModel(comparePath, compareModel, loadError))
-            {
-                tab.skeletonComparePath = comparePath;
-                tab.skeletonCompatible = CompareSkeletonCompatibility(tab.loaded, compareModel, tab.skeletonCompareResult);
-                UnloadFbxModel(compareModel);
-                notice = tab.skeletonCompatible ? "Skeletons are compatible." : "Skeletons are not compatible.";
-                error.clear();
-            }
-            else
-            {
-                tab.skeletonComparePath.clear();
-                tab.skeletonCompareResult = "Failed to load comparison FBX.";
-                tab.skeletonCompatible = false;
-                error = loadError;
-                notice.clear();
-            }
-        }
-    }
-    y += 36.0f;
-
-    if (!tab.skeletonComparePath.empty())
-    {
-        DrawUiText(font, "Compared FBX", contentX, y, 15.0f, Color{ 165, 182, 196, 255 });
-        y += 22.0f;
-        DrawUiTextClipped(font, tab.skeletonComparePath.c_str(), contentX, y, 13.0f, panelW - 24.0f, Color{ 160, 205, 230, 255 });
-        y += 30.0f;
+        DrawUiTextClipped(font, "No UV sets found in this FBX.", contentX, y, 14.0f, panelW - 24.0f, Color{ 128, 140, 152, 255 });
+        return;
     }
 
-    if (!tab.skeletonCompareResult.empty())
+    tab.selectedUvSet = std::max(0, std::min(tab.selectedUvSet, static_cast<int>(tab.loaded.uvSets.size()) - 1));
+    const std::string uvName = tab.selectedUvSet < static_cast<int>(tab.loaded.uvSetNames.size()) ? tab.loaded.uvSetNames[static_cast<size_t>(tab.selectedUvSet)] : std::string("UV Set");
+    if (DrawPanelButton(font, Rectangle{ contentX, y, panelW - 24.0f, 24.0f }, uvName.c_str()))
     {
-        const Color resultColor = tab.skeletonCompatible ? Color{ 150, 225, 170, 255 } : Color{ 255, 170, 135, 255 };
-        std::string remaining = tab.skeletonCompareResult;
-        while (!remaining.empty() && y < panelY + GetHierarchyPanelHeight() - 24.0f)
-        {
-            const size_t newline = remaining.find('\n');
-            const std::string line = newline == std::string::npos ? remaining : remaining.substr(0, newline);
-            DrawUiTextClipped(font, line.c_str(), contentX, y, 15.0f, panelW - 24.0f, resultColor);
-            y += 22.0f;
-            if (newline == std::string::npos) break;
-            remaining.erase(0, newline + 1);
-        }
+        tab.selectedUvSet = (tab.selectedUvSet + 1) % static_cast<int>(tab.loaded.uvSets.size());
     }
-    else
+    y += 34.0f;
+
+    if (tab.selectedNode < 0 || tab.selectedNode >= static_cast<int>(tab.loaded.nodes.size()) ||
+        tab.loaded.nodes[static_cast<size_t>(tab.selectedNode)].type != SceneNodeType::Mesh)
     {
-        DrawUiTextClipped(font, "Choose another FBX to compare bone names and hierarchy against the active model.", contentX, y, 14.0f, panelW - 24.0f, Color{ 128, 140, 152, 255 });
+        DrawUiTextClipped(font, "Select a mesh in the viewport or hierarchy to display its UVs.", contentX, y, 14.0f, panelW - 24.0f, Color{ 128, 140, 152, 255 });
+        return;
+    }
+
+    const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(tab.selectedNode)];
+    const std::vector<float>& uvs = tab.loaded.uvSets[static_cast<size_t>(tab.selectedUvSet)];
+    if (node.meshVertexStart < 0 || node.meshVertexCount <= 0 || uvs.size() < static_cast<size_t>(node.meshVertexStart + node.meshVertexCount) * 2)
+    {
+        DrawUiTextClipped(font, "Selected mesh has no UV data for this set.", contentX, y, 14.0f, panelW - 24.0f, Color{ 128, 140, 152, 255 });
+        return;
+    }
+
+    char meshText[192] = {};
+    std::snprintf(meshText, sizeof(meshText), "Mesh: %s", node.name.c_str());
+    DrawUiTextClipped(font, meshText, contentX, y, 14.0f, panelW - 24.0f, Color{ 205, 213, 220, 255 });
+    y += 24.0f;
+
+    const float editorSize = std::min(panelW - 24.0f, std::max(120.0f, GetHierarchyPanelHeight() - (y - panelY) - 24.0f));
+    const Rectangle editor{ contentX, y, editorSize, editorSize };
+    DrawRectangleRec(editor, Color{ 14, 16, 19, 245 });
+    DrawRectangleLinesEx(editor, 1.0f, Color{ 88, 98, 108, 255 });
+
+    for (int i = 1; i < 4; ++i)
+    {
+        const float p = static_cast<float>(i) / 4.0f;
+        DrawLine(static_cast<int>(editor.x + editor.width * p), static_cast<int>(editor.y), static_cast<int>(editor.x + editor.width * p), static_cast<int>(editor.y + editor.height), Color{ 42, 48, 54, 255 });
+        DrawLine(static_cast<int>(editor.x), static_cast<int>(editor.y + editor.height * p), static_cast<int>(editor.x + editor.width), static_cast<int>(editor.y + editor.height * p), Color{ 42, 48, 54, 255 });
+    }
+
+    auto uvToScreen = [&](int globalVertex)
+    {
+        const size_t uvIndex = static_cast<size_t>(globalVertex) * 2;
+        const float u = uvIndex < uvs.size() ? uvs[uvIndex] : 0.0f;
+        const float v = uvIndex + 1 < uvs.size() ? uvs[uvIndex + 1] : 0.0f;
+        return Vector2{ editor.x + u * editor.width, editor.y + (1.0f - v) * editor.height };
+    };
+
+    const int start = node.meshVertexStart;
+    const int end = node.meshVertexStart + node.meshVertexCount;
+    for (int vertex = start; vertex + 2 < end; vertex += 3)
+    {
+        const Vector2 a = uvToScreen(vertex);
+        const Vector2 b = uvToScreen(vertex + 1);
+        const Vector2 c = uvToScreen(vertex + 2);
+        DrawLineV(a, b, Color{ 95, 170, 220, 220 });
+        DrawLineV(b, c, Color{ 95, 170, 220, 220 });
+        DrawLineV(c, a, Color{ 95, 170, 220, 220 });
     }
 }
 
-void DrawHierarchyPanel(Font font, ModelTab* active, HierarchyPanelState& panel, std::string& notice, std::string& error)
+void DrawHierarchyPanel(Font font,
+                        ModelTab* active,
+                        HierarchyPanelState& panel,
+                        const std::vector<std::string>& droppedPaths,
+                        bool& droppedTextureHandled,
+                        TextureClipboard& textureClipboard,
+                        std::string& notice,
+                        std::string& error)
 {
     constexpr float panelX = 0.0f;
     constexpr float panelY = 61.0f;
@@ -2888,7 +3559,7 @@ void DrawHierarchyPanel(Font font, ModelTab* active, HierarchyPanelState& panel,
     const Rectangle hierarchyTab{ panelX + 8.0f, panelY + 34.0f, tabW, 24.0f };
     const Rectangle statsTab{ hierarchyTab.x + hierarchyTab.width + 4.0f, panelY + 34.0f, tabW, 24.0f };
     const Rectangle materialsTab{ statsTab.x + statsTab.width + 4.0f, panelY + 34.0f, tabW, 24.0f };
-    const Rectangle skeletonTab{ materialsTab.x + materialsTab.width + 4.0f, panelY + 34.0f, tabW, 24.0f };
+    const Rectangle uvTab{ materialsTab.x + materialsTab.width + 4.0f, panelY + 34.0f, tabW, 24.0f };
     if (DrawPanelTab(font, hierarchyTab, "Hierarchy", panel.activeTab == LeftPanelTab::Hierarchy))
     {
         panel.activeTab = LeftPanelTab::Hierarchy;
@@ -2901,9 +3572,9 @@ void DrawHierarchyPanel(Font font, ModelTab* active, HierarchyPanelState& panel,
     {
         panel.activeTab = LeftPanelTab::Materials;
     }
-    if (DrawPanelTab(font, skeletonTab, "Skeleton", panel.activeTab == LeftPanelTab::Skeleton))
+    if (DrawPanelTab(font, uvTab, "UV", panel.activeTab == LeftPanelTab::UV))
     {
-        panel.activeTab = LeftPanelTab::Skeleton;
+        panel.activeTab = LeftPanelTab::UV;
     }
 
     if (!active)
@@ -2920,12 +3591,12 @@ void DrawHierarchyPanel(Font font, ModelTab* active, HierarchyPanelState& panel,
 
     if (panel.activeTab == LeftPanelTab::Materials)
     {
-        DrawMaterialsPanel(font, *active, panelX, GetHierarchyContentStartY() + 10.0f, panelW, notice, error);
+        DrawMaterialsPanel(font, *active, panelX, GetHierarchyContentStartY() + 10.0f, panelW, droppedPaths, droppedTextureHandled, textureClipboard, notice, error);
         return;
     }
-    if (panel.activeTab == LeftPanelTab::Skeleton)
+    if (panel.activeTab == LeftPanelTab::UV)
     {
-        DrawSkeletonCompatibilityPanel(font, *active, panelX, GetHierarchyContentStartY() + 10.0f, panelW, notice, error);
+        DrawUvPanel(font, *active, panelX, GetHierarchyContentStartY() + 10.0f, panelW);
         return;
     }
 
@@ -3012,7 +3683,18 @@ bool DrawMenuItem(Font font, Rectangle bounds, const char* text, bool selected =
     return hovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
 }
 
-void DrawMenuBar(Font font, OpenMenu& openMenu, bool& openRequested, bool& exportJsonRequested, bool& quitRequested, ViewMode& viewMode, NavigationPreset& navigation, VisibilityState& visibility)
+void DrawMenuBar(Font font,
+                 OpenMenu& openMenu,
+                 bool& openRequested,
+                 bool& saveFbxRequested,
+                 bool& saveAsFbxRequested,
+                 bool& importAnimationsRequested,
+                 bool& exportJsonRequested,
+                 bool& compareFbxRequested,
+                 bool& quitRequested,
+                 ViewMode& viewMode,
+                 NavigationPreset& navigation,
+                 VisibilityState& visibility)
 {
     const float menuHeight = 28.0f;
     DrawRectangle(0, 0, GetScreenWidth(), static_cast<int>(menuHeight), Color{ 24, 26, 29, 255 });
@@ -3051,18 +3733,38 @@ void DrawMenuBar(Font font, OpenMenu& openMenu, bool& openRequested, bool& expor
 
     if (openMenu == OpenMenu::File)
     {
-        DrawRectangle(8, 29, 220, 98, Color{ 28, 31, 35, 245 });
-        if (DrawMenuItem(font, Rectangle{ 8.0f, 29.0f, 220.0f, 30.0f }, "Open FBX...        Ctrl+O"))
+        DrawRectangle(8, 29, 270, 218, Color{ 28, 31, 35, 245 });
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 29.0f, 270.0f, 30.0f }, "Open FBX...        Ctrl+O"))
         {
             openRequested = true;
             openMenu = OpenMenu::None;
         }
-        if (DrawMenuItem(font, Rectangle{ 8.0f, 59.0f, 220.0f, 30.0f }, "Export JSON"))
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 59.0f, 270.0f, 30.0f }, "Save FBX        Ctrl+S"))
+        {
+            saveFbxRequested = true;
+            openMenu = OpenMenu::None;
+        }
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 89.0f, 270.0f, 30.0f }, "Save As...        Ctrl+Shift+S"))
+        {
+            saveAsFbxRequested = true;
+            openMenu = OpenMenu::None;
+        }
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 119.0f, 270.0f, 30.0f }, "Import Animations..."))
+        {
+            importAnimationsRequested = true;
+            openMenu = OpenMenu::None;
+        }
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 149.0f, 270.0f, 30.0f }, "Export JSON"))
         {
             exportJsonRequested = true;
             openMenu = OpenMenu::None;
         }
-        if (DrawMenuItem(font, Rectangle{ 8.0f, 89.0f, 220.0f, 30.0f }, "Exit        Ctrl+Q"))
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 179.0f, 270.0f, 30.0f }, "Compare FBX..."))
+        {
+            compareFbxRequested = true;
+            openMenu = OpenMenu::None;
+        }
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 209.0f, 270.0f, 30.0f }, "Exit        Ctrl+Q"))
         {
             quitRequested = true;
             openMenu = OpenMenu::None;
@@ -3123,6 +3825,49 @@ void DrawMenuBar(Font font, OpenMenu& openMenu, bool& openRequested, bool& expor
         DrawUiText(font, "Blender: MMB orbit, Alt snap, Shift+MMB pan, Wheel zoom", 140.0f, 188.0f, 15.0f, Color{ 205, 213, 220, 255 });
         DrawUiText(font, "Maya: Alt+LMB orbit, Shift snap, Alt+MMB pan, Alt+RMB/Wheel zoom", 140.0f, 214.0f, 15.0f, Color{ 205, 213, 220, 255 });
         DrawUiText(font, "Esc deselects    Ctrl+Q quits    Tabs: X/middle closes", 140.0f, 240.0f, 15.0f, Color{ 205, 213, 220, 255 });
+    }
+}
+
+void DrawSkeletonCompareResultWindow(Font font, bool& visible, bool compatible, const std::string& path, const std::string& result)
+{
+    if (!visible) return;
+
+    const float w = 520.0f;
+    const float h = 300.0f;
+    const Rectangle bounds{ (static_cast<float>(GetScreenWidth()) - w) * 0.5f, (static_cast<float>(GetScreenHeight()) - h) * 0.5f, w, h };
+    const Vector2 mouse = GetMousePosition();
+    DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Color{ 0, 0, 0, 90 });
+    DrawRectangleRec(bounds, Color{ 22, 25, 29, 245 });
+    DrawRectangleLinesEx(bounds, 1.0f, Color{ 86, 96, 108, 255 });
+
+    DrawUiText(font, "SKELETON COMPATIBILITY", bounds.x + 16.0f, bounds.y + 14.0f, 17.0f, Color{ 165, 182, 196, 255 });
+    const Rectangle closeButton{ bounds.x + bounds.width - 38.0f, bounds.y + 10.0f, 26.0f, 24.0f };
+    if (DrawPanelButton(font, closeButton, "x") || IsKeyPressed(KEY_ESCAPE))
+    {
+        visible = false;
+        return;
+    }
+
+    float y = bounds.y + 48.0f;
+    DrawUiText(font, compatible ? "Compatible" : "Not compatible", bounds.x + 16.0f, y, 18.0f, compatible ? Color{ 150, 225, 170, 255 } : Color{ 255, 170, 135, 255 });
+    y += 30.0f;
+    DrawUiTextClipped(font, path.c_str(), bounds.x + 16.0f, y, 13.0f, bounds.width - 32.0f, Color{ 160, 205, 230, 255 });
+    y += 34.0f;
+
+    std::string remaining = result;
+    while (!remaining.empty() && y < bounds.y + bounds.height - 22.0f)
+    {
+        const size_t newline = remaining.find('\n');
+        const std::string line = newline == std::string::npos ? remaining : remaining.substr(0, newline);
+        DrawUiTextClipped(font, line.c_str(), bounds.x + 16.0f, y, 15.0f, bounds.width - 32.0f, Color{ 205, 213, 220, 255 });
+        y += 22.0f;
+        if (newline == std::string::npos) break;
+        remaining.erase(0, newline + 1);
+    }
+
+    if (CheckCollisionPointRec(mouse, bounds))
+    {
+        // Keep clicks inside the result dialog from interacting with UI below on the same frame.
     }
 }
 
@@ -3266,10 +4011,32 @@ void DrawTimeline(Font font, LoadedFbxModel& loaded, AnimationState& animation, 
         animation.scrubbing = false;
     }
 
-    const int visibleRows = 3;
-    for (int i = 0; i < static_cast<int>(loaded.animations.size()) && i < visibleRows; ++i)
+    const float rowHeight = 26.0f;
+    const Rectangle clipListBounds{ 8.0f, panelY + 58.0f, listWidth - 16.0f, panelHeight - 62.0f };
+    const int visibleRows = std::max(1, static_cast<int>(std::floor(clipListBounds.height / rowHeight)));
+    const int maxClipScroll = std::max(0, static_cast<int>(loaded.animations.size()) - visibleRows);
+    animation.clipScroll = ClampInt(animation.clipScroll, 0, maxClipScroll);
+    if (!loaded.animations.empty() && CheckCollisionPointRec(mouse, clipListBounds))
     {
-        const float rowY = panelY + 60.0f + static_cast<float>(i) * 26.0f;
+        const float wheel = GetMouseWheelMove();
+        if (std::fabs(wheel) > 0.0f)
+        {
+            animation.clipScroll = ClampInt(animation.clipScroll - static_cast<int>(wheel), 0, maxClipScroll);
+        }
+    }
+
+    BeginScissorMode(static_cast<int>(clipListBounds.x),
+                     static_cast<int>(clipListBounds.y),
+                     static_cast<int>(clipListBounds.width),
+                     static_cast<int>(clipListBounds.height));
+    const Rectangle contextMenuBounds{ animation.contextPosition.x, animation.contextPosition.y, 152.0f, 38.0f };
+    const bool mouseOverContextMenu = animation.contextMenuOpen && CheckCollisionPointRec(mouse, contextMenuBounds);
+    for (int visible = 0; visible < visibleRows; ++visible)
+    {
+        const int i = animation.clipScroll + visible;
+        if (i >= static_cast<int>(loaded.animations.size())) break;
+
+        const float rowY = clipListBounds.y + static_cast<float>(visible) * rowHeight;
         const Rectangle row{ 10.0f, rowY, listWidth - 20.0f, 22.0f };
         const bool selected = i == animation.clipIndex;
 
@@ -3282,17 +4049,81 @@ void DrawTimeline(Font font, LoadedFbxModel& loaded, AnimationState& animation, 
             DrawRectangleRec(row, Color{ 36, 42, 48, 255 });
         }
 
-        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, row))
+        if (!mouseOverContextMenu && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, row))
         {
             animation.clipIndex = i;
             animation.time = 0.0f;
             animation.playing = true;
             animation.scrubbing = false;
+            animation.contextMenuOpen = false;
+        }
+        if (!mouseOverContextMenu && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) && CheckCollisionPointRec(mouse, row))
+        {
+            animation.contextClipIndex = i;
+            animation.contextPosition = Vector2{
+                ClampFloat(mouse.x, 4.0f, static_cast<float>(GetScreenWidth()) - 156.0f),
+                ClampFloat(mouse.y, 4.0f, static_cast<float>(GetScreenHeight()) - 42.0f)
+            };
+            animation.contextMenuOpen = true;
+            animation.contextMenuJustOpened = true;
         }
 
         char rowText[256] = {};
         std::snprintf(rowText, sizeof(rowText), "%s  %.2fs", loaded.animations[static_cast<size_t>(i)].name.c_str(), loaded.animations[static_cast<size_t>(i)].duration);
         DrawUiText(font, rowText, row.x + 8.0f, row.y + 3.0f, 15.0f, selected ? RAYWHITE : Color{ 185, 194, 202, 255 });
+    }
+    EndScissorMode();
+
+    if (maxClipScroll > 0)
+    {
+        const Rectangle track{ listWidth - 10.0f, clipListBounds.y, 4.0f, clipListBounds.height };
+        const float thumbHeight = std::max(18.0f, track.height * (static_cast<float>(visibleRows) / static_cast<float>(loaded.animations.size())));
+        const float thumbTravel = std::max(1.0f, track.height - thumbHeight);
+        const float thumbY = track.y + thumbTravel * (static_cast<float>(animation.clipScroll) / static_cast<float>(maxClipScroll));
+        DrawRectangleRec(track, Color{ 42, 48, 54, 255 });
+        DrawRectangleRec(Rectangle{ track.x, thumbY, track.width, thumbHeight }, Color{ 130, 145, 158, 255 });
+    }
+
+    if (animation.contextMenuOpen)
+    {
+        const Rectangle menu{ animation.contextPosition.x, animation.contextPosition.y, 152.0f, 38.0f };
+        DrawRectangleRec(menu, Color{ 24, 27, 31, 248 });
+        DrawRectangleLinesEx(menu, 1.0f, Color{ 84, 94, 104, 255 });
+        const bool validContextClip = animation.contextClipIndex >= 0 && animation.contextClipIndex < static_cast<int>(loaded.animations.size());
+        if (animation.contextMenuJustOpened)
+        {
+            animation.contextMenuJustOpened = false;
+        }
+        else
+        {
+            const bool hovered = CheckCollisionPointRec(mouse, menu);
+            DrawRectangleRec(menu, hovered ? Color{ 54, 63, 72, 255 } : Color{ 35, 40, 46, 255 });
+            DrawRectangleLinesEx(menu, 1.0f, Color{ 70, 80, 90, 255 });
+            const Vector2 labelSize = MeasureTextEx(font, "Remove", 14.0f, 1.0f);
+            DrawUiText(font, "Remove", menu.x + (menu.width - labelSize.x) * 0.5f, menu.y + 10.0f, 14.0f, Color{ 230, 215, 210, 255 });
+            if (validContextClip && hovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+            {
+                loaded.animations.erase(loaded.animations.begin() + animation.contextClipIndex);
+                if (animation.clipIndex == animation.contextClipIndex)
+                {
+                    animation.clipIndex = -1;
+                    animation.time = 0.0f;
+                    animation.playing = false;
+                    animation.scrubbing = false;
+                }
+                else if (animation.clipIndex > animation.contextClipIndex)
+                {
+                    --animation.clipIndex;
+                }
+                animation.contextMenuOpen = false;
+                animation.contextClipIndex = -1;
+                animation.clipScroll = ClampInt(animation.clipScroll, 0, std::max(0, static_cast<int>(loaded.animations.size()) - visibleRows));
+            }
+            else if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !CheckCollisionPointRec(mouse, menu))
+            {
+                animation.contextMenuOpen = false;
+            }
+        }
     }
 
     const AnimationClip* clip = nullptr;
@@ -3349,6 +4180,7 @@ int main(int argc, char** argv)
 {
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
     InitWindow(1280, 800, "openfbx");
+    rlSetClipPlanes(kNearClipPlane, kFarClipPlane);
     SetExitKey(KEY_NULL);
     ApplyWindowIcon();
     SetTargetFPS(60);
@@ -3368,6 +4200,11 @@ int main(int argc, char** argv)
     std::string notice;
     bool quitRequested = false;
     bool animationPanelCollapsed = false;
+    bool compareResultVisible = false;
+    bool compareResultCompatible = false;
+    std::string compareResultPath;
+    std::string compareResultText;
+    TextureClipboard textureClipboard;
 
     auto openPathInNewTab = [&](const std::string& path)
     {
@@ -3412,7 +4249,10 @@ int main(int argc, char** argv)
     while (!WindowShouldClose() && !quitRequested)
     {
         const bool controlDown = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
+        const bool shiftDown = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
         bool openRequested = controlDown && IsKeyPressed(KEY_O);
+        bool saveFbxRequested = controlDown && !shiftDown && IsKeyPressed(KEY_S);
+        bool saveAsFbxRequested = controlDown && shiftDown && IsKeyPressed(KEY_S);
 
         if (openRequested)
         {
@@ -3423,19 +4263,22 @@ int main(int argc, char** argv)
             }
         }
 
+        ModelTab* active = activeTab >= 0 && activeTab < static_cast<int>(tabs.size()) ? tabs[static_cast<size_t>(activeTab)].get() : nullptr;
+        gBottomPanelReservedHeight = animationPanelCollapsed ? kTimelineCollapsedHeight : kTimelinePanelHeight;
+        const Vector2 mouse = GetMousePosition();
+        std::vector<std::string> droppedPaths;
+        bool droppedTextureHandled = false;
         if (IsFileDropped())
         {
             FilePathList droppedFiles = LoadDroppedFiles();
+            droppedPaths.reserve(droppedFiles.count);
             for (unsigned int i = 0; i < droppedFiles.count; ++i)
             {
-                openPathInNewTab(droppedFiles.paths[i]);
+                droppedPaths.push_back(droppedFiles.paths[i]);
             }
             UnloadDroppedFiles(droppedFiles);
         }
 
-        ModelTab* active = activeTab >= 0 && activeTab < static_cast<int>(tabs.size()) ? tabs[static_cast<size_t>(activeTab)].get() : nullptr;
-        gBottomPanelReservedHeight = animationPanelCollapsed ? kTimelineCollapsedHeight : kTimelinePanelHeight;
-        const Vector2 mouse = GetMousePosition();
         UpdateHierarchyPanelInteraction(hierarchyPanel, active);
         const float hierarchyBlockW = GetHierarchyPanelBlockWidth(hierarchyPanel);
         const bool mouseInViewport = mouse.x > hierarchyBlockW && mouse.y >= 61.0f && mouse.y < static_cast<float>(GetScreenHeight()) - gBottomPanelReservedHeight && openMenu == OpenMenu::None && !hierarchyPanel.resizing;
@@ -3591,11 +4434,10 @@ int main(int argc, char** argv)
 
         if (active)
         {
-            DrawUiText(uiFont, active->path.c_str(), hierarchyBlockW + 12.0f, 66, 16, Color{ 190, 190, 190, 255 });
             char channelText[128] = {};
             std::snprintf(channelText, sizeof(channelText), "Material Channel: %s", GetMaterialPreviewModeName(materialPreviewMode));
             const Vector2 channelSize = MeasureTextEx(uiFont, channelText, 16.0f, 1.0f);
-            const Rectangle channelBadge{ hierarchyBlockW + 12.0f, 90.0f, channelSize.x + 18.0f, 26.0f };
+            const Rectangle channelBadge{ hierarchyBlockW + 12.0f, 66.0f, channelSize.x + 18.0f, 26.0f };
             DrawRectangleRec(channelBadge, Color{ 24, 27, 31, 210 });
             DrawRectangleLinesEx(channelBadge, 1.0f, Color{ 78, 88, 98, 220 });
             DrawUiText(uiFont, channelText, channelBadge.x + 9.0f, channelBadge.y + 5.0f, 16.0f, Color{ 205, 224, 238, 255 });
@@ -3639,16 +4481,55 @@ int main(int argc, char** argv)
         }
         gBottomPanelReservedHeight = animationPanelCollapsed ? kTimelineCollapsedHeight : kTimelinePanelHeight;
 
-        DrawHierarchyPanel(uiFont, active, hierarchyPanel, notice, error);
+        DrawHierarchyPanel(uiFont, active, hierarchyPanel, droppedPaths, droppedTextureHandled, textureClipboard, notice, error);
         DrawOrientationGizmo(uiFont, active ? active->orbit.camera : emptyOrbit.camera);
 
         DrawTabs(uiFont, tabs, activeTab);
         active = activeTab >= 0 && activeTab < static_cast<int>(tabs.size()) ? tabs[static_cast<size_t>(activeTab)].get() : nullptr;
 
         bool menuOpenRequested = false;
+        bool menuSaveFbxRequested = false;
+        bool menuSaveAsFbxRequested = false;
+        bool importAnimationsRequested = false;
         bool exportJsonRequested = false;
-        DrawMenuBar(uiFont, openMenu, menuOpenRequested, exportJsonRequested, quitRequested, viewMode, navigation, visibility);
+        bool compareFbxRequested = false;
+        DrawMenuBar(uiFont,
+                    openMenu,
+                    menuOpenRequested,
+                    menuSaveFbxRequested,
+                    menuSaveAsFbxRequested,
+                    importAnimationsRequested,
+                    exportJsonRequested,
+                    compareFbxRequested,
+                    quitRequested,
+                    viewMode,
+                    navigation,
+                    visibility);
+        saveFbxRequested = saveFbxRequested || menuSaveFbxRequested;
+        saveAsFbxRequested = saveAsFbxRequested || menuSaveAsFbxRequested;
+        DrawSkeletonCompareResultWindow(uiFont, compareResultVisible, compareResultCompatible, compareResultPath, compareResultText);
         EndDrawing();
+
+        if (!droppedPaths.empty() && !droppedTextureHandled)
+        {
+            bool openedAny = false;
+            bool ignoredTexture = false;
+            for (const std::string& droppedPath : droppedPaths)
+            {
+                if (IsTextureExtension(std::filesystem::path(droppedPath)))
+                {
+                    ignoredTexture = true;
+                    continue;
+                }
+                openPathInNewTab(droppedPath);
+                openedAny = true;
+            }
+            if (!openedAny && ignoredTexture)
+            {
+                notice = "Drop texture files onto a material thumbnail.";
+                error.clear();
+            }
+        }
 
         if (menuOpenRequested)
         {
@@ -3656,6 +4537,86 @@ int main(int argc, char** argv)
             if (!selectedPath.empty())
             {
                 openPathInNewTab(selectedPath);
+            }
+        }
+
+        if (importAnimationsRequested)
+        {
+            if (!active || !active->loaded.valid)
+            {
+                error = "No active FBX to import animations into.";
+                notice.clear();
+            }
+            else
+            {
+                const std::string importPath = OpenFbxFileDialog();
+                if (!importPath.empty())
+                {
+                    int importedCount = 0;
+                    std::string importError;
+                    if (ImportAnimationsFromFbx(*active, importPath, importedCount, importError))
+                    {
+                        notice = "Imported animations: " + std::to_string(importedCount);
+                        error.clear();
+                    }
+                    else
+                    {
+                        error = importError;
+                        notice.clear();
+                    }
+                }
+            }
+        }
+
+        if (saveFbxRequested)
+        {
+            if (!active || !active->loaded.valid)
+            {
+                error = "No active FBX to save.";
+                notice.clear();
+            }
+            else
+            {
+                std::string saveError;
+                if (SaveFbxModelAnimations(active->path, active->path, active->loaded, saveError))
+                {
+                    notice = "Saved FBX: " + active->path;
+                    error.clear();
+                }
+                else
+                {
+                    error = saveError;
+                    notice.clear();
+                }
+            }
+        }
+
+        if (saveAsFbxRequested)
+        {
+            if (!active || !active->loaded.valid)
+            {
+                error = "No active FBX to save.";
+                notice.clear();
+            }
+            else
+            {
+                const std::string savePath = SaveAsFbxFileDialog(active->path);
+                if (!savePath.empty())
+                {
+                    std::string saveError;
+                    if (SaveFbxModelAnimations(active->path, savePath, active->loaded, saveError))
+                    {
+                        active->path = savePath;
+                        active->title = MakeTabTitle(savePath);
+                        notice = "Saved FBX: " + savePath;
+                        error.clear();
+                    }
+                    else
+                    {
+                        error = saveError;
+                        notice.clear();
+                    }
+                }
             }
         }
 
@@ -3679,6 +4640,42 @@ int main(int argc, char** argv)
                 {
                     error = exportError;
                     notice.clear();
+                }
+            }
+        }
+
+        if (compareFbxRequested)
+        {
+            if (!active || !active->loaded.valid)
+            {
+                error = "No active FBX to compare.";
+                notice.clear();
+            }
+            else
+            {
+                const std::string comparePath = OpenFbxFileDialog();
+                if (!comparePath.empty())
+                {
+                    LoadedFbxModel compareModel;
+                    std::string compareError;
+                    if (LoadFbxModel(comparePath, compareModel, compareError))
+                    {
+                        compareResultPath = comparePath;
+                        compareResultCompatible = CompareSkeletonCompatibility(active->loaded, compareModel, compareResultText);
+                        compareResultVisible = true;
+                        UnloadFbxModel(compareModel);
+                        error.clear();
+                        notice.clear();
+                    }
+                    else
+                    {
+                        compareResultPath = comparePath;
+                        compareResultCompatible = false;
+                        compareResultText = "Failed to load comparison FBX.\n" + compareError;
+                        compareResultVisible = true;
+                        error = compareError;
+                        notice.clear();
+                    }
                 }
             }
         }

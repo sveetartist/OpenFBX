@@ -37,6 +37,21 @@ struct MeshFrame
     std::vector<float> normals;
 };
 
+struct SkinnedVertexInfluence
+{
+    std::string boneName;
+    float weight = 0.0f;
+    Vector3 bindPositionInBone{};
+    Vector3 bindNormalInBone{};
+};
+
+struct SkinnedVertex
+{
+    Vector3 bindPosition{};
+    Vector3 bindNormal{ 0.0f, 1.0f, 0.0f };
+    std::vector<SkinnedVertexInfluence> influences;
+};
+
 enum class SceneNodeType
 {
     Empty,
@@ -78,7 +93,10 @@ struct LoadedFbxModel
     BoundingBox bounds{};
     std::vector<float> bindVertices;
     std::vector<float> bindNormals;
+    std::vector<SkinnedVertex> skinnedVertices;
     std::vector<std::vector<int>> meshGlobalVertexIndices;
+    std::vector<std::string> uvSetNames;
+    std::vector<std::vector<float>> uvSets;
     std::vector<std::string> materialNames;
     std::vector<BoneSegment> bones;
     std::vector<BonePose> bonePoses;
@@ -89,4 +107,5 @@ struct LoadedFbxModel
 };
 
 bool LoadFbxModel(const std::string& path, LoadedFbxModel& outModel, std::string& error);
+bool SaveFbxModelAnimations(const std::string& sourcePath, const std::string& outputPath, const LoadedFbxModel& model, std::string& error);
 void UnloadFbxModel(LoadedFbxModel& model);
