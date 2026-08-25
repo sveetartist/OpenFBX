@@ -180,7 +180,7 @@ struct PbrMaterialState
     PackedChannel roughnessChannel = PackedChannel::G;
     PackedChannel metallicChannel = PackedChannel::B;
     PackedChannel aoChannel = PackedChannel::R;
-    OpacityChannel opacityChannel = OpacityChannel::A;
+    OpacityChannel opacityChannel = OpacityChannel::RGB;
 };
 
 struct TextureClipboard
@@ -235,6 +235,7 @@ struct VisibilityState
 {
     bool geometry = true;
     bool textures = true;
+    bool backfaceCulling = false;
     bool bones = true;
     bool boneRotations = false;
     bool empties = true;
@@ -764,6 +765,8 @@ void main()
     float metallic = readPackedChannel(metallicTexel, metallicChannel);
     float ao = readPackedChannel(aoTexel, aoChannel);
     float opacity = readOpacity(opacityTexel, opacityChannel);
+    float surfaceAlpha = colDiffuse.a * fragColor.a * diffuseTexel.a * opacity;
+    if (materialPreviewMode == 0 && surfaceAlpha < 0.5) discard;
 
     vec3 light = normalize(-lightDir);
     float diffuse = max(dot(normal, light), 0.0);
@@ -782,7 +785,7 @@ void main()
     else if (materialPreviewMode == 5) finalColor = vec4(vec3(ao), 1.0);
     else if (materialPreviewMode == 6) finalColor = vec4(emissiveTexel.rgb, 1.0);
     else if (materialPreviewMode == 7) finalColor = vec4(vec3(opacity), 1.0);
-    else finalColor = vec4(shaded, colDiffuse.a * fragColor.a * diffuseTexel.a * opacity);
+    else finalColor = vec4(shaded, surfaceAlpha);
 }
 )";
 
@@ -1072,7 +1075,7 @@ void UpdateMaterialShader(const LitShader& lit, const PbrMaterialState* pbr, Mat
     const int roughnessChannel = pbr ? ToInt(pbr->roughnessChannel) : 0;
     const int metallicChannel = pbr ? ToInt(pbr->metallicChannel) : 0;
     const int aoChannel = pbr ? ToInt(pbr->aoChannel) : 0;
-    const int opacityChannel = pbr ? ToInt(pbr->opacityChannel) : ToInt(OpacityChannel::A);
+    const int opacityChannel = pbr ? ToInt(pbr->opacityChannel) : ToInt(OpacityChannel::RGB);
     const int materialPreviewMode = ToInt(previewMode);
 
     SetShaderValue(lit.shader, lit.hasDiffuseMapLoc, &hasDiffuse, SHADER_UNIFORM_INT);
@@ -1095,13 +1098,32 @@ void DrawMaterialModel(ModelTab& tab, const LitShader& lit, MaterialPreviewMode 
 {
     EnsurePbrMaterialStates(tab);
     const Matrix transform = MatrixIdentity();
-    for (int meshIndex = 0; meshIndex < tab.loaded.model.meshCount; ++meshIndex)
+
+    auto drawMeshes = [&](bool transparentPass)
     {
-        int materialIndex = tab.loaded.model.meshMaterial ? tab.loaded.model.meshMaterial[meshIndex] : 0;
-        materialIndex = std::max(0, std::min(materialIndex, static_cast<int>(tab.pbrMaterials.size()) - 1));
-        UpdateMaterialShader(lit, &tab.pbrMaterials[static_cast<size_t>(materialIndex)], previewMode, texturesVisible);
-        DrawMesh(tab.loaded.model.meshes[meshIndex], tab.loaded.model.materials[materialIndex], transform);
-    }
+        for (int meshIndex = 0; meshIndex < tab.loaded.model.meshCount; ++meshIndex)
+        {
+            int materialIndex = tab.loaded.model.meshMaterial ? tab.loaded.model.meshMaterial[meshIndex] : 0;
+            materialIndex = std::max(0, std::min(materialIndex, static_cast<int>(tab.pbrMaterials.size()) - 1));
+
+            const PbrMaterialState& pbr = tab.pbrMaterials[static_cast<size_t>(materialIndex)];
+            const bool transparentMaterial = texturesVisible &&
+                                             previewMode == MaterialPreviewMode::Shaded &&
+                                             GetPbrTexture(pbr, PbrTextureSlot::Opacity).loaded;
+            if (transparentMaterial != transparentPass) continue;
+
+            UpdateMaterialShader(lit, &pbr, previewMode, texturesVisible);
+            DrawMesh(tab.loaded.model.meshes[meshIndex], tab.loaded.model.materials[materialIndex], transform);
+        }
+    };
+
+    drawMeshes(false);
+
+    rlDrawRenderBatchActive();
+    rlDisableDepthMask();
+    drawMeshes(true);
+    rlDrawRenderBatchActive();
+    rlEnableDepthMask();
 }
 
 void DrawMeterGridLine(Vector3 start, Vector3 end, bool major, bool floorLine)
@@ -2974,6 +2996,26 @@ std::string ToLower(std::string value)
     return value;
 }
 
+std::string CompactName(std::string value)
+{
+    value = ToLower(std::move(value));
+    value.erase(std::remove_if(value.begin(), value.end(), [](unsigned char c)
+    {
+        return !std::isalnum(c);
+    }), value.end());
+    return value;
+}
+
+bool LowerStemContainsName(const std::string& lowerStem, const std::string& lowerName)
+{
+    if (lowerName.empty()) return false;
+    if (lowerStem.find(lowerName) != std::string::npos) return true;
+
+    const std::string compactStem = CompactName(lowerStem);
+    const std::string compactName = CompactName(lowerName);
+    return !compactName.empty() && compactStem.find(compactName) != std::string::npos;
+}
+
 bool IsTextureExtension(const std::filesystem::path& path)
 {
     const std::string extension = ToLower(path.extension().string());
@@ -2984,8 +3026,8 @@ bool IsTextureExtension(const std::filesystem::path& path)
 
 int ScoreTextureCandidate(const std::string& lowerStem, const std::string& lowerModelStem, const std::string& lowerMaterialName, PbrTextureSlot slot)
 {
-    int score = lowerStem.find(lowerModelStem) != std::string::npos ? 3 : 0;
-    if (!lowerMaterialName.empty() && lowerStem.find(lowerMaterialName) != std::string::npos) score += 5;
+    int score = !lowerModelStem.empty() && LowerStemContainsName(lowerStem, lowerModelStem) ? 3 : 0;
+    if (LowerStemContainsName(lowerStem, lowerMaterialName)) score += 5;
 
     auto hasAny = [&](std::initializer_list<const char*> tokens)
     {
@@ -3027,6 +3069,11 @@ int ScoreTextureCandidate(const std::string& lowerStem, const std::string& lower
     return score;
 }
 
+bool TextureNameMatchesMaterial(const std::filesystem::path& texturePath, const std::string& materialName)
+{
+    return LowerStemContainsName(ToLower(texturePath.stem().string()), ToLower(materialName));
+}
+
 std::string FindAutoTexturePath(const std::string& modelPath, const std::filesystem::path& directory, const std::string& materialName, PbrTextureSlot slot)
 {
     const std::filesystem::path sourcePath(modelPath);
@@ -3051,6 +3098,75 @@ std::string FindAutoTexturePath(const std::string& modelPath, const std::filesys
     }
 
     return bestScore > 0 ? bestPath.string() : std::string{};
+}
+
+int AutoAssignDroppedTextures(ModelTab& tab, const std::vector<std::string>& droppedPaths, std::string& notice, std::string& error)
+{
+    EnsurePbrMaterialStates(tab);
+    if (tab.pbrMaterials.empty()) return 0;
+
+    const std::string modelStem = ToLower(std::filesystem::path(tab.path).stem().string());
+    const bool singleMaterial = tab.pbrMaterials.size() == 1;
+    int loadedCount = 0;
+    std::string firstError;
+
+    for (const std::string& droppedPath : droppedPaths)
+    {
+        const std::filesystem::path texturePath(droppedPath);
+        if (!IsTextureExtension(texturePath)) continue;
+
+        const std::string stem = ToLower(texturePath.stem().string());
+        int bestMaterial = -1;
+        PbrTextureSlot bestSlot = PbrTextureSlot::Diffuse;
+        int bestScore = 0;
+
+        for (int materialIndex = 0; materialIndex < static_cast<int>(tab.pbrMaterials.size()); ++materialIndex)
+        {
+            const std::string materialName = materialIndex < static_cast<int>(tab.loaded.materialNames.size()) ? tab.loaded.materialNames[static_cast<size_t>(materialIndex)] : std::string{};
+            if (!singleMaterial && !TextureNameMatchesMaterial(texturePath, materialName)) continue;
+
+            const std::string lowerMaterialName = ToLower(materialName);
+            for (int slotIndex = 0; slotIndex < static_cast<int>(PbrTextureSlot::Count); ++slotIndex)
+            {
+                const PbrTextureSlot slot = static_cast<PbrTextureSlot>(slotIndex);
+                const int score = ScoreTextureCandidate(stem, modelStem, lowerMaterialName, slot);
+                if (score > bestScore)
+                {
+                    bestScore = score;
+                    bestMaterial = materialIndex;
+                    bestSlot = slot;
+                }
+            }
+        }
+
+        if (bestMaterial < 0 || bestScore < 8) continue;
+
+        std::string loadError;
+        if (LoadPbrTexture(tab, bestMaterial, bestSlot, droppedPath, loadError))
+        {
+            ++loadedCount;
+            tab.selectedMaterial = bestMaterial;
+        }
+        else if (firstError.empty())
+        {
+            firstError = loadError;
+        }
+    }
+
+    if (loadedCount > 0)
+    {
+        char message[160] = {};
+        std::snprintf(message, sizeof(message), "Auto-assigned %d dropped texture%s by name.", loadedCount, loadedCount == 1 ? "" : "s");
+        notice = message;
+        error.clear();
+    }
+    else if (!firstError.empty())
+    {
+        error = firstError;
+        notice.clear();
+    }
+
+    return loadedCount;
 }
 
 int LoadPbrTexturesFromFolder(ModelTab& tab, int materialIndex, const std::filesystem::path& directory, std::string& error)
@@ -3793,15 +3909,19 @@ void DrawMenuBar(Font font,
         {
             visibility.textures = !visibility.textures;
         }
-        if (DrawMenuItem(font, Rectangle{ 66.0f, 187.0f, 230.0f, 30.0f }, visibility.bones ? "[x] Bones        B" : "[ ] Bones        B"))
+        if (DrawMenuItem(font, Rectangle{ 66.0f, 187.0f, 230.0f, 30.0f }, visibility.backfaceCulling ? "[x] Backface Culling" : "[ ] Backface Culling"))
+        {
+            visibility.backfaceCulling = !visibility.backfaceCulling;
+        }
+        if (DrawMenuItem(font, Rectangle{ 66.0f, 217.0f, 230.0f, 30.0f }, visibility.bones ? "[x] Bones        B" : "[ ] Bones        B"))
         {
             visibility.bones = !visibility.bones;
         }
-        if (DrawMenuItem(font, Rectangle{ 66.0f, 217.0f, 230.0f, 30.0f }, visibility.boneRotations ? "[x] Bone Orientation  O" : "[ ] Bone Orientation  O"))
+        if (DrawMenuItem(font, Rectangle{ 66.0f, 247.0f, 230.0f, 30.0f }, visibility.boneRotations ? "[x] Bone Orientation  O" : "[ ] Bone Orientation  O"))
         {
             visibility.boneRotations = !visibility.boneRotations;
         }
-        if (DrawMenuItem(font, Rectangle{ 66.0f, 247.0f, 230.0f, 30.0f }, visibility.empties ? "[x] Empties        E" : "[ ] Empties        E"))
+        if (DrawMenuItem(font, Rectangle{ 66.0f, 277.0f, 230.0f, 30.0f }, visibility.empties ? "[x] Empties        E" : "[ ] Empties        E"))
         {
             visibility.empties = !visibility.empties;
         }
@@ -4392,6 +4512,15 @@ int main(int argc, char** argv)
         {
             if (active->loaded.hasMesh && visibility.geometry)
             {
+                if (visibility.backfaceCulling)
+                {
+                    rlEnableBackfaceCulling();
+                }
+                else
+                {
+                    rlDisableBackfaceCulling();
+                }
+
                 if (viewMode == ViewMode::Shaded || viewMode == ViewMode::ShadedWireframe)
                 {
                     BeginBlendMode(BLEND_ALPHA);
@@ -4406,6 +4535,7 @@ int main(int argc, char** argv)
                     rlDisableWireMode();
                 }
 
+                rlDisableBackfaceCulling();
                 DrawSelectedMeshOverlay(*active, visibility);
             }
             rlDrawRenderBatchActive();
@@ -4514,6 +4644,11 @@ int main(int argc, char** argv)
         {
             bool openedAny = false;
             bool ignoredTexture = false;
+            if (active && active->loaded.valid)
+            {
+                const int assignedTextures = AutoAssignDroppedTextures(*active, droppedPaths, notice, error);
+                droppedTextureHandled = assignedTextures > 0;
+            }
             for (const std::string& droppedPath : droppedPaths)
             {
                 if (IsTextureExtension(std::filesystem::path(droppedPath)))
@@ -4524,7 +4659,7 @@ int main(int argc, char** argv)
                 openPathInNewTab(droppedPath);
                 openedAny = true;
             }
-            if (!openedAny && ignoredTexture)
+            if (!droppedTextureHandled && !openedAny && ignoredTexture)
             {
                 notice = "Drop texture files onto a material thumbnail.";
                 error.clear();
