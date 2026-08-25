@@ -98,6 +98,7 @@ struct ControlPointBindInfluence
 struct SkinBindData
 {
     std::vector<std::vector<ControlPointBindInfluence>> influences;
+    bool hasSkin = false;
 };
 
 FbxVector4 TransformVector(const FbxAMatrix& matrix, FbxVector4 vector);
@@ -202,6 +203,7 @@ int AddSceneNode(FbxNode* node, int parentIndex, int depth, MeshBuilder& out)
 {
     SceneNode sceneNode;
     sceneNode.name = node && node->GetName() && node->GetName()[0] ? node->GetName() : "Node";
+    sceneNode.sourceName = sceneNode.name;
     sceneNode.parent = parentIndex;
     sceneNode.depth = depth;
     sceneNode.type = GetSceneNodeType(node);
@@ -374,6 +376,9 @@ void AppendMesh(FbxNode* node, FbxMesh* mesh, MeshBuilder& out)
     const FbxAMatrix meshTransform = nodeGlobal * geometry;
     const FbxAMatrix normalTransform = meshTransform.Inverse().Transpose();
     const SkinBindData skinBind = BuildSkinBindData(mesh);
+    bool meshHadNormals = true;
+    bool meshHadUvs = uvSetName != nullptr;
+    int degenerateTriangles = 0;
 
     for (int polygon = 0; polygon < polygonCount; ++polygon)
     {
@@ -436,6 +441,22 @@ void AppendMesh(FbxNode* node, FbxMesh* mesh, MeshBuilder& out)
             }
         }
 
+        if (!triangleHasNormals)
+        {
+            meshHadNormals = false;
+        }
+        if (!triangleHasUvs)
+        {
+            meshHadUvs = false;
+        }
+
+        const Vector3 e0 = Vector3Subtract(points[1], points[0]);
+        const Vector3 e1 = Vector3Subtract(points[2], points[0]);
+        if (Vector3LengthSqr(Vector3CrossProduct(e0, e1)) <= 0.000000000001f)
+        {
+            ++degenerateTriangles;
+        }
+
         AddTriangle(out, points, normals, uvs, uvSetValues, refs, skinBind, materialIndex, triangleHasNormals, triangleHasUvs);
     }
 
@@ -450,6 +471,40 @@ void AppendMesh(FbxNode* node, FbxMesh* mesh, MeshBuilder& out)
         }
         sceneNode.meshVertexCount += meshVertexCount;
         sceneNode.meshTriangleCount += meshVertexCount / 3;
+        sceneNode.meshHadNormals = sceneNode.meshHadNormals && meshHadNormals;
+        sceneNode.meshHadUvs = sceneNode.meshHadUvs && meshHadUvs;
+        sceneNode.meshHasSkin = sceneNode.meshHasSkin || skinBind.hasSkin;
+        sceneNode.degenerateTriangleCount += degenerateTriangles;
+
+        if (skinBind.hasSkin)
+        {
+            for (int vertex = meshVertexStart; vertex < out.VertexCount(); ++vertex)
+            {
+                if (vertex < 0 || vertex >= static_cast<int>(out.skinnedVertices.size())) continue;
+
+                const SkinnedVertex& skinned = out.skinnedVertices[static_cast<size_t>(vertex)];
+                if (skinned.influences.empty())
+                {
+                    ++sceneNode.missingSkinWeightCount;
+                    continue;
+                }
+
+                float weightSum = 0.0f;
+                bool invalidWeight = false;
+                for (const SkinnedVertexInfluence& influence : skinned.influences)
+                {
+                    weightSum += influence.weight;
+                    if (!std::isfinite(influence.weight) || influence.weight < 0.0f || influence.weight > 1.0f)
+                    {
+                        invalidWeight = true;
+                    }
+                }
+                if (invalidWeight || std::fabs(weightSum - 1.0f) > 0.01f)
+                {
+                    ++sceneNode.badSkinWeightCount;
+                }
+            }
+        }
 
         if (sceneNode.materialName.empty())
         {
@@ -495,6 +550,7 @@ SkinBindData BuildSkinBindData(FbxMesh* mesh)
     {
         FbxSkin* fbxSkin = static_cast<FbxSkin*>(mesh->GetDeformer(skinIndex, FbxDeformer::eSkin));
         if (!fbxSkin) continue;
+        data.hasSkin = true;
 
         for (int clusterIndex = 0; clusterIndex < fbxSkin->GetClusterCount(); ++clusterIndex)
         {
@@ -872,8 +928,11 @@ void RebuildBindSkeleton(FbxNode* node, MeshBuilder& out, const std::unordered_m
         const auto nodeIndex = out.nodeToIndex.find(node);
         if (nodeIndex != out.nodeToIndex.end())
         {
-            SetSceneNodeTransform(out.nodes[static_cast<size_t>(nodeIndex->second)], GetBindOrEvaluatedGlobal(node, bindMatrices));
-            out.bonePoses.push_back(MakeBonePose(GetBindOrEvaluatedGlobal(node, bindMatrices), nodeIndex->second));
+            const FbxAMatrix bindOrEvaluated = GetBindOrEvaluatedGlobal(node, bindMatrices);
+            SceneNode& sceneNode = out.nodes[static_cast<size_t>(nodeIndex->second)];
+            SetSceneNodeTransform(sceneNode, bindOrEvaluated);
+            sceneNode.hasSkinBindPose = bindMatrices.find(node) != bindMatrices.end();
+            out.bonePoses.push_back(MakeBonePose(bindOrEvaluated, nodeIndex->second));
         }
 
         FbxNode* parent = node->GetParent();
@@ -1137,7 +1196,8 @@ bool WriteAnimationStacks(FbxScene* scene, const LoadedFbxModel& model, std::str
             {
                 if (pose.node < 0 || pose.node >= static_cast<int>(model.nodes.size())) continue;
                 const SceneNode& sceneNode = model.nodes[static_cast<size_t>(pose.node)];
-                const auto target = nodesByName.find(sceneNode.name);
+                const std::string targetName = sceneNode.sourceName.empty() ? sceneNode.name : sceneNode.sourceName;
+                const auto target = nodesByName.find(targetName);
                 if (target == nodesByName.end() || !target->second) continue;
 
                 FbxAMatrix global = MatrixFromPose(pose);

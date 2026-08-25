@@ -101,6 +101,25 @@ struct AnimationState
     bool scrubbing = false;
 };
 
+enum class RenameTarget
+{
+    None,
+    SceneNode,
+    AnimationClip
+};
+
+struct RenameEditor
+{
+    RenameTarget target = RenameTarget::None;
+    int nodeIndex = -1;
+    int clipIndex = -1;
+    char text[256]{};
+    int cursor = 0;
+    bool textSelected = false;
+    bool active = false;
+    bool justOpened = false;
+};
+
 enum class ViewMode
 {
     Shaded,
@@ -118,6 +137,7 @@ enum class OpenMenu
 {
     None,
     File,
+    Edit,
     View,
     Preferences
 };
@@ -127,7 +147,9 @@ enum class LeftPanelTab
     Hierarchy,
     Stats,
     Materials,
-    UV
+    UV,
+    SkinWeights,
+    Validator
 };
 
 enum class PbrTextureSlot
@@ -184,6 +206,36 @@ struct PbrMaterialState
     OpacityChannel opacityChannel = OpacityChannel::RGB;
 };
 
+struct PbrTextureSnapshot
+{
+    std::string path;
+    bool loaded = false;
+};
+
+struct PbrMaterialSnapshot
+{
+    std::array<PbrTextureSnapshot, static_cast<size_t>(PbrTextureSlot::Count)> textures;
+    bool normalDirectX = false;
+    PackedChannel roughnessChannel = PackedChannel::G;
+    PackedChannel metallicChannel = PackedChannel::B;
+    PackedChannel aoChannel = PackedChannel::R;
+    OpacityChannel opacityChannel = OpacityChannel::RGB;
+};
+
+struct EditSnapshot
+{
+    std::vector<SceneNode> nodes;
+    std::vector<SkinnedVertex> skinnedVertices;
+    std::vector<AnimationClip> animations;
+    std::vector<bool> deletedNodes;
+    std::vector<PbrMaterialSnapshot> pbrMaterials;
+    int selectedNode = -1;
+    int selectedMaterial = 0;
+    int animationClipIndex = -1;
+    int animationClipScroll = 0;
+    float animationTime = 0.0f;
+};
+
 struct TextureClipboard
 {
     std::string path;
@@ -192,6 +244,21 @@ struct TextureClipboard
     int materialIndex = -1;
     PbrTextureSlot slot = PbrTextureSlot::Diffuse;
     Vector2 position{};
+};
+
+enum class ValidatorSeverity
+{
+    Info,
+    Warning,
+    Error
+};
+
+struct ValidatorIssue
+{
+    ValidatorSeverity severity = ValidatorSeverity::Info;
+    std::string category;
+    std::string message;
+    int node = -1;
 };
 
 struct ModelTab
@@ -208,6 +275,9 @@ struct ModelTab
     std::vector<BoneSegment> visibleBones;
     std::vector<BonePose> visibleBonePoses;
     std::vector<PbrMaterialState> pbrMaterials;
+    std::vector<bool> deletedNodes;
+    std::vector<EditSnapshot> undoStack;
+    std::vector<EditSnapshot> redoStack;
     int selectedMaterial = 0;
     int selectedUvSet = 0;
     int appliedClipIndex = -2;
@@ -219,6 +289,7 @@ struct ModelTab
     int appliedNextBoneFrameIndex = -1;
     float appliedBoneFrameAlpha = -1.0f;
     int selectedNode = -1;
+    int isolatedNode = -1;
     std::string path;
     std::string title;
 };
@@ -227,6 +298,12 @@ struct HierarchyPanelState
 {
     float width = 320.0f;
     float scroll = 0.0f;
+    float validatorScroll = 0.0f;
+    float skinWeightsScroll = 0.0f;
+    int contextNodeIndex = -1;
+    Vector2 contextPosition{};
+    bool contextMenuOpen = false;
+    bool contextMenuJustOpened = false;
     bool hidden = false;
     bool resizing = false;
     LeftPanelTab activeTab = LeftPanelTab::Hierarchy;
@@ -240,6 +317,7 @@ struct VisibilityState
     bool bones = true;
     bool boneRotations = false;
     bool empties = true;
+    bool skinWeights = false;
 };
 
 struct LitShader
@@ -996,6 +1074,12 @@ const PbrMaterialState& GetSelectedPbrMaterial(const ModelTab& tab)
     return tab.pbrMaterials[static_cast<size_t>(materialIndex)];
 }
 
+bool IsDeletedNode(const ModelTab& tab, int nodeIndex);
+void RefreshDisplayedMesh(ModelTab& tab);
+void DrawUiText(Font font, const char* text, float x, float y, float size, Color color);
+void DrawUiTextClipped(Font font, const char* text, float x, float y, float size, float maxWidth, Color color);
+bool DrawPanelButton(Font font, Rectangle bounds, const char* label);
+
 void ApplyPbrTextureToModel(ModelTab& tab, int materialIndex, PbrTextureSlot slot)
 {
     if (!tab.loaded.hasMesh || tab.loaded.model.materialCount <= 0) return;
@@ -1058,6 +1142,128 @@ void UnloadPbrTextures(ModelTab& tab)
             UnloadPbrTexture(tab, materialIndex, static_cast<PbrTextureSlot>(i));
         }
     }
+}
+
+EditSnapshot CaptureEditSnapshot(const ModelTab& tab)
+{
+    EditSnapshot snapshot;
+    snapshot.nodes = tab.loaded.nodes;
+    snapshot.skinnedVertices = tab.loaded.skinnedVertices;
+    snapshot.animations = tab.loaded.animations;
+    snapshot.deletedNodes = tab.deletedNodes;
+    snapshot.selectedNode = tab.selectedNode;
+    snapshot.selectedMaterial = tab.selectedMaterial;
+    snapshot.animationClipIndex = tab.animation.clipIndex;
+    snapshot.animationClipScroll = tab.animation.clipScroll;
+    snapshot.animationTime = tab.animation.time;
+    snapshot.pbrMaterials.reserve(tab.pbrMaterials.size());
+
+    for (const PbrMaterialState& material : tab.pbrMaterials)
+    {
+        PbrMaterialSnapshot materialSnapshot;
+        materialSnapshot.normalDirectX = material.normalDirectX;
+        materialSnapshot.roughnessChannel = material.roughnessChannel;
+        materialSnapshot.metallicChannel = material.metallicChannel;
+        materialSnapshot.aoChannel = material.aoChannel;
+        materialSnapshot.opacityChannel = material.opacityChannel;
+
+        for (int slotIndex = 0; slotIndex < static_cast<int>(PbrTextureSlot::Count); ++slotIndex)
+        {
+            const PbrTexture& texture = material.textures[static_cast<size_t>(slotIndex)];
+            materialSnapshot.textures[static_cast<size_t>(slotIndex)].path = texture.path;
+            materialSnapshot.textures[static_cast<size_t>(slotIndex)].loaded = texture.loaded;
+        }
+
+        snapshot.pbrMaterials.push_back(std::move(materialSnapshot));
+    }
+
+    return snapshot;
+}
+
+void TrimEditHistory(std::vector<EditSnapshot>& history)
+{
+    constexpr size_t kMaxEditHistory = 64;
+    if (history.size() > kMaxEditHistory)
+    {
+        history.erase(history.begin(), history.begin() + static_cast<std::ptrdiff_t>(history.size() - kMaxEditHistory));
+    }
+}
+
+void PushUndoSnapshot(ModelTab& tab, EditSnapshot snapshot)
+{
+    tab.undoStack.push_back(std::move(snapshot));
+    TrimEditHistory(tab.undoStack);
+    tab.redoStack.clear();
+}
+
+void PushUndoSnapshot(ModelTab& tab)
+{
+    PushUndoSnapshot(tab, CaptureEditSnapshot(tab));
+}
+
+void RestoreEditSnapshot(ModelTab& tab, const EditSnapshot& snapshot)
+{
+    tab.loaded.nodes = snapshot.nodes;
+    tab.loaded.skinnedVertices = snapshot.skinnedVertices;
+    tab.loaded.animations = snapshot.animations;
+    tab.deletedNodes = snapshot.deletedNodes;
+    tab.selectedNode = snapshot.selectedNode;
+    tab.selectedMaterial = snapshot.selectedMaterial;
+    tab.animation.clipIndex = snapshot.animationClipIndex;
+    tab.animation.clipScroll = snapshot.animationClipScroll;
+    tab.animation.time = snapshot.animationTime;
+    tab.animation.playing = false;
+    tab.animation.scrubbing = false;
+    tab.animation.contextMenuOpen = false;
+    tab.animation.contextClipIndex = -1;
+
+    UnloadPbrTextures(tab);
+    tab.pbrMaterials.clear();
+    tab.pbrMaterials.resize(snapshot.pbrMaterials.size());
+    for (int materialIndex = 0; materialIndex < static_cast<int>(snapshot.pbrMaterials.size()); ++materialIndex)
+    {
+        const PbrMaterialSnapshot& materialSnapshot = snapshot.pbrMaterials[static_cast<size_t>(materialIndex)];
+        PbrMaterialState& material = tab.pbrMaterials[static_cast<size_t>(materialIndex)];
+        material.normalDirectX = materialSnapshot.normalDirectX;
+        material.roughnessChannel = materialSnapshot.roughnessChannel;
+        material.metallicChannel = materialSnapshot.metallicChannel;
+        material.aoChannel = materialSnapshot.aoChannel;
+        material.opacityChannel = materialSnapshot.opacityChannel;
+
+        for (int slotIndex = 0; slotIndex < static_cast<int>(PbrTextureSlot::Count); ++slotIndex)
+        {
+            const PbrTextureSnapshot& textureSnapshot = materialSnapshot.textures[static_cast<size_t>(slotIndex)];
+            if (!textureSnapshot.loaded || textureSnapshot.path.empty()) continue;
+
+            std::string loadError;
+            LoadPbrTexture(tab, materialIndex, static_cast<PbrTextureSlot>(slotIndex), textureSnapshot.path, loadError);
+        }
+    }
+
+    EnsurePbrMaterialStates(tab);
+    tab.selectedMaterial = std::max(0, std::min(tab.selectedMaterial, static_cast<int>(tab.pbrMaterials.size()) - 1));
+    RefreshDisplayedMesh(tab);
+}
+
+bool UndoEdit(ModelTab& tab)
+{
+    if (tab.undoStack.empty()) return false;
+    tab.redoStack.push_back(CaptureEditSnapshot(tab));
+    EditSnapshot snapshot = std::move(tab.undoStack.back());
+    tab.undoStack.pop_back();
+    RestoreEditSnapshot(tab, snapshot);
+    return true;
+}
+
+bool RedoEdit(ModelTab& tab)
+{
+    if (tab.redoStack.empty()) return false;
+    tab.undoStack.push_back(CaptureEditSnapshot(tab));
+    TrimEditHistory(tab.undoStack);
+    EditSnapshot snapshot = std::move(tab.redoStack.back());
+    tab.redoStack.pop_back();
+    RestoreEditSnapshot(tab, snapshot);
+    return true;
 }
 
 void UpdateMaterialShader(const LitShader& lit, const PbrMaterialState* pbr, MaterialPreviewMode previewMode, bool texturesVisible)
@@ -1200,14 +1406,36 @@ void UpdateLitShader(const LitShader& lit, const OrbitCamera& orbit)
     SetShaderValue(lit.shader, lit.ambientLoc, ambient, SHADER_UNIFORM_VEC4);
 }
 
+bool IsViewportNodeVisible(const ModelTab& tab, int nodeIndex);
+
 const std::vector<BoneSegment>& GetVisibleBones(const ModelTab& tab)
 {
-    return tab.visibleBones.empty() ? tab.loaded.bones : tab.visibleBones;
+    const std::vector<BoneSegment>& source = tab.visibleBones.empty() ? tab.loaded.bones : tab.visibleBones;
+    if (tab.deletedNodes.empty() && tab.isolatedNode < 0) return source;
+
+    static std::vector<BoneSegment> filteredBones;
+    filteredBones.clear();
+    for (const BoneSegment& bone : source)
+    {
+        if (!IsViewportNodeVisible(tab, bone.startNode) || !IsViewportNodeVisible(tab, bone.endNode)) continue;
+        filteredBones.push_back(bone);
+    }
+    return filteredBones;
 }
 
 const std::vector<BonePose>& GetVisibleBonePoses(const ModelTab& tab)
 {
-    return tab.visibleBonePoses.empty() ? tab.loaded.bonePoses : tab.visibleBonePoses;
+    const std::vector<BonePose>& source = tab.visibleBonePoses.empty() ? tab.loaded.bonePoses : tab.visibleBonePoses;
+    if (tab.deletedNodes.empty() && tab.isolatedNode < 0) return source;
+
+    static std::vector<BonePose> filteredPoses;
+    filteredPoses.clear();
+    for (const BonePose& pose : source)
+    {
+        if (!IsViewportNodeVisible(tab, pose.node)) continue;
+        filteredPoses.push_back(pose);
+    }
+    return filteredPoses;
 }
 
 int GetAnimationFrameIndex(const LoadedFbxModel& loaded, const AnimationState& animation)
@@ -1254,6 +1482,21 @@ MeshFrameSample GetMeshFrameSample(const AnimationClip& clip, float time)
     return GetFrameSample(clip.duration, clip.meshFrames.size(), time);
 }
 
+bool IsDescendantNode(const LoadedFbxModel& loaded, int possibleDescendant, int ancestor);
+
+bool IsNodeVisibleInIsolation(const ModelTab& tab, int nodeIndex)
+{
+    if (tab.isolatedNode < 0) return true;
+    if (nodeIndex < 0 || nodeIndex >= static_cast<int>(tab.loaded.nodes.size())) return false;
+    if (tab.isolatedNode >= static_cast<int>(tab.loaded.nodes.size())) return true;
+    return nodeIndex == tab.isolatedNode || IsDescendantNode(tab.loaded, nodeIndex, tab.isolatedNode);
+}
+
+bool IsViewportNodeVisible(const ModelTab& tab, int nodeIndex)
+{
+    return !IsDeletedNode(tab, nodeIndex) && IsNodeVisibleInIsolation(tab, nodeIndex);
+}
+
 void UploadGlobalMeshFrame(ModelTab& tab, const float* vertices, const float* normals, size_t expectedFloats)
 {
     if (!vertices || !normals || !tab.loaded.hasMesh) return;
@@ -1277,12 +1520,44 @@ void UploadGlobalMeshFrame(ModelTab& tab, const float* vertices, const float* no
             const size_t localBase = localVertex * 3;
             if (globalBase + 2 >= expectedFloats) continue;
 
-            tab.blendedVertices[localBase] = vertices[globalBase];
-            tab.blendedVertices[localBase + 1] = vertices[globalBase + 1];
-            tab.blendedVertices[localBase + 2] = vertices[globalBase + 2];
-            tab.blendedNormals[localBase] = normals[globalBase];
-            tab.blendedNormals[localBase + 1] = normals[globalBase + 1];
-            tab.blendedNormals[localBase + 2] = normals[globalBase + 2];
+            int hiddenMeshNode = -1;
+            const int globalVertex = globalIndices[localVertex];
+            if (!tab.deletedNodes.empty() || tab.isolatedNode >= 0)
+            {
+                for (int nodeIndex = 0; nodeIndex < static_cast<int>(tab.loaded.nodes.size()); ++nodeIndex)
+                {
+                    const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(nodeIndex)];
+                    if (node.type != SceneNodeType::Mesh || node.meshVertexStart < 0 || node.meshVertexCount <= 0) continue;
+                    if (globalVertex >= node.meshVertexStart && globalVertex < node.meshVertexStart + node.meshVertexCount)
+                    {
+                        if (!IsViewportNodeVisible(tab, nodeIndex))
+                        {
+                            hiddenMeshNode = nodeIndex;
+                        }
+                        break;
+                    }
+                }
+            }
+
+            if (hiddenMeshNode >= 0)
+            {
+                const Vector3 collapsed = tab.loaded.nodes[static_cast<size_t>(hiddenMeshNode)].position;
+                tab.blendedVertices[localBase] = collapsed.x;
+                tab.blendedVertices[localBase + 1] = collapsed.y;
+                tab.blendedVertices[localBase + 2] = collapsed.z;
+                tab.blendedNormals[localBase] = 0.0f;
+                tab.blendedNormals[localBase + 1] = 1.0f;
+                tab.blendedNormals[localBase + 2] = 0.0f;
+            }
+            else
+            {
+                tab.blendedVertices[localBase] = vertices[globalBase];
+                tab.blendedVertices[localBase + 1] = vertices[globalBase + 1];
+                tab.blendedVertices[localBase + 2] = vertices[globalBase + 2];
+                tab.blendedNormals[localBase] = normals[globalBase];
+                tab.blendedNormals[localBase + 1] = normals[globalBase + 1];
+                tab.blendedNormals[localBase + 2] = normals[globalBase + 2];
+            }
         }
 
         BuildMeshTangents(tab.blendedVertices, tab.blendedNormals, mesh.texcoords, tab.blendedTangents);
@@ -1300,6 +1575,377 @@ void UploadGlobalMeshFrame(ModelTab& tab, const float* vertices, const float* no
         {
             UpdateMeshBuffer(mesh, 4, tab.blendedTangents.data(), static_cast<int>(tangentBytes), 0);
         }
+    }
+}
+
+bool IsDeletedNode(const ModelTab& tab, int nodeIndex)
+{
+    return nodeIndex >= 0 &&
+           nodeIndex < static_cast<int>(tab.deletedNodes.size()) &&
+           tab.deletedNodes[static_cast<size_t>(nodeIndex)];
+}
+
+void RefreshDisplayedMesh(ModelTab& tab)
+{
+    if (!tab.loaded.hasMesh || tab.loaded.bindVertices.size() != tab.loaded.bindNormals.size()) return;
+
+    if (tab.currentVertices.size() == tab.loaded.bindVertices.size() &&
+        tab.currentNormals.size() == tab.loaded.bindNormals.size())
+    {
+        UploadGlobalMeshFrame(tab, tab.currentVertices.data(), tab.currentNormals.data(), tab.currentVertices.size());
+        return;
+    }
+
+    UploadGlobalMeshFrame(tab, tab.loaded.bindVertices.data(), tab.loaded.bindNormals.data(), tab.loaded.bindVertices.size());
+}
+
+bool IsDescendantNode(const LoadedFbxModel& loaded, int possibleDescendant, int ancestor)
+{
+    int parent = possibleDescendant >= 0 && possibleDescendant < static_cast<int>(loaded.nodes.size()) ? loaded.nodes[static_cast<size_t>(possibleDescendant)].parent : -1;
+    while (parent >= 0)
+    {
+        if (parent == ancestor) return true;
+        parent = parent < static_cast<int>(loaded.nodes.size()) ? loaded.nodes[static_cast<size_t>(parent)].parent : -1;
+    }
+    return false;
+}
+
+int MarkNodeSubtreeDeleted(ModelTab& tab, int nodeIndex)
+{
+    if (nodeIndex < 0 || nodeIndex >= static_cast<int>(tab.loaded.nodes.size())) return 0;
+    if (tab.deletedNodes.size() != tab.loaded.nodes.size())
+    {
+        tab.deletedNodes.resize(tab.loaded.nodes.size(), false);
+    }
+
+    int deletedCount = 0;
+    for (int i = 0; i < static_cast<int>(tab.loaded.nodes.size()); ++i)
+    {
+        if (i != nodeIndex && !IsDescendantNode(tab.loaded, i, nodeIndex)) continue;
+        if (tab.deletedNodes[static_cast<size_t>(i)]) continue;
+        tab.deletedNodes[static_cast<size_t>(i)] = true;
+        ++deletedCount;
+    }
+
+    if (IsDeletedNode(tab, tab.selectedNode))
+    {
+        tab.selectedNode = -1;
+    }
+    if (IsDeletedNode(tab, tab.isolatedNode))
+    {
+        tab.isolatedNode = -1;
+    }
+    RefreshDisplayedMesh(tab);
+    return deletedCount;
+}
+
+bool ToggleSelectedNodeIsolation(ModelTab& tab, std::string& notice, std::string& error)
+{
+    if (tab.isolatedNode >= 0 && tab.isolatedNode == tab.selectedNode)
+    {
+        tab.isolatedNode = -1;
+        RefreshDisplayedMesh(tab);
+        notice = "Isolation off.";
+        error.clear();
+        return true;
+    }
+
+    if (tab.selectedNode < 0 ||
+        tab.selectedNode >= static_cast<int>(tab.loaded.nodes.size()) ||
+        IsDeletedNode(tab, tab.selectedNode))
+    {
+        if (tab.isolatedNode >= 0)
+        {
+            tab.isolatedNode = -1;
+            RefreshDisplayedMesh(tab);
+            notice = "Isolation off.";
+            error.clear();
+            return true;
+        }
+
+        error = "Select an object to isolate.";
+        notice.clear();
+        return false;
+    }
+
+    tab.isolatedNode = tab.selectedNode;
+    RefreshDisplayedMesh(tab);
+    notice = "Isolated: " + tab.loaded.nodes[static_cast<size_t>(tab.isolatedNode)].name;
+    error.clear();
+    return true;
+}
+
+void RenameSceneNode(ModelTab& tab, int nodeIndex, const std::string& newName)
+{
+    if (nodeIndex < 0 || nodeIndex >= static_cast<int>(tab.loaded.nodes.size()) || newName.empty()) return;
+
+    SceneNode& node = tab.loaded.nodes[static_cast<size_t>(nodeIndex)];
+    const std::string oldName = node.name;
+    if (oldName == newName) return;
+    node.name = newName;
+
+    if (node.type == SceneNodeType::Bone)
+    {
+        for (SkinnedVertex& vertex : tab.loaded.skinnedVertices)
+        {
+            for (SkinnedVertexInfluence& influence : vertex.influences)
+            {
+                if (influence.boneName == oldName)
+                {
+                    influence.boneName = newName;
+                }
+            }
+        }
+    }
+}
+
+void StartRenameNode(RenameEditor& editor, const LoadedFbxModel& loaded, int nodeIndex)
+{
+    if (nodeIndex < 0 || nodeIndex >= static_cast<int>(loaded.nodes.size())) return;
+    editor = RenameEditor{};
+    editor.target = RenameTarget::SceneNode;
+    editor.nodeIndex = nodeIndex;
+    editor.active = true;
+    editor.justOpened = true;
+    std::snprintf(editor.text, sizeof(editor.text), "%s", loaded.nodes[static_cast<size_t>(nodeIndex)].name.c_str());
+    editor.cursor = static_cast<int>(std::strlen(editor.text));
+    editor.textSelected = editor.cursor > 0;
+}
+
+void StartRenameAnimation(RenameEditor& editor, const LoadedFbxModel& loaded, int clipIndex)
+{
+    if (clipIndex < 0 || clipIndex >= static_cast<int>(loaded.animations.size())) return;
+    editor = RenameEditor{};
+    editor.target = RenameTarget::AnimationClip;
+    editor.clipIndex = clipIndex;
+    editor.active = true;
+    editor.justOpened = true;
+    std::snprintf(editor.text, sizeof(editor.text), "%s", loaded.animations[static_cast<size_t>(clipIndex)].name.c_str());
+    editor.cursor = static_cast<int>(std::strlen(editor.text));
+    editor.textSelected = editor.cursor > 0;
+}
+
+void ClearRenameSelection(RenameEditor& editor)
+{
+    if (!editor.textSelected) return;
+    editor.text[0] = '\0';
+    editor.cursor = 0;
+    editor.textSelected = false;
+}
+
+void InsertRenameText(RenameEditor& editor, const char* text)
+{
+    if (!text || text[0] == '\0') return;
+    ClearRenameSelection(editor);
+
+    const int length = static_cast<int>(std::strlen(editor.text));
+    editor.cursor = std::clamp(editor.cursor, 0, length);
+
+    for (const char* read = text; *read; ++read)
+    {
+        const unsigned char value = static_cast<unsigned char>(*read);
+        if (value < 32 || value >= 127) continue;
+
+        const int currentLength = static_cast<int>(std::strlen(editor.text));
+        if (currentLength + 1 >= static_cast<int>(sizeof(editor.text))) break;
+
+        std::memmove(editor.text + editor.cursor + 1,
+                     editor.text + editor.cursor,
+                     static_cast<size_t>(currentLength - editor.cursor + 1));
+        editor.text[editor.cursor] = static_cast<char>(value);
+        editor.cursor++;
+    }
+}
+
+void DeleteRenameSelectionOrPreviousChar(RenameEditor& editor)
+{
+    if (editor.textSelected)
+    {
+        ClearRenameSelection(editor);
+        return;
+    }
+
+    const int length = static_cast<int>(std::strlen(editor.text));
+    editor.cursor = std::clamp(editor.cursor, 0, length);
+    if (editor.cursor <= 0) return;
+
+    std::memmove(editor.text + editor.cursor - 1,
+                 editor.text + editor.cursor,
+                 static_cast<size_t>(length - editor.cursor + 1));
+    editor.cursor--;
+}
+
+void DeleteRenameSelectionOrNextChar(RenameEditor& editor)
+{
+    if (editor.textSelected)
+    {
+        ClearRenameSelection(editor);
+        return;
+    }
+
+    const int length = static_cast<int>(std::strlen(editor.text));
+    editor.cursor = std::clamp(editor.cursor, 0, length);
+    if (editor.cursor >= length) return;
+
+    std::memmove(editor.text + editor.cursor,
+                 editor.text + editor.cursor + 1,
+                 static_cast<size_t>(length - editor.cursor));
+}
+
+void DrawRenameEditor(Font font, ModelTab* active, RenameEditor& editor, std::string& notice, std::string& error)
+{
+    if (!editor.active || !active) return;
+
+    const bool controlDown = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
+    int key = GetCharPressed();
+    while (key > 0)
+    {
+        if (!controlDown && key >= 32 && key < 127)
+        {
+            char value[2]{ static_cast<char>(key), '\0' };
+            InsertRenameText(editor, value);
+        }
+        key = GetCharPressed();
+    }
+
+    if (IsKeyPressed(KEY_BACKSPACE))
+    {
+        DeleteRenameSelectionOrPreviousChar(editor);
+    }
+    if (IsKeyPressed(KEY_DELETE))
+    {
+        DeleteRenameSelectionOrNextChar(editor);
+    }
+    if (controlDown && IsKeyPressed(KEY_A))
+    {
+        editor.textSelected = std::strlen(editor.text) > 0;
+        editor.cursor = static_cast<int>(std::strlen(editor.text));
+    }
+    if (controlDown && IsKeyPressed(KEY_V))
+    {
+        InsertRenameText(editor, GetClipboardText());
+    }
+    if (IsKeyPressed(KEY_LEFT))
+    {
+        const int length = static_cast<int>(std::strlen(editor.text));
+        if (editor.textSelected)
+        {
+            editor.cursor = 0;
+            editor.textSelected = false;
+        }
+        else
+        {
+            editor.cursor = std::max(0, std::clamp(editor.cursor, 0, length) - 1);
+        }
+    }
+    if (IsKeyPressed(KEY_RIGHT))
+    {
+        const int length = static_cast<int>(std::strlen(editor.text));
+        if (editor.textSelected)
+        {
+            editor.cursor = length;
+            editor.textSelected = false;
+        }
+        else
+        {
+            editor.cursor = std::min(length, std::clamp(editor.cursor, 0, length) + 1);
+        }
+    }
+    if (IsKeyPressed(KEY_HOME))
+    {
+        editor.cursor = 0;
+        editor.textSelected = false;
+    }
+    if (IsKeyPressed(KEY_END))
+    {
+        editor.cursor = static_cast<int>(std::strlen(editor.text));
+        editor.textSelected = false;
+    }
+    if (IsKeyPressed(KEY_ESCAPE))
+    {
+        editor = RenameEditor{};
+        return;
+    }
+
+    const bool submit = IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER);
+    const bool cancelClick = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    const float dialogW = 360.0f;
+    const float dialogH = 128.0f;
+    const Rectangle dialog{ (static_cast<float>(GetScreenWidth()) - dialogW) * 0.5f,
+                            (static_cast<float>(GetScreenHeight()) - dialogH) * 0.5f,
+                            dialogW,
+                            dialogH };
+    const Rectangle input{ dialog.x + 16.0f, dialog.y + 48.0f, dialog.width - 32.0f, 28.0f };
+    const Rectangle okButton{ dialog.x + dialog.width - 166.0f, dialog.y + dialog.height - 38.0f, 70.0f, 24.0f };
+    const Rectangle cancelButton{ dialog.x + dialog.width - 86.0f, dialog.y + dialog.height - 38.0f, 70.0f, 24.0f };
+
+    DrawRectangleRec(Rectangle{ 0.0f, 0.0f, static_cast<float>(GetScreenWidth()), static_cast<float>(GetScreenHeight()) }, Color{ 0, 0, 0, 80 });
+    DrawRectangleRec(dialog, Color{ 24, 27, 31, 250 });
+    DrawRectangleLinesEx(dialog, 1.0f, Color{ 86, 96, 108, 255 });
+    DrawUiText(font, editor.target == RenameTarget::AnimationClip ? "Rename Animation" : "Rename Object", dialog.x + 16.0f, dialog.y + 16.0f, 16.0f, Color{ 205, 213, 220, 255 });
+    DrawRectangleRec(input, Color{ 14, 16, 19, 255 });
+    DrawRectangleLinesEx(input, 1.0f, Color{ 94, 156, 214, 255 });
+    if (editor.textSelected && editor.text[0] != '\0')
+    {
+        const float selectionW = std::min(input.width - 16.0f, MeasureTextEx(font, editor.text, 15.0f, 1.0f).x + 2.0f);
+        DrawRectangleRec(Rectangle{ input.x + 7.0f, input.y + 5.0f, selectionW, input.height - 10.0f }, Color{ 52, 106, 158, 210 });
+    }
+    DrawUiTextClipped(font, editor.text, input.x + 8.0f, input.y + 6.0f, 15.0f, input.width - 16.0f, RAYWHITE);
+    if (!editor.textSelected)
+    {
+        const int cursor = std::clamp(editor.cursor, 0, static_cast<int>(std::strlen(editor.text)));
+        const std::string beforeCursor(editor.text, editor.text + cursor);
+        const float caretX = std::min(input.x + input.width - 8.0f, input.x + 8.0f + MeasureTextEx(font, beforeCursor.c_str(), 15.0f, 1.0f).x);
+        DrawRectangleRec(Rectangle{ caretX, input.y + 6.0f, 1.0f, input.height - 12.0f }, Color{ 230, 236, 242, 255 });
+    }
+
+    if (editor.justOpened)
+    {
+        editor.justOpened = false;
+        return;
+    }
+
+    if (DrawPanelButton(font, okButton, "OK") || submit)
+    {
+        const std::string newName = editor.text;
+        if (newName.empty())
+        {
+            error = "Name cannot be empty.";
+            notice.clear();
+        }
+        else if (editor.target == RenameTarget::SceneNode)
+        {
+            const bool changed = editor.nodeIndex >= 0 &&
+                                 editor.nodeIndex < static_cast<int>(active->loaded.nodes.size()) &&
+                                 active->loaded.nodes[static_cast<size_t>(editor.nodeIndex)].name != newName;
+            if (changed)
+            {
+                PushUndoSnapshot(*active);
+            }
+            RenameSceneNode(*active, editor.nodeIndex, newName);
+            notice = "Renamed object.";
+            error.clear();
+            editor = RenameEditor{};
+        }
+        else if (editor.target == RenameTarget::AnimationClip &&
+                 editor.clipIndex >= 0 &&
+                 editor.clipIndex < static_cast<int>(active->loaded.animations.size()))
+        {
+            AnimationClip& clip = active->loaded.animations[static_cast<size_t>(editor.clipIndex)];
+            if (clip.name != newName)
+            {
+                PushUndoSnapshot(*active);
+                clip.name = newName;
+            }
+            notice = "Renamed animation.";
+            error.clear();
+            editor = RenameEditor{};
+        }
+    }
+    if (DrawPanelButton(font, cancelButton, "Cancel") ||
+        (cancelClick && !CheckCollisionPointRec(GetMousePosition(), dialog)))
+    {
+        editor = RenameEditor{};
     }
 }
 
@@ -1623,6 +2269,7 @@ void DrawEmptyCrosses(const ModelTab& tab)
     {
         const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(i)];
         if (node.type != SceneNodeType::Empty || node.parent < 0) continue;
+        if (!IsViewportNodeVisible(tab, i)) continue;
         DrawEmptyCross(node, length, i == tab.selectedNode ? kSelectionColor : Color{ 100, 185, 255, 230 });
     }
 }
@@ -1632,6 +2279,112 @@ const float* GetCurrentMeshVertices(const ModelTab& tab)
     if (!tab.loaded.hasMesh) return nullptr;
     if (tab.currentVertices.size() == tab.loaded.bindVertices.size()) return tab.currentVertices.data();
     return tab.loaded.bindVertices.empty() ? nullptr : tab.loaded.bindVertices.data();
+}
+
+const float* GetCurrentMeshNormals(const ModelTab& tab)
+{
+    if (!tab.loaded.hasMesh) return nullptr;
+    if (tab.currentNormals.size() == tab.loaded.bindNormals.size()) return tab.currentNormals.data();
+    return tab.loaded.bindNormals.empty() ? nullptr : tab.loaded.bindNormals.data();
+}
+
+float GetBoneInfluenceWeight(const SkinnedVertex& vertex, const std::string& boneName)
+{
+    float weight = 0.0f;
+    for (const SkinnedVertexInfluence& influence : vertex.influences)
+    {
+        if (influence.boneName == boneName)
+        {
+            weight += influence.weight;
+        }
+    }
+    return weight;
+}
+
+Color LerpColor(Color a, Color b, float t)
+{
+    t = ClampFloat(t, 0.0f, 1.0f);
+    return Color{
+        static_cast<unsigned char>(static_cast<float>(a.r) + (static_cast<float>(b.r) - static_cast<float>(a.r)) * t),
+        static_cast<unsigned char>(static_cast<float>(a.g) + (static_cast<float>(b.g) - static_cast<float>(a.g)) * t),
+        static_cast<unsigned char>(static_cast<float>(a.b) + (static_cast<float>(b.b) - static_cast<float>(a.b)) * t),
+        static_cast<unsigned char>(static_cast<float>(a.a) + (static_cast<float>(b.a) - static_cast<float>(a.a)) * t)
+    };
+}
+
+Color GetSkinWeightHeatColor(float weight)
+{
+    weight = ClampFloat(weight, 0.0f, 1.0f);
+    if (weight < 0.25f) return LerpColor(Color{ 18, 34, 92, 120 }, Color{ 28, 170, 215, 180 }, weight / 0.25f);
+    if (weight < 0.50f) return LerpColor(Color{ 28, 170, 215, 180 }, Color{ 54, 205, 92, 205 }, (weight - 0.25f) / 0.25f);
+    if (weight < 0.75f) return LerpColor(Color{ 54, 205, 92, 205 }, Color{ 245, 220, 76, 230 }, (weight - 0.50f) / 0.25f);
+    return LerpColor(Color{ 245, 220, 76, 230 }, Color{ 238, 54, 46, 245 }, (weight - 0.75f) / 0.25f);
+}
+
+bool GetSelectedBoneName(const ModelTab& tab, std::string& boneName)
+{
+    if (tab.selectedNode < 0 || tab.selectedNode >= static_cast<int>(tab.loaded.nodes.size())) return false;
+    const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(tab.selectedNode)];
+    if (node.type != SceneNodeType::Bone || IsDeletedNode(tab, tab.selectedNode)) return false;
+    boneName = node.name;
+    return !boneName.empty();
+}
+
+void DrawSkinWeightHeatMap(const ModelTab& tab)
+{
+    std::string boneName;
+    if (!GetSelectedBoneName(tab, boneName)) return;
+    if (tab.loaded.skinnedVertices.empty()) return;
+
+    const float* vertices = GetCurrentMeshVertices(tab);
+    const float* normals = GetCurrentMeshNormals(tab);
+    if (!vertices) return;
+
+    const float offset = ClampFloat(GetBoundsDiagonal(tab.loaded.bounds) * 0.0008f, 0.0002f, 0.01f);
+    rlDisableBackfaceCulling();
+    rlDisableDepthMask();
+    BeginBlendMode(BLEND_ALPHA);
+    rlBegin(RL_TRIANGLES);
+    for (int nodeIndex = 0; nodeIndex < static_cast<int>(tab.loaded.nodes.size()); ++nodeIndex)
+    {
+        const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(nodeIndex)];
+        if (node.type != SceneNodeType::Mesh || node.meshVertexStart < 0 || node.meshVertexCount < 3) continue;
+        if (!IsViewportNodeVisible(tab, nodeIndex)) continue;
+
+        const int start = std::max(0, node.meshVertexStart);
+        const int end = std::min(node.meshVertexStart + node.meshVertexCount, static_cast<int>(tab.loaded.skinnedVertices.size()));
+        for (int vertex = start; vertex + 2 < end; vertex += 3)
+        {
+            const int vertexIndices[3] = { vertex, vertex + 1, vertex + 2 };
+            Vector3 points[3]{};
+            Vector3 fallbackNormal{};
+            for (int corner = 0; corner < 3; ++corner)
+            {
+                const int base = vertexIndices[corner] * 3;
+                points[corner] = Vector3{ vertices[base], vertices[base + 1], vertices[base + 2] };
+            }
+            fallbackNormal = NormalizeOrFallback(Vector3CrossProduct(Vector3Subtract(points[1], points[0]), Vector3Subtract(points[2], points[0])), Vector3{ 0.0f, 1.0f, 0.0f });
+
+            for (int corner = 0; corner < 3; ++corner)
+            {
+                const int globalVertex = vertexIndices[corner];
+                const int base = globalVertex * 3;
+                Vector3 normal = fallbackNormal;
+                if (normals && base + 2 < static_cast<int>(tab.loaded.bindNormals.size()))
+                {
+                    normal = NormalizeOrFallback(Vector3{ normals[base], normals[base + 1], normals[base + 2] }, fallbackNormal);
+                }
+                const float weight = GetBoneInfluenceWeight(tab.loaded.skinnedVertices[static_cast<size_t>(globalVertex)], boneName);
+                const Color color = GetSkinWeightHeatColor(weight);
+                const Vector3 point = Vector3Add(points[corner], Vector3Scale(normal, offset));
+                rlColor4ub(color.r, color.g, color.b, color.a);
+                rlVertex3f(point.x, point.y, point.z);
+            }
+        }
+    }
+    rlEnd();
+    EndBlendMode();
+    rlEnableDepthMask();
 }
 
 void DrawMeshNodeWireframe(const ModelTab& tab, const SceneNode& node, Color color)
@@ -1784,6 +2537,7 @@ bool SelectNodeFromViewport(ModelTab& tab, Vector2 mouse, const VisibilityState&
     for (int i = 0; i < static_cast<int>(tab.loaded.nodes.size()); ++i)
     {
         const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(i)];
+        if (!IsViewportNodeVisible(tab, i)) continue;
 
         if (node.type == SceneNodeType::Mesh)
         {
@@ -1857,6 +2611,7 @@ bool FocusCameraOnSelection(ModelTab& tab)
     if (tab.selectedNode < 0 || tab.selectedNode >= static_cast<int>(tab.loaded.nodes.size())) return false;
 
     const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(tab.selectedNode)];
+    if (!IsViewportNodeVisible(tab, tab.selectedNode)) return false;
     if (node.type == SceneNodeType::Mesh && node.hasBounds)
     {
         FocusCameraOnBounds(tab.orbit, node.bounds);
@@ -1875,6 +2630,7 @@ void DrawSelectedMeshOverlay(const ModelTab& tab, const VisibilityState& visibil
     if (!visibility.geometry || tab.selectedNode < 0 || tab.selectedNode >= static_cast<int>(tab.loaded.nodes.size())) return;
 
     const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(tab.selectedNode)];
+    if (!IsViewportNodeVisible(tab, tab.selectedNode)) return;
     if (node.type == SceneNodeType::Mesh && node.hasBounds)
     {
         DrawMeshNodeWireframe(tab, node, kSelectionColor);
@@ -2156,6 +2912,16 @@ bool HasSceneNodeChildren(const LoadedFbxModel& loaded, int nodeIndex)
     return false;
 }
 
+bool HasVisibleSceneNodeChildren(const ModelTab& tab, int nodeIndex)
+{
+    for (int i = 0; i < static_cast<int>(tab.loaded.nodes.size()); ++i)
+    {
+        if (IsDeletedNode(tab, i)) continue;
+        if (tab.loaded.nodes[static_cast<size_t>(i)].parent == nodeIndex) return true;
+    }
+    return false;
+}
+
 bool IsSceneNodeVisible(const LoadedFbxModel& loaded, const std::vector<bool>& collapsed, int nodeIndex)
 {
     int parent = loaded.nodes[static_cast<size_t>(nodeIndex)].parent;
@@ -2166,6 +2932,23 @@ bool IsSceneNodeVisible(const LoadedFbxModel& loaded, const std::vector<bool>& c
             return false;
         }
         parent = loaded.nodes[static_cast<size_t>(parent)].parent;
+    }
+    return true;
+}
+
+bool IsSceneNodeVisible(const ModelTab& tab, const std::vector<bool>& collapsed, int nodeIndex)
+{
+    if (IsDeletedNode(tab, nodeIndex)) return false;
+
+    int parent = tab.loaded.nodes[static_cast<size_t>(nodeIndex)].parent;
+    while (parent >= 0)
+    {
+        if (IsDeletedNode(tab, parent)) return false;
+        if (parent < static_cast<int>(collapsed.size()) && collapsed[static_cast<size_t>(parent)])
+        {
+            return false;
+        }
+        parent = parent < static_cast<int>(tab.loaded.nodes.size()) ? tab.loaded.nodes[static_cast<size_t>(parent)].parent : -1;
     }
     return true;
 }
@@ -2190,6 +2973,16 @@ int CountVisibleSceneNodes(const LoadedFbxModel& loaded, const std::vector<bool>
     return count;
 }
 
+int CountVisibleSceneNodes(const ModelTab& tab, const std::vector<bool>& collapsed)
+{
+    int count = 0;
+    for (int i = 0; i < static_cast<int>(tab.loaded.nodes.size()); ++i)
+    {
+        if (IsSceneNodeVisible(tab, collapsed, i)) ++count;
+    }
+    return count;
+}
+
 int GetVisibleSceneNodeRow(const LoadedFbxModel& loaded, const std::vector<bool>& collapsed, int nodeIndex)
 {
     int row = 0;
@@ -2202,9 +2995,22 @@ int GetVisibleSceneNodeRow(const LoadedFbxModel& loaded, const std::vector<bool>
     return -1;
 }
 
+int GetVisibleSceneNodeRow(const ModelTab& tab, const std::vector<bool>& collapsed, int nodeIndex)
+{
+    int row = 0;
+    for (int i = 0; i < static_cast<int>(tab.loaded.nodes.size()); ++i)
+    {
+        if (!IsSceneNodeVisible(tab, collapsed, i)) continue;
+        if (i == nodeIndex) return row;
+        ++row;
+    }
+    return -1;
+}
+
 void RevealNodeInHierarchy(ModelTab& tab, HierarchyPanelState& panel, int nodeIndex)
 {
     if (nodeIndex < 0 || nodeIndex >= static_cast<int>(tab.loaded.nodes.size())) return;
+    if (IsDeletedNode(tab, nodeIndex)) return;
 
     int parent = tab.loaded.nodes[static_cast<size_t>(nodeIndex)].parent;
     while (parent >= 0)
@@ -2216,13 +3022,13 @@ void RevealNodeInHierarchy(ModelTab& tab, HierarchyPanelState& panel, int nodeIn
         parent = tab.loaded.nodes[static_cast<size_t>(parent)].parent;
     }
 
-    const int row = GetVisibleSceneNodeRow(tab.loaded, tab.collapsedNodes, nodeIndex);
+    const int row = GetVisibleSceneNodeRow(tab, tab.collapsedNodes, nodeIndex);
     if (row < 0) return;
 
     constexpr float rowH = 22.0f;
     const float panelH = GetHierarchyPanelHeight();
     const float visibleRows = std::max(1.0f, std::floor((panelH - 64.0f) / rowH));
-    const float maxScroll = std::max(0.0f, static_cast<float>(CountVisibleSceneNodes(tab.loaded, tab.collapsedNodes)) - visibleRows);
+    const float maxScroll = std::max(0.0f, static_cast<float>(CountVisibleSceneNodes(tab, tab.collapsedNodes)) - visibleRows);
 
     if (static_cast<float>(row) < panel.scroll)
     {
@@ -2279,13 +3085,13 @@ void UpdateHierarchyPanelInteraction(HierarchyPanelState& panel, const ModelTab*
     }
 
     const Rectangle panelRect{ panelX, panelY, panel.width, panelH };
-    if (active && CheckCollisionPointRec(mouse, panelRect))
+    if (active && panel.activeTab == LeftPanelTab::Hierarchy && CheckCollisionPointRec(mouse, panelRect))
     {
         const float wheel = GetMouseWheelMove();
         if (std::fabs(wheel) > 0.0f)
         {
             const float visibleRows = std::max(0.0f, std::floor((panelH - 64.0f) / rowH));
-            const float maxScroll = std::max(0.0f, static_cast<float>(CountVisibleSceneNodes(active->loaded, active->collapsedNodes)) - visibleRows);
+            const float maxScroll = std::max(0.0f, static_cast<float>(CountVisibleSceneNodes(*active, active->collapsedNodes)) - visibleRows);
             panel.scroll = ClampFloat(panel.scroll - wheel * 3.0f, 0.0f, maxScroll);
         }
     }
@@ -2964,6 +3770,55 @@ bool IsTextureExtension(const std::filesystem::path& path)
            extension == ".gif" || extension == ".hdr";
 }
 
+bool IsOrmTextureName(const std::string& lowerStem)
+{
+    const std::string compactStem = CompactName(lowerStem);
+    auto hasToken = [&](const char* token)
+    {
+        const std::string value(token);
+        size_t position = lowerStem.find(value);
+        while (position != std::string::npos)
+        {
+            const bool startsOnBoundary = position == 0 || !std::isalnum(static_cast<unsigned char>(lowerStem[position - 1]));
+            const size_t end = position + value.size();
+            const bool endsOnBoundary = end >= lowerStem.size() || !std::isalnum(static_cast<unsigned char>(lowerStem[end]));
+            if (startsOnBoundary && endsOnBoundary) return true;
+            position = lowerStem.find(value, position + 1);
+        }
+        return false;
+    };
+
+    return hasToken("orm") ||
+           lowerStem.find("occlusionroughnessmetallic") != std::string::npos ||
+           lowerStem.find("occlusion_roughness_metallic") != std::string::npos ||
+           lowerStem.find("occlusion-roughness-metallic") != std::string::npos ||
+           lowerStem.find("ao_roughness_metallic") != std::string::npos ||
+           lowerStem.find("ao-roughness-metallic") != std::string::npos ||
+           compactStem.find("occlusionroughnessmetallic") != std::string::npos ||
+           compactStem.find("aoroughnessmetallic") != std::string::npos;
+}
+
+int LoadOrmTexture(ModelTab& tab, int materialIndex, const std::string& path, std::string& error)
+{
+    int loadedCount = 0;
+    error.clear();
+
+    for (PbrTextureSlot slot : { PbrTextureSlot::AmbientOcclusion, PbrTextureSlot::Roughness, PbrTextureSlot::Metallic })
+    {
+        std::string loadError;
+        if (LoadPbrTexture(tab, materialIndex, slot, path, loadError))
+        {
+            ++loadedCount;
+        }
+        else if (error.empty())
+        {
+            error = loadError;
+        }
+    }
+
+    return loadedCount;
+}
+
 int ScoreTextureCandidate(const std::string& lowerStem, const std::string& lowerModelStem, const std::string& lowerMaterialName, PbrTextureSlot slot)
 {
     int score = !lowerModelStem.empty() && LowerStemContainsName(lowerStem, lowerModelStem) ? 3 : 0;
@@ -2989,12 +3844,15 @@ int ScoreTextureCandidate(const std::string& lowerStem, const std::string& lower
         break;
     case PbrTextureSlot::Roughness:
         if (hasAny({ "roughness", "_rough", "_rgh" })) score += 10;
+        if (IsOrmTextureName(lowerStem)) score += 12;
         break;
     case PbrTextureSlot::Metallic:
         if (hasAny({ "metallic", "metalness", "_metal", "_mtl" })) score += 10;
+        if (IsOrmTextureName(lowerStem)) score += 12;
         break;
     case PbrTextureSlot::AmbientOcclusion:
         if (hasAny({ "_ao", "ambientocclusion", "ambient_occlusion", "occlusion" })) score += 10;
+        if (IsOrmTextureName(lowerStem)) score += 12;
         break;
     case PbrTextureSlot::Emissive:
         if (hasAny({ "emissive", "emission", "emit", "_ems", "_emiss" })) score += 10;
@@ -3056,6 +3914,7 @@ int AutoAssignDroppedTextures(ModelTab& tab, const std::vector<std::string>& dro
         if (!IsTextureExtension(texturePath)) continue;
 
         const std::string stem = ToLower(texturePath.stem().string());
+        const bool isOrmTexture = IsOrmTextureName(stem);
         int bestMaterial = -1;
         PbrTextureSlot bestSlot = PbrTextureSlot::Diffuse;
         int bestScore = 0;
@@ -3082,7 +3941,20 @@ int AutoAssignDroppedTextures(ModelTab& tab, const std::vector<std::string>& dro
         if (bestMaterial < 0 || bestScore < 8) continue;
 
         std::string loadError;
-        if (LoadPbrTexture(tab, bestMaterial, bestSlot, droppedPath, loadError))
+        if (isOrmTexture)
+        {
+            const int ormLoadedCount = LoadOrmTexture(tab, bestMaterial, droppedPath, loadError);
+            if (ormLoadedCount > 0)
+            {
+                loadedCount += ormLoadedCount;
+                tab.selectedMaterial = bestMaterial;
+            }
+            else if (firstError.empty())
+            {
+                firstError = loadError;
+            }
+        }
+        else if (LoadPbrTexture(tab, bestMaterial, bestSlot, droppedPath, loadError))
         {
             ++loadedCount;
             tab.selectedMaterial = bestMaterial;
@@ -3096,7 +3968,7 @@ int AutoAssignDroppedTextures(ModelTab& tab, const std::vector<std::string>& dro
     if (loadedCount > 0)
     {
         char message[160] = {};
-        std::snprintf(message, sizeof(message), "Auto-assigned %d dropped texture%s by name.", loadedCount, loadedCount == 1 ? "" : "s");
+        std::snprintf(message, sizeof(message), "Auto-assigned %d texture slot%s by name.", loadedCount, loadedCount == 1 ? "" : "s");
         notice = message;
         error.clear();
     }
@@ -3140,7 +4012,8 @@ bool DrawPanelTab(Font font, Rectangle bounds, const char* label, bool selected)
     const Vector2 mouse = GetMousePosition();
     const bool hovered = CheckCollisionPointRec(mouse, bounds);
     DrawRectangleRec(bounds, selected ? Color{ 48, 70, 92, 255 } : hovered ? Color{ 34, 39, 45, 255 } : Color{ 24, 27, 31, 245 });
-    DrawUiText(font, label, bounds.x + 10.0f, bounds.y + 5.0f, 15.0f, selected ? RAYWHITE : Color{ 180, 190, 200, 255 });
+    const float fontSize = MeasureTextEx(font, label, 14.0f, 1.0f).x > bounds.width - 10.0f ? 12.0f : 14.0f;
+    DrawUiTextClipped(font, label, bounds.x + 5.0f, bounds.y + 5.0f, fontSize, bounds.width - 10.0f, selected ? RAYWHITE : Color{ 180, 190, 200, 255 });
     return hovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
 }
 
@@ -3226,9 +4099,11 @@ void DrawTextureContextMenu(Font font, ModelTab& tab, TextureClipboard& clipboar
         }
         if (canPaste && DrawPanelButton(font, pasteButton, "Paste"))
         {
+            EditSnapshot before = CaptureEditSnapshot(tab);
             std::string loadError;
             if (LoadPbrTexture(tab, clipboard.materialIndex, clipboard.slot, clipboard.path, loadError))
             {
+                PushUndoSnapshot(tab, std::move(before));
                 notice = std::string("Pasted texture to ") + GetPbrTextureSlotName(clipboard.slot) + ".";
                 error.clear();
             }
@@ -3255,6 +4130,362 @@ void DrawTextureContextMenu(Font font, ModelTab& tab, TextureClipboard& clipboar
     {
         DrawRectangleRec(pasteButton, Color{ 28, 31, 35, 245 });
         DrawUiText(font, "Paste", pasteButton.x + 10.0f, pasteButton.y + 5.0f, 16.0f, Color{ 105, 115, 124, 255 });
+    }
+}
+
+bool IsFiniteFloat(float value)
+{
+    return std::isfinite(value);
+}
+
+bool IsFiniteVector(Vector3 value)
+{
+    return IsFiniteFloat(value.x) && IsFiniteFloat(value.y) && IsFiniteFloat(value.z);
+}
+
+void AddValidationIssue(std::vector<ValidatorIssue>& issues, ValidatorSeverity severity, const std::string& category, const std::string& message, int node = -1)
+{
+    issues.push_back(ValidatorIssue{ severity, category, message, node });
+}
+
+int ValidatorSeverityRank(ValidatorSeverity severity)
+{
+    switch (severity)
+    {
+    case ValidatorSeverity::Error: return 2;
+    case ValidatorSeverity::Warning: return 1;
+    case ValidatorSeverity::Info: return 0;
+    }
+    return 0;
+}
+
+const char* GetValidatorSeverityName(ValidatorSeverity severity)
+{
+    switch (severity)
+    {
+    case ValidatorSeverity::Error: return "ERR";
+    case ValidatorSeverity::Warning: return "WARN";
+    case ValidatorSeverity::Info: return "INFO";
+    }
+    return "INFO";
+}
+
+Color GetValidatorSeverityColor(ValidatorSeverity severity)
+{
+    switch (severity)
+    {
+    case ValidatorSeverity::Error: return Color{ 216, 92, 92, 255 };
+    case ValidatorSeverity::Warning: return Color{ 220, 168, 72, 255 };
+    case ValidatorSeverity::Info: return Color{ 104, 168, 220, 255 };
+    }
+    return Color{ 104, 168, 220, 255 };
+}
+
+std::string GetMaterialDisplayName(const LoadedFbxModel& loaded, int materialIndex)
+{
+    if (materialIndex >= 0 && materialIndex < static_cast<int>(loaded.materialNames.size()))
+    {
+        return loaded.materialNames[static_cast<size_t>(materialIndex)];
+    }
+    return std::string("Material ") + std::to_string(materialIndex + 1);
+}
+
+void ValidateTextures(const ModelTab& tab, std::vector<ValidatorIssue>& issues)
+{
+    const int materialCount = tab.loaded.hasMesh ? std::max(1, tab.loaded.model.materialCount) : 0;
+    int missingDiffuse = 0;
+    int missingNormal = 0;
+
+    for (int materialIndex = 0; materialIndex < materialCount; ++materialIndex)
+    {
+        const PbrMaterialState* material = materialIndex < static_cast<int>(tab.pbrMaterials.size()) ? &tab.pbrMaterials[static_cast<size_t>(materialIndex)] : nullptr;
+        if (!material || !GetPbrTexture(*material, PbrTextureSlot::Diffuse).loaded)
+        {
+            ++missingDiffuse;
+        }
+        if (!material || !GetPbrTexture(*material, PbrTextureSlot::Normal).loaded)
+        {
+            ++missingNormal;
+        }
+
+        if (!material) continue;
+
+        for (int slotIndex = 0; slotIndex < static_cast<int>(PbrTextureSlot::Count); ++slotIndex)
+        {
+            const PbrTextureSlot slot = static_cast<PbrTextureSlot>(slotIndex);
+            const PbrTexture& texture = GetPbrTexture(*material, slot);
+            if (texture.path.empty()) continue;
+
+            std::error_code existsError;
+            const bool sourceExists = std::filesystem::exists(texture.path, existsError);
+            if (!texture.loaded || texture.texture.id == 0 || texture.texture.width <= 0 || texture.texture.height <= 0 || !sourceExists)
+            {
+                AddValidationIssue(issues,
+                                   ValidatorSeverity::Error,
+                                   "Broken texture",
+                                   GetMaterialDisplayName(tab.loaded, materialIndex) + " " + GetPbrTextureSlotName(slot) + ": " + texture.path);
+            }
+        }
+    }
+
+    if (missingDiffuse > 0)
+    {
+        AddValidationIssue(issues, ValidatorSeverity::Warning, "Missing texture", std::to_string(missingDiffuse) + " material(s) have no diffuse texture assigned.");
+    }
+    if (missingNormal > 0)
+    {
+        AddValidationIssue(issues, ValidatorSeverity::Info, "Missing texture", std::to_string(missingNormal) + " material(s) have no normal texture assigned.");
+    }
+}
+
+void ValidateDuplicateNames(const LoadedFbxModel& loaded, std::vector<ValidatorIssue>& issues)
+{
+    std::unordered_map<std::string, int> nodeNames;
+    for (int i = 0; i < static_cast<int>(loaded.nodes.size()); ++i)
+    {
+        const std::string& name = loaded.nodes[static_cast<size_t>(i)].name;
+        if (name.empty()) continue;
+        const int count = ++nodeNames[name];
+        if (count == 2)
+        {
+            AddValidationIssue(issues, ValidatorSeverity::Warning, "Duplicate name", "Duplicate node name: " + name, i);
+        }
+    }
+
+    std::unordered_map<std::string, int> materialNames;
+    for (const std::string& name : loaded.materialNames)
+    {
+        if (!name.empty() && ++materialNames[name] == 2)
+        {
+            AddValidationIssue(issues, ValidatorSeverity::Warning, "Duplicate name", "Duplicate material name: " + name);
+        }
+    }
+
+    std::unordered_map<std::string, int> animationNames;
+    for (const AnimationClip& clip : loaded.animations)
+    {
+        if (!clip.name.empty() && ++animationNames[clip.name] == 2)
+        {
+            AddValidationIssue(issues, ValidatorSeverity::Warning, "Duplicate name", "Duplicate animation name: " + clip.name);
+        }
+    }
+}
+
+void ValidateTransforms(const LoadedFbxModel& loaded, std::vector<ValidatorIssue>& issues)
+{
+    for (int i = 0; i < static_cast<int>(loaded.nodes.size()); ++i)
+    {
+        const SceneNode& node = loaded.nodes[static_cast<size_t>(i)];
+        if (!IsFiniteVector(node.position) || !IsFiniteVector(node.rotation) || !IsFiniteVector(node.scale) ||
+            !IsFiniteVector(node.axisX) || !IsFiniteVector(node.axisY) || !IsFiniteVector(node.axisZ))
+        {
+            AddValidationIssue(issues, ValidatorSeverity::Error, "Invalid transform", "Non-finite transform values on " + node.name, i);
+            continue;
+        }
+
+        if (std::fabs(node.scale.x) <= 0.000001f || std::fabs(node.scale.y) <= 0.000001f || std::fabs(node.scale.z) <= 0.000001f)
+        {
+            AddValidationIssue(issues, ValidatorSeverity::Error, "Invalid transform", "Zero or near-zero scale on " + node.name, i);
+        }
+
+        const float axisXLength = Vector3Length(node.axisX);
+        const float axisYLength = Vector3Length(node.axisY);
+        const float axisZLength = Vector3Length(node.axisZ);
+        if (axisXLength <= 0.000001f || axisYLength <= 0.000001f || axisZLength <= 0.000001f)
+        {
+            AddValidationIssue(issues, ValidatorSeverity::Error, "Invalid transform", "Zero transform axis on " + node.name, i);
+        }
+        else if (std::fabs(axisXLength - 1.0f) > 0.02f || std::fabs(axisYLength - 1.0f) > 0.02f || std::fabs(axisZLength - 1.0f) > 0.02f ||
+                 std::fabs(Vector3DotProduct(node.axisX, node.axisY)) > 0.03f ||
+                 std::fabs(Vector3DotProduct(node.axisX, node.axisZ)) > 0.03f ||
+                 std::fabs(Vector3DotProduct(node.axisY, node.axisZ)) > 0.03f)
+        {
+            AddValidationIssue(issues, ValidatorSeverity::Warning, "Invalid transform", "Skewed or non-orthogonal axes on " + node.name, i);
+        }
+    }
+}
+
+void ValidateGeometry(const LoadedFbxModel& loaded, std::vector<ValidatorIssue>& issues)
+{
+    if (loaded.hasMesh && loaded.bindNormals.size() != loaded.bindVertices.size())
+    {
+        AddValidationIssue(issues, ValidatorSeverity::Error, "Missing normals", "Normal buffer length does not match vertex buffer length.");
+    }
+    if (loaded.hasMesh && loaded.uvSets.empty())
+    {
+        AddValidationIssue(issues, ValidatorSeverity::Warning, "Missing UVs", "Model has no UV sets.");
+    }
+
+    for (int i = 0; i < static_cast<int>(loaded.nodes.size()); ++i)
+    {
+        const SceneNode& node = loaded.nodes[static_cast<size_t>(i)];
+        if (node.type != SceneNodeType::Mesh) continue;
+
+        if (node.meshVertexCount <= 0)
+        {
+            AddValidationIssue(issues, ValidatorSeverity::Error, "Empty mesh", node.name + " contains no triangles.", i);
+            continue;
+        }
+        if (!node.meshHadUvs)
+        {
+            AddValidationIssue(issues, ValidatorSeverity::Warning, "Missing UVs", node.name + " has missing or unmapped UV data.", i);
+        }
+        if (!node.meshHadNormals)
+        {
+            AddValidationIssue(issues, ValidatorSeverity::Warning, "Missing normals", node.name + " had missing authored normals.", i);
+        }
+        if (node.degenerateTriangleCount > 0)
+        {
+            AddValidationIssue(issues, ValidatorSeverity::Error, "Degenerate triangles", node.name + " has " + std::to_string(node.degenerateTriangleCount) + " degenerate triangle(s).", i);
+        }
+    }
+}
+
+void ValidateSkinning(const LoadedFbxModel& loaded, std::vector<ValidatorIssue>& issues)
+{
+    bool hasSkinnedMesh = false;
+    std::unordered_map<std::string, bool> influencedBones;
+    for (const SkinnedVertex& vertex : loaded.skinnedVertices)
+    {
+        if (!vertex.influences.empty()) hasSkinnedMesh = true;
+        for (const SkinnedVertexInfluence& influence : vertex.influences)
+        {
+            if (!influence.boneName.empty())
+            {
+                influencedBones[influence.boneName] = true;
+            }
+        }
+    }
+
+    for (int i = 0; i < static_cast<int>(loaded.nodes.size()); ++i)
+    {
+        const SceneNode& node = loaded.nodes[static_cast<size_t>(i)];
+        if (node.type != SceneNodeType::Mesh) continue;
+
+        if (node.badSkinWeightCount > 0)
+        {
+            AddValidationIssue(issues, ValidatorSeverity::Error, "Bad weights", node.name + " has " + std::to_string(node.badSkinWeightCount) + " vertex weight sum(s) outside 1.0.", i);
+        }
+        if (node.missingSkinWeightCount > 0)
+        {
+            AddValidationIssue(issues, ValidatorSeverity::Error, "Bad weights", node.name + " has " + std::to_string(node.missingSkinWeightCount) + " skinned vertex/vertices with no weights.", i);
+        }
+    }
+
+    if (!hasSkinnedMesh) return;
+
+    if (loaded.bonePoses.empty())
+    {
+        AddValidationIssue(issues, ValidatorSeverity::Error, "Missing bind poses", "Skinned mesh has no skeleton bind poses.");
+    }
+
+    for (int i = 0; i < static_cast<int>(loaded.nodes.size()); ++i)
+    {
+        const SceneNode& node = loaded.nodes[static_cast<size_t>(i)];
+        if (node.type == SceneNodeType::Bone && influencedBones.find(node.name) != influencedBones.end() && !node.hasSkinBindPose)
+        {
+            AddValidationIssue(issues, ValidatorSeverity::Error, "Missing bind poses", "Influenced bone has no explicit skin bind pose: " + node.name, i);
+        }
+    }
+}
+
+std::vector<ValidatorIssue> BuildValidationIssues(const ModelTab& tab)
+{
+    std::vector<ValidatorIssue> issues;
+    ValidateTextures(tab, issues);
+    ValidateDuplicateNames(tab.loaded, issues);
+    ValidateTransforms(tab.loaded, issues);
+    ValidateGeometry(tab.loaded, issues);
+    ValidateSkinning(tab.loaded, issues);
+
+    std::stable_sort(issues.begin(), issues.end(), [](const ValidatorIssue& a, const ValidatorIssue& b)
+    {
+        return ValidatorSeverityRank(a.severity) > ValidatorSeverityRank(b.severity);
+    });
+    return issues;
+}
+
+void DrawValidatorPanel(Font font, ModelTab& tab, HierarchyPanelState& panel, float panelX, float panelY, float panelW)
+{
+    std::vector<ValidatorIssue> issues = BuildValidationIssues(tab);
+    const float contentX = panelX + 12.0f;
+    const float panelH = GetHierarchyPanelHeight();
+    float y = panelY;
+
+    int errors = 0;
+    int warnings = 0;
+    int infos = 0;
+    for (const ValidatorIssue& issue : issues)
+    {
+        if (issue.severity == ValidatorSeverity::Error) ++errors;
+        else if (issue.severity == ValidatorSeverity::Warning) ++warnings;
+        else ++infos;
+    }
+
+    DrawUiText(font, "VALIDATOR", contentX, y, 16.0f, Color{ 165, 182, 196, 255 });
+    y += 28.0f;
+
+    char summary[192] = {};
+    std::snprintf(summary, sizeof(summary), "%d errors    %d warnings    %d info", errors, warnings, infos);
+    DrawUiTextClipped(font, summary, contentX, y, 14.0f, panelW - 24.0f, Color{ 205, 213, 220, 255 });
+    y += 28.0f;
+
+    if (issues.empty())
+    {
+        DrawUiTextClipped(font, "No validation issues found.", contentX, y, 14.0f, panelW - 24.0f, Color{ 128, 140, 152, 255 });
+        panel.validatorScroll = 0.0f;
+        return;
+    }
+
+    constexpr float rowH = 54.0f;
+    const Rectangle listBounds{ contentX, y, panelW - 24.0f, std::max(40.0f, panelH - (y - 61.0f) - 10.0f) };
+    const float visibleRows = std::max(1.0f, std::floor(listBounds.height / rowH));
+    const float maxScroll = std::max(0.0f, static_cast<float>(issues.size()) - visibleRows);
+    if (CheckCollisionPointRec(GetMousePosition(), listBounds))
+    {
+        const float wheel = GetMouseWheelMove();
+        if (std::fabs(wheel) > 0.0f)
+        {
+            panel.validatorScroll = ClampFloat(panel.validatorScroll - wheel * 2.0f, 0.0f, maxScroll);
+        }
+    }
+    panel.validatorScroll = ClampFloat(panel.validatorScroll, 0.0f, maxScroll);
+
+    const int firstRow = static_cast<int>(std::floor(panel.validatorScroll));
+    float rowY = listBounds.y - (panel.validatorScroll - static_cast<float>(firstRow)) * rowH;
+    const Vector2 mouse = GetMousePosition();
+
+    BeginScissorMode(static_cast<int>(listBounds.x), static_cast<int>(listBounds.y), static_cast<int>(listBounds.width), static_cast<int>(listBounds.height));
+    for (int index = firstRow; index < static_cast<int>(issues.size()) && rowY < listBounds.y + listBounds.height; ++index)
+    {
+        const ValidatorIssue& issue = issues[static_cast<size_t>(index)];
+        const Rectangle row{ listBounds.x, rowY, listBounds.width - (maxScroll > 0.0f ? 10.0f : 0.0f), rowH - 4.0f };
+        const bool hovered = CheckCollisionPointRec(mouse, row);
+        const bool selectedNode = issue.node >= 0 && issue.node == tab.selectedNode;
+        DrawRectangleRec(row, selectedNode ? Color{ 48, 70, 92, 255 } : hovered ? Color{ 34, 39, 45, 255 } : Color{ 24, 27, 31, 220 });
+        DrawRectangleLinesEx(row, 1.0f, Color{ 54, 62, 70, 255 });
+
+        const Color severityColor = GetValidatorSeverityColor(issue.severity);
+        DrawUiText(font, GetValidatorSeverityName(issue.severity), row.x + 8.0f, row.y + 7.0f, 13.0f, severityColor);
+        DrawUiTextClipped(font, issue.category.c_str(), row.x + 58.0f, row.y + 6.0f, 14.0f, row.width - 66.0f, Color{ 205, 213, 220, 255 });
+        DrawUiTextClipped(font, issue.message.c_str(), row.x + 8.0f, row.y + 27.0f, 13.0f, row.width - 16.0f, Color{ 154, 166, 178, 255 });
+
+        if (hovered && issue.node >= 0 && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+        {
+            tab.selectedNode = issue.node;
+        }
+
+        rowY += rowH;
+    }
+    EndScissorMode();
+
+    if (maxScroll > 0.0f)
+    {
+        const float trackX = listBounds.x + listBounds.width - 6.0f;
+        const float thumbH = std::max(24.0f, listBounds.height * (visibleRows / static_cast<float>(issues.size())));
+        const float thumbY = listBounds.y + (listBounds.height - thumbH) * (panel.validatorScroll / maxScroll);
+        DrawRectangle(static_cast<int>(trackX), static_cast<int>(listBounds.y), 4, static_cast<int>(listBounds.height), Color{ 44, 49, 55, 255 });
+        DrawRectangle(static_cast<int>(trackX - 1.0f), static_cast<int>(thumbY), 6, static_cast<int>(thumbH), Color{ 112, 124, 136, 255 });
     }
 }
 
@@ -3335,18 +4566,44 @@ void DrawPbrTextureRow(Font font,
     {
         for (const std::string& droppedPath : droppedPaths)
         {
-            if (!IsTextureExtension(std::filesystem::path(droppedPath))) continue;
+            const std::filesystem::path texturePath(droppedPath);
+            if (!IsTextureExtension(texturePath)) continue;
 
             std::string loadError;
-            if (LoadPbrTexture(tab, materialIndex, slot, droppedPath, loadError))
+            const bool shouldLoadOrm = IsOrmTextureName(ToLower(texturePath.stem().string())) &&
+                                       (slot == PbrTextureSlot::AmbientOcclusion ||
+                                        slot == PbrTextureSlot::Roughness ||
+                                        slot == PbrTextureSlot::Metallic);
+            if (shouldLoadOrm)
             {
-                notice = std::string("Dropped ") + GetPbrTextureSlotName(slot) + ": " + droppedPath;
-                error.clear();
+                EditSnapshot before = CaptureEditSnapshot(tab);
+                const int loadedCount = LoadOrmTexture(tab, materialIndex, droppedPath, loadError);
+                if (loadedCount > 0)
+                {
+                    PushUndoSnapshot(tab, std::move(before));
+                    notice = "Dropped ORM texture to AO, Roughness, and Metallic: " + droppedPath;
+                    error.clear();
+                }
+                else
+                {
+                    error = loadError;
+                    notice.clear();
+                }
             }
             else
             {
-                error = loadError;
-                notice.clear();
+                EditSnapshot before = CaptureEditSnapshot(tab);
+                if (LoadPbrTexture(tab, materialIndex, slot, droppedPath, loadError))
+                {
+                    PushUndoSnapshot(tab, std::move(before));
+                    notice = std::string("Dropped ") + GetPbrTextureSlotName(slot) + ": " + droppedPath;
+                    error.clear();
+                }
+                else
+                {
+                    error = loadError;
+                    notice.clear();
+                }
             }
             droppedTextureHandled = true;
             break;
@@ -3374,6 +4631,7 @@ void DrawPbrTextureRow(Font font,
         const Rectangle channelButton{ buttonRight - 38.0f, y - 2.0f, 34.0f, 22.0f };
         if (DrawChannelButton(font, channelButton, *channel))
         {
+            PushUndoSnapshot(tab);
             *channel = NextPackedChannel(*channel);
         }
         buttonRight -= 44.0f;
@@ -3383,6 +4641,7 @@ void DrawPbrTextureRow(Font font,
         const Rectangle channelButton{ buttonRight - 48.0f, y - 2.0f, 44.0f, 22.0f };
         if (DrawPanelButton(font, channelButton, GetOpacityChannelName(material.opacityChannel)))
         {
+            PushUndoSnapshot(tab);
             material.opacityChannel = NextOpacityChannel(material.opacityChannel);
         }
         buttonRight -= 54.0f;
@@ -3395,9 +4654,11 @@ void DrawPbrTextureRow(Font font,
         const std::string path = OpenTextureFileDialog();
         if (!path.empty())
         {
+            EditSnapshot before = CaptureEditSnapshot(tab);
             std::string loadError;
             if (LoadPbrTexture(tab, materialIndex, slot, path, loadError))
             {
+                PushUndoSnapshot(tab, std::move(before));
                 notice = std::string("Loaded ") + GetPbrTextureSlotName(slot) + ": " + path;
                 error.clear();
             }
@@ -3410,9 +4671,13 @@ void DrawPbrTextureRow(Font font,
     }
     if (DrawPanelButton(font, clearButton, "Clear"))
     {
-        UnloadPbrTexture(tab, materialIndex, slot);
-        notice = std::string("Cleared ") + GetPbrTextureSlotName(slot) + " map.";
-        error.clear();
+        if (texture.loaded)
+        {
+            PushUndoSnapshot(tab);
+            UnloadPbrTexture(tab, materialIndex, slot);
+            notice = std::string("Cleared ") + GetPbrTextureSlotName(slot) + " map.";
+            error.clear();
+        }
     }
 
     y += 22.0f;
@@ -3463,7 +4728,12 @@ void DrawMaterialsPanel(Font font,
     {
         const std::string pickedPath = OpenTextureFileDialog();
         std::string autoloadError;
+        EditSnapshot before = CaptureEditSnapshot(tab);
         const int loadedCount = pickedPath.empty() ? 0 : LoadPbrTexturesFromFolder(tab, tab.selectedMaterial, std::filesystem::path(pickedPath).parent_path(), autoloadError);
+        if (loadedCount > 0)
+        {
+            PushUndoSnapshot(tab, std::move(before));
+        }
         if (!autoloadError.empty())
         {
             error = autoloadError;
@@ -3479,6 +4749,19 @@ void DrawMaterialsPanel(Font font,
     }
     if (DrawPanelButton(font, clearAllButton, "Clear All"))
     {
+        bool hadAnyTexture = false;
+        for (int i = 0; i < static_cast<int>(PbrTextureSlot::Count); ++i)
+        {
+            if (GetPbrTexture(tab.pbrMaterials[static_cast<size_t>(tab.selectedMaterial)], static_cast<PbrTextureSlot>(i)).loaded)
+            {
+                hadAnyTexture = true;
+                break;
+            }
+        }
+        if (hadAnyTexture)
+        {
+            PushUndoSnapshot(tab);
+        }
         for (int i = 0; i < static_cast<int>(PbrTextureSlot::Count); ++i)
         {
             UnloadPbrTexture(tab, tab.selectedMaterial, static_cast<PbrTextureSlot>(i));
@@ -3495,6 +4778,7 @@ void DrawMaterialsPanel(Font font,
     DrawUiText(font, "Normal mode", contentX, y, 14.0f, Color{ 190, 200, 210, 255 });
     if (DrawPanelButton(font, normalModeButton, material.normalDirectX ? "DirectX" : "OpenGL"))
     {
+        PushUndoSnapshot(tab);
         material.normalDirectX = !material.normalDirectX;
     }
     y += 32.0f;
@@ -3582,9 +4866,233 @@ void DrawUvPanel(Font font, ModelTab& tab, float panelX, float panelY, float pan
     }
 }
 
+struct SkinWeightStats
+{
+    int vertices = 0;
+    int maxInfluences = 0;
+    int unweighted = 0;
+    int underweight = 0;
+    int overweight = 0;
+    int invalidWeights = 0;
+};
+
+float GetVertexWeightSum(const SkinnedVertex& vertex, bool& invalidWeight)
+{
+    float sum = 0.0f;
+    invalidWeight = false;
+    for (const SkinnedVertexInfluence& influence : vertex.influences)
+    {
+        if (!std::isfinite(influence.weight) || influence.weight < 0.0f)
+        {
+            invalidWeight = true;
+        }
+        sum += influence.weight;
+    }
+    return sum;
+}
+
+SkinWeightStats CalculateSkinWeightStats(const LoadedFbxModel& loaded, const SceneNode& node)
+{
+    SkinWeightStats stats;
+    if (node.meshVertexStart < 0 || node.meshVertexCount <= 0) return stats;
+
+    constexpr float kWeightEpsilon = 0.01f;
+    const int start = std::max(0, node.meshVertexStart);
+    const int end = std::min(node.meshVertexStart + node.meshVertexCount, static_cast<int>(loaded.skinnedVertices.size()));
+    for (int vertexIndex = start; vertexIndex < end; ++vertexIndex)
+    {
+        const SkinnedVertex& vertex = loaded.skinnedVertices[static_cast<size_t>(vertexIndex)];
+        bool invalidWeight = false;
+        const float sum = GetVertexWeightSum(vertex, invalidWeight);
+        stats.vertices++;
+        stats.maxInfluences = std::max(stats.maxInfluences, static_cast<int>(vertex.influences.size()));
+        if (vertex.influences.empty() || std::fabs(sum) <= kWeightEpsilon)
+        {
+            stats.unweighted++;
+        }
+        else if (sum < 1.0f - kWeightEpsilon)
+        {
+            stats.underweight++;
+        }
+        else if (sum > 1.0f + kWeightEpsilon)
+        {
+            stats.overweight++;
+        }
+        if (invalidWeight)
+        {
+            stats.invalidWeights++;
+        }
+    }
+
+    return stats;
+}
+
+std::string FormatVertexInfluences(const SkinnedVertex& vertex)
+{
+    if (vertex.influences.empty()) return "No influences";
+
+    std::vector<SkinnedVertexInfluence> influences = vertex.influences;
+    std::sort(influences.begin(), influences.end(), [](const SkinnedVertexInfluence& a, const SkinnedVertexInfluence& b)
+    {
+        return a.weight > b.weight;
+    });
+
+    std::string result;
+    for (const SkinnedVertexInfluence& influence : influences)
+    {
+        char weightText[64] = {};
+        std::snprintf(weightText, sizeof(weightText), "%.3f", influence.weight);
+        if (!result.empty()) result += " | ";
+        result += influence.boneName.empty() ? "<unnamed>" : influence.boneName;
+        result += " ";
+        result += weightText;
+    }
+    return result;
+}
+
+struct BoneWeightHeatStats
+{
+    int vertices = 0;
+    int influencedVertices = 0;
+    int unweightedVertices = 0;
+    int underweightVertices = 0;
+    int overweightVertices = 0;
+    int invalidWeightVertices = 0;
+    int maxInfluences = 0;
+    float maxBoneWeight = 0.0f;
+    float averageInfluencedWeight = 0.0f;
+};
+
+BoneWeightHeatStats CalculateBoneWeightHeatStats(const ModelTab& tab, const std::string& boneName)
+{
+    BoneWeightHeatStats stats;
+    if (boneName.empty() || tab.loaded.skinnedVertices.empty()) return stats;
+
+    constexpr float kWeightEpsilon = 0.01f;
+    float influencedWeightSum = 0.0f;
+    for (int nodeIndex = 0; nodeIndex < static_cast<int>(tab.loaded.nodes.size()); ++nodeIndex)
+    {
+        const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(nodeIndex)];
+        if (node.type != SceneNodeType::Mesh || node.meshVertexStart < 0 || node.meshVertexCount <= 0) continue;
+        if (IsDeletedNode(tab, nodeIndex)) continue;
+
+        const int start = std::max(0, node.meshVertexStart);
+        const int end = std::min(node.meshVertexStart + node.meshVertexCount, static_cast<int>(tab.loaded.skinnedVertices.size()));
+        for (int vertexIndex = start; vertexIndex < end; ++vertexIndex)
+        {
+            const SkinnedVertex& vertex = tab.loaded.skinnedVertices[static_cast<size_t>(vertexIndex)];
+            bool invalidWeight = false;
+            const float totalWeight = GetVertexWeightSum(vertex, invalidWeight);
+            const float boneWeight = GetBoneInfluenceWeight(vertex, boneName);
+            stats.vertices++;
+            stats.maxInfluences = std::max(stats.maxInfluences, static_cast<int>(vertex.influences.size()));
+            stats.maxBoneWeight = std::max(stats.maxBoneWeight, boneWeight);
+
+            if (boneWeight > kWeightEpsilon)
+            {
+                stats.influencedVertices++;
+                influencedWeightSum += boneWeight;
+            }
+            if (vertex.influences.empty() || std::fabs(totalWeight) <= kWeightEpsilon)
+            {
+                stats.unweightedVertices++;
+            }
+            else if (totalWeight < 1.0f - kWeightEpsilon)
+            {
+                stats.underweightVertices++;
+            }
+            else if (totalWeight > 1.0f + kWeightEpsilon)
+            {
+                stats.overweightVertices++;
+            }
+            if (invalidWeight)
+            {
+                stats.invalidWeightVertices++;
+            }
+        }
+    }
+
+    if (stats.influencedVertices > 0)
+    {
+        stats.averageInfluencedWeight = influencedWeightSum / static_cast<float>(stats.influencedVertices);
+    }
+    return stats;
+}
+
+void DrawSkinWeightsPanel(Font font, ModelTab& tab, HierarchyPanelState& panel, float panelX, float panelY, float panelW)
+{
+    const float contentX = panelX + 12.0f;
+    float y = panelY;
+    panel.skinWeightsScroll = 0.0f;
+
+    DrawUiText(font, "SKIN WEIGHTS", contentX, y, 16.0f, Color{ 165, 182, 196, 255 });
+    y += 28.0f;
+
+    if (tab.loaded.skinnedVertices.empty())
+    {
+        DrawUiTextClipped(font, "No skin weights found in this FBX.", contentX, y, 14.0f, panelW - 24.0f, Color{ 128, 140, 152, 255 });
+        panel.skinWeightsScroll = 0.0f;
+        return;
+    }
+
+    std::string boneName;
+    if (!GetSelectedBoneName(tab, boneName))
+    {
+        DrawUiTextClipped(font, "Select a bone in the hierarchy to show its weights on the mesh.", contentX, y, 14.0f, panelW - 24.0f, Color{ 128, 140, 152, 255 });
+        y += 30.0f;
+        DrawUiTextClipped(font, "The viewport heat map updates immediately from the selected bone.", contentX, y, 14.0f, panelW - 24.0f, Color{ 154, 166, 178, 255 });
+        return;
+    }
+
+    const BoneWeightHeatStats stats = CalculateBoneWeightHeatStats(tab, boneName);
+    char line[256] = {};
+    std::snprintf(line, sizeof(line), "Bone: %s", boneName.c_str());
+    DrawUiTextClipped(font, line, contentX, y, 14.0f, panelW - 24.0f, Color{ 205, 213, 220, 255 });
+    y += 22.0f;
+    std::snprintf(line, sizeof(line), "Mesh vertices: %d    Max influences: %d", stats.vertices, stats.maxInfluences);
+    DrawUiTextClipped(font, line, contentX, y, 14.0f, panelW - 24.0f, Color{ 190, 200, 210, 255 });
+    y += 22.0f;
+    std::snprintf(line, sizeof(line), "Influenced: %d    Max weight: %.3f", stats.influencedVertices, stats.maxBoneWeight);
+    DrawUiTextClipped(font, line, contentX, y, 14.0f, panelW - 24.0f, stats.influencedVertices > 0 ? Color{ 150, 225, 170, 255 } : Color{ 255, 185, 125, 255 });
+    y += 22.0f;
+    std::snprintf(line, sizeof(line), "Average influenced weight: %.3f", stats.averageInfluencedWeight);
+    DrawUiTextClipped(font, line, contentX, y, 14.0f, panelW - 24.0f, Color{ 190, 200, 210, 255 });
+    y += 30.0f;
+
+    DrawUiText(font, "MESH WEIGHT QUALITY", contentX, y, 15.0f, Color{ 165, 182, 196, 255 });
+    y += 24.0f;
+    std::snprintf(line, sizeof(line), "Unweighted: %d    Under: %d    Over: %d", stats.unweightedVertices, stats.underweightVertices, stats.overweightVertices);
+    DrawUiTextClipped(font, line, contentX, y, 14.0f, panelW - 24.0f,
+                      (stats.unweightedVertices || stats.underweightVertices || stats.overweightVertices) ? Color{ 255, 185, 125, 255 } : Color{ 150, 225, 170, 255 });
+    y += 22.0f;
+    std::snprintf(line, sizeof(line), "Invalid weights: %d", stats.invalidWeightVertices);
+    DrawUiTextClipped(font, line, contentX, y, 14.0f, panelW - 24.0f, stats.invalidWeightVertices ? Color{ 255, 150, 125, 255 } : Color{ 154, 166, 178, 255 });
+    y += 34.0f;
+
+    DrawUiText(font, "HEAT MAP", contentX, y, 15.0f, Color{ 165, 182, 196, 255 });
+    y += 24.0f;
+    const Rectangle legend{ contentX, y, panelW - 24.0f, 18.0f };
+    constexpr int kLegendSteps = 48;
+    for (int i = 0; i < kLegendSteps; ++i)
+    {
+        const float t0 = static_cast<float>(i) / static_cast<float>(kLegendSteps);
+        const float t1 = static_cast<float>(i + 1) / static_cast<float>(kLegendSteps);
+        const Rectangle segment{ legend.x + legend.width * t0, legend.y, legend.width * (t1 - t0) + 1.0f, legend.height };
+        DrawRectangleRec(segment, GetSkinWeightHeatColor(t0));
+    }
+    DrawRectangleLinesEx(legend, 1.0f, Color{ 86, 96, 108, 255 });
+    y += 26.0f;
+    DrawUiText(font, "0.0", legend.x, y, 13.0f, Color{ 154, 166, 178, 255 });
+    const Vector2 oneSize = MeasureTextEx(font, "1.0", 13.0f, 1.0f);
+    DrawUiText(font, "1.0", legend.x + legend.width - oneSize.x, y, 13.0f, Color{ 154, 166, 178, 255 });
+    y += 30.0f;
+    DrawUiTextClipped(font, "Blue is no influence. Red is full influence.", contentX, y, 14.0f, panelW - 24.0f, Color{ 154, 166, 178, 255 });
+}
+
 void DrawHierarchyPanel(Font font,
                         ModelTab* active,
                         HierarchyPanelState& panel,
+                        RenameEditor& renameEditor,
                         const std::vector<std::string>& droppedPaths,
                         bool& droppedTextureHandled,
                         TextureClipboard& textureClipboard,
@@ -3611,12 +5119,14 @@ void DrawHierarchyPanel(Font font,
     DrawUiText(font, "SCENE", panelX + 12.0f, panelY + 10.0f, 16.0f, Color{ 165, 182, 196, 255 });
     DrawUiText(font, "||", panelW - 16.0f, panelY + 8.0f, 16.0f, Color{ 120, 130, 140, 255 });
 
-    const float tabW = (panelW - 28.0f) / 4.0f;
+    const float tabW = (panelW - 36.0f) / 6.0f;
     const Rectangle hierarchyTab{ panelX + 8.0f, panelY + 34.0f, tabW, 24.0f };
     const Rectangle statsTab{ hierarchyTab.x + hierarchyTab.width + 4.0f, panelY + 34.0f, tabW, 24.0f };
     const Rectangle materialsTab{ statsTab.x + statsTab.width + 4.0f, panelY + 34.0f, tabW, 24.0f };
     const Rectangle uvTab{ materialsTab.x + materialsTab.width + 4.0f, panelY + 34.0f, tabW, 24.0f };
-    if (DrawPanelTab(font, hierarchyTab, "Hierarchy", panel.activeTab == LeftPanelTab::Hierarchy))
+    const Rectangle skinTab{ uvTab.x + uvTab.width + 4.0f, panelY + 34.0f, tabW, 24.0f };
+    const Rectangle validatorTab{ skinTab.x + skinTab.width + 4.0f, panelY + 34.0f, tabW, 24.0f };
+    if (DrawPanelTab(font, hierarchyTab, "Tree", panel.activeTab == LeftPanelTab::Hierarchy))
     {
         panel.activeTab = LeftPanelTab::Hierarchy;
     }
@@ -3624,13 +5134,21 @@ void DrawHierarchyPanel(Font font,
     {
         panel.activeTab = LeftPanelTab::Stats;
     }
-    if (DrawPanelTab(font, materialsTab, "Materials", panel.activeTab == LeftPanelTab::Materials))
+    if (DrawPanelTab(font, materialsTab, "Mats", panel.activeTab == LeftPanelTab::Materials))
     {
         panel.activeTab = LeftPanelTab::Materials;
     }
     if (DrawPanelTab(font, uvTab, "UV", panel.activeTab == LeftPanelTab::UV))
     {
         panel.activeTab = LeftPanelTab::UV;
+    }
+    if (DrawPanelTab(font, skinTab, "Skin", panel.activeTab == LeftPanelTab::SkinWeights))
+    {
+        panel.activeTab = LeftPanelTab::SkinWeights;
+    }
+    if (DrawPanelTab(font, validatorTab, "Valid", panel.activeTab == LeftPanelTab::Validator))
+    {
+        panel.activeTab = LeftPanelTab::Validator;
     }
 
     if (!active)
@@ -3655,6 +5173,16 @@ void DrawHierarchyPanel(Font font,
         DrawUvPanel(font, *active, panelX, GetHierarchyContentStartY() + 10.0f, panelW);
         return;
     }
+    if (panel.activeTab == LeftPanelTab::SkinWeights)
+    {
+        DrawSkinWeightsPanel(font, *active, panel, panelX, GetHierarchyContentStartY() + 10.0f, panelW);
+        return;
+    }
+    if (panel.activeTab == LeftPanelTab::Validator)
+    {
+        DrawValidatorPanel(font, *active, panel, panelX, GetHierarchyContentStartY() + 10.0f, panelW);
+        return;
+    }
 
     if (active->collapsedNodes.size() != active->loaded.nodes.size())
     {
@@ -3668,7 +5196,7 @@ void DrawHierarchyPanel(Font font,
 
     for (int i = 0; i < static_cast<int>(active->loaded.nodes.size()); ++i)
     {
-        if (!IsSceneNodeVisible(active->loaded, active->collapsedNodes, i)) continue;
+        if (!IsSceneNodeVisible(*active, active->collapsedNodes, i)) continue;
         if (visibleRow++ < firstRow) continue;
         if (rowY + rowH > panelY + panelH) break;
 
@@ -3676,8 +5204,10 @@ void DrawHierarchyPanel(Font font,
         const Rectangle row{ panelX + 6.0f, rowY, panelW - 12.0f, rowH };
         const bool hovered = CheckCollisionPointRec(mouse, row);
         const bool selected = active->selectedNode == i;
-        const bool hasChildren = HasSceneNodeChildren(active->loaded, i);
+        const bool hasChildren = HasVisibleSceneNodeChildren(*active, i);
         const float indent = static_cast<float>(node.depth) * 14.0f;
+        const Rectangle contextMenuBounds{ panel.contextPosition.x, panel.contextPosition.y, 132.0f, 62.0f };
+        const bool mouseOverContextMenu = panel.contextMenuOpen && CheckCollisionPointRec(mouse, contextMenuBounds);
 
         if (selected)
         {
@@ -3706,9 +5236,22 @@ void DrawHierarchyPanel(Font font,
         DrawUiTextClipped(font, label, labelX, rowY + 3.0f, 15.0f, labelMaxW, selected ? RAYWHITE : Color{ 198, 207, 216, 255 });
         EndScissorMode();
 
-        if (hovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !CheckCollisionPointRec(mouse, collapseRect))
+        if (hovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !mouseOverContextMenu && !CheckCollisionPointRec(mouse, collapseRect))
         {
             active->selectedNode = i;
+            panel.contextMenuOpen = false;
+        }
+
+        if (hovered && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) && !mouseOverContextMenu)
+        {
+            active->selectedNode = i;
+            panel.contextNodeIndex = i;
+            panel.contextPosition = Vector2{
+                ClampFloat(mouse.x, 4.0f, static_cast<float>(GetScreenWidth()) - 136.0f),
+                ClampFloat(mouse.y, 4.0f, static_cast<float>(GetScreenHeight()) - 66.0f)
+            };
+            panel.contextMenuOpen = true;
+            panel.contextMenuJustOpened = true;
         }
 
         rowY += rowH;
@@ -3728,6 +5271,48 @@ void DrawHierarchyPanel(Font font,
         DrawRectangle(static_cast<int>(panelW - 8.0f), static_cast<int>(trackY), 4, static_cast<int>(trackH), Color{ 44, 49, 55, 255 });
         DrawRectangle(static_cast<int>(panelW - 9.0f), static_cast<int>(thumbY), 6, static_cast<int>(thumbH), Color{ 112, 124, 136, 255 });
     }
+
+    if (panel.contextMenuOpen)
+    {
+        const Rectangle menu{ panel.contextPosition.x, panel.contextPosition.y, 132.0f, 62.0f };
+        DrawRectangleRec(menu, Color{ 24, 27, 31, 248 });
+        DrawRectangleLinesEx(menu, 1.0f, Color{ 84, 94, 104, 255 });
+        const bool validContextNode = panel.contextNodeIndex >= 0 &&
+                                      panel.contextNodeIndex < static_cast<int>(active->loaded.nodes.size()) &&
+                                      !IsDeletedNode(*active, panel.contextNodeIndex);
+        if (panel.contextMenuJustOpened)
+        {
+            panel.contextMenuJustOpened = false;
+        }
+        else
+        {
+            const Rectangle renameItem{ menu.x, menu.y, menu.width, 30.0f };
+            const Rectangle deleteItem{ menu.x, menu.y + 30.0f, menu.width, 30.0f };
+            if (DrawPanelButton(font, renameItem, "Rename"))
+            {
+                if (validContextNode)
+                {
+                    StartRenameNode(renameEditor, active->loaded, panel.contextNodeIndex);
+                }
+                panel.contextMenuOpen = false;
+            }
+            if (DrawPanelButton(font, deleteItem, "Delete"))
+            {
+                if (validContextNode)
+                {
+                    PushUndoSnapshot(*active);
+                    const int deletedCount = MarkNodeSubtreeDeleted(*active, panel.contextNodeIndex);
+                    notice = "Deleted tree object" + std::string(deletedCount == 1 ? "." : "s.");
+                    error.clear();
+                }
+                panel.contextMenuOpen = false;
+            }
+            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !CheckCollisionPointRec(mouse, menu))
+            {
+                panel.contextMenuOpen = false;
+            }
+        }
+    }
 }
 
 bool DrawMenuItem(Font font, Rectangle bounds, const char* text, bool selected = false)
@@ -3742,6 +5327,8 @@ bool DrawMenuItem(Font font, Rectangle bounds, const char* text, bool selected =
 void DrawMenuBar(Font font,
                  OpenMenu& openMenu,
                  bool& openRequested,
+                 bool& undoRequested,
+                 bool& redoRequested,
                  bool& saveFbxRequested,
                  bool& saveAsFbxRequested,
                  bool& importAnimationsRequested,
@@ -3750,7 +5337,9 @@ void DrawMenuBar(Font font,
                  bool& quitRequested,
                  ViewMode& viewMode,
                  NavigationPreset& navigation,
-                 VisibilityState& visibility)
+                 VisibilityState& visibility,
+                 bool canUndo,
+                 bool canRedo)
 {
     const float menuHeight = 28.0f;
     DrawRectangle(0, 0, GetScreenWidth(), static_cast<int>(menuHeight), Color{ 24, 26, 29, 255 });
@@ -3765,8 +5354,9 @@ void DrawMenuBar(Font font,
 
     const MenuButton buttons[] = {
         { "File", OpenMenu::File, Rectangle{ 8.0f, 3.0f, 54.0f, 22.0f } },
-        { "View", OpenMenu::View, Rectangle{ 66.0f, 3.0f, 58.0f, 22.0f } },
-        { "Preferences", OpenMenu::Preferences, Rectangle{ 128.0f, 3.0f, 118.0f, 22.0f } }
+        { "Edit", OpenMenu::Edit, Rectangle{ 66.0f, 3.0f, 58.0f, 22.0f } },
+        { "View", OpenMenu::View, Rectangle{ 124.0f, 3.0f, 58.0f, 22.0f } },
+        { "Preferences", OpenMenu::Preferences, Rectangle{ 186.0f, 3.0f, 118.0f, 22.0f } }
     };
 
     const Vector2 mouse = GetMousePosition();
@@ -3782,7 +5372,29 @@ void DrawMenuBar(Font font,
         }
     }
 
-    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && mouse.y > 310.0f && openMenu != OpenMenu::None)
+    Rectangle openMenuBounds{};
+    switch (openMenu)
+    {
+    case OpenMenu::File:
+        openMenuBounds = Rectangle{ 8.0f, 29.0f, 270.0f, 218.0f };
+        break;
+    case OpenMenu::Edit:
+        openMenuBounds = Rectangle{ 66.0f, 29.0f, 230.0f, 68.0f };
+        break;
+    case OpenMenu::View:
+        openMenuBounds = Rectangle{ 124.0f, 29.0f, 230.0f, 308.0f };
+        break;
+    case OpenMenu::Preferences:
+        openMenuBounds = Rectangle{ 186.0f, 29.0f, 420.0f, 246.0f };
+        break;
+    case OpenMenu::None:
+        break;
+    }
+
+    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
+        openMenu != OpenMenu::None &&
+        mouse.y > menuHeight &&
+        !CheckCollisionPointRec(mouse, openMenuBounds))
     {
         openMenu = OpenMenu::None;
     }
@@ -3826,65 +5438,93 @@ void DrawMenuBar(Font font,
             openMenu = OpenMenu::None;
         }
     }
+    else if (openMenu == OpenMenu::Edit)
+    {
+        DrawRectangle(66, 29, 230, 68, Color{ 28, 31, 35, 245 });
+        if (DrawMenuItem(font, Rectangle{ 66.0f, 29.0f, 230.0f, 30.0f }, canUndo ? "Undo        Ctrl+Z" : "Undo        Ctrl+Z", false))
+        {
+            if (canUndo) undoRequested = true;
+            openMenu = OpenMenu::None;
+        }
+        if (DrawMenuItem(font, Rectangle{ 66.0f, 59.0f, 230.0f, 30.0f }, canRedo ? "Redo        Ctrl+Y" : "Redo        Ctrl+Y", false))
+        {
+            if (canRedo) redoRequested = true;
+            openMenu = OpenMenu::None;
+        }
+        if (!canUndo)
+        {
+            DrawRectangleRec(Rectangle{ 66.0f, 29.0f, 230.0f, 30.0f }, Color{ 28, 31, 35, 160 });
+            DrawUiText(font, "Undo        Ctrl+Z", 76.0f, 34.0f, 16.0f, Color{ 105, 115, 124, 255 });
+        }
+        if (!canRedo)
+        {
+            DrawRectangleRec(Rectangle{ 66.0f, 59.0f, 230.0f, 30.0f }, Color{ 28, 31, 35, 160 });
+            DrawUiText(font, "Redo        Ctrl+Y", 76.0f, 64.0f, 16.0f, Color{ 105, 115, 124, 255 });
+        }
+    }
     else if (openMenu == OpenMenu::View)
     {
-        DrawRectangle(66, 29, 230, 278, Color{ 28, 31, 35, 245 });
-        if (DrawMenuItem(font, Rectangle{ 66.0f, 29.0f, 230.0f, 30.0f }, "Shaded", viewMode == ViewMode::Shaded))
+        DrawRectangle(124, 29, 230, 308, Color{ 28, 31, 35, 245 });
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 29.0f, 230.0f, 30.0f }, "Shaded", viewMode == ViewMode::Shaded))
         {
             viewMode = ViewMode::Shaded;
         }
-        if (DrawMenuItem(font, Rectangle{ 66.0f, 59.0f, 230.0f, 30.0f }, "Shaded Wireframe", viewMode == ViewMode::ShadedWireframe))
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 59.0f, 230.0f, 30.0f }, "Shaded Wireframe", viewMode == ViewMode::ShadedWireframe))
         {
             viewMode = ViewMode::ShadedWireframe;
         }
-        if (DrawMenuItem(font, Rectangle{ 66.0f, 89.0f, 230.0f, 30.0f }, "Wireframe", viewMode == ViewMode::Wireframe))
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 89.0f, 230.0f, 30.0f }, "Wireframe", viewMode == ViewMode::Wireframe))
         {
             viewMode = ViewMode::Wireframe;
         }
-        if (DrawMenuItem(font, Rectangle{ 66.0f, 127.0f, 230.0f, 30.0f }, visibility.geometry ? "[x] Geometry        G" : "[ ] Geometry        G"))
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 127.0f, 230.0f, 30.0f }, visibility.geometry ? "[x] Geometry        G" : "[ ] Geometry        G"))
         {
             visibility.geometry = !visibility.geometry;
         }
-        if (DrawMenuItem(font, Rectangle{ 66.0f, 157.0f, 230.0f, 30.0f }, visibility.textures ? "[x] Textures" : "[ ] Textures"))
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 157.0f, 230.0f, 30.0f }, visibility.textures ? "[x] Textures" : "[ ] Textures"))
         {
             visibility.textures = !visibility.textures;
         }
-        if (DrawMenuItem(font, Rectangle{ 66.0f, 187.0f, 230.0f, 30.0f }, visibility.backfaceCulling ? "[x] Backface Culling" : "[ ] Backface Culling"))
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 187.0f, 230.0f, 30.0f }, visibility.backfaceCulling ? "[x] Backface Culling" : "[ ] Backface Culling"))
         {
             visibility.backfaceCulling = !visibility.backfaceCulling;
         }
-        if (DrawMenuItem(font, Rectangle{ 66.0f, 217.0f, 230.0f, 30.0f }, visibility.bones ? "[x] Bones        B" : "[ ] Bones        B"))
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 217.0f, 230.0f, 30.0f }, visibility.bones ? "[x] Bones        B" : "[ ] Bones        B"))
         {
             visibility.bones = !visibility.bones;
         }
-        if (DrawMenuItem(font, Rectangle{ 66.0f, 247.0f, 230.0f, 30.0f }, visibility.boneRotations ? "[x] Bone Orientation  O" : "[ ] Bone Orientation  O"))
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 247.0f, 230.0f, 30.0f }, visibility.boneRotations ? "[x] Bone Orientation  O" : "[ ] Bone Orientation  O"))
         {
             visibility.boneRotations = !visibility.boneRotations;
         }
-        if (DrawMenuItem(font, Rectangle{ 66.0f, 277.0f, 230.0f, 30.0f }, visibility.empties ? "[x] Empties        E" : "[ ] Empties        E"))
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 277.0f, 230.0f, 30.0f }, visibility.empties ? "[x] Empties        E" : "[ ] Empties        E"))
         {
             visibility.empties = !visibility.empties;
+        }
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 307.0f, 230.0f, 30.0f }, visibility.skinWeights ? "[x] Skin Weights" : "[ ] Skin Weights"))
+        {
+            visibility.skinWeights = !visibility.skinWeights;
         }
     }
     else if (openMenu == OpenMenu::Preferences)
     {
-        DrawRectangle(128, 29, 420, 246, Color{ 28, 31, 35, 245 });
-        DrawUiText(font, "NAVIGATION", 140.0f, 39.0f, 16.0f, Color{ 165, 182, 196, 255 });
-        if (DrawMenuItem(font, Rectangle{ 138.0f, 64.0f, 185.0f, 30.0f }, "Blender", navigation == NavigationPreset::Blender))
+        DrawRectangle(186, 29, 420, 246, Color{ 28, 31, 35, 245 });
+        DrawUiText(font, "NAVIGATION", 198.0f, 39.0f, 16.0f, Color{ 165, 182, 196, 255 });
+        if (DrawMenuItem(font, Rectangle{ 196.0f, 64.0f, 185.0f, 30.0f }, "Blender", navigation == NavigationPreset::Blender))
         {
             navigation = NavigationPreset::Blender;
         }
-        if (DrawMenuItem(font, Rectangle{ 333.0f, 64.0f, 185.0f, 30.0f }, "Maya", navigation == NavigationPreset::Maya))
+        if (DrawMenuItem(font, Rectangle{ 391.0f, 64.0f, 185.0f, 30.0f }, "Maya", navigation == NavigationPreset::Maya))
         {
             navigation = NavigationPreset::Maya;
         }
 
-        DrawUiText(font, "HOTKEYS", 140.0f, 110.0f, 16.0f, Color{ 165, 182, 196, 255 });
-        DrawUiText(font, "Ctrl+O open FBX    V view mode    T textures", 140.0f, 136.0f, 15.0f, Color{ 205, 213, 220, 255 });
-        DrawUiText(font, "C channels    M shaded    O bone orientation", 140.0f, 162.0f, 15.0f, Color{ 205, 213, 220, 255 });
-        DrawUiText(font, "Blender: MMB orbit, Alt snap, Shift+MMB pan, Wheel zoom", 140.0f, 188.0f, 15.0f, Color{ 205, 213, 220, 255 });
-        DrawUiText(font, "Maya: Alt+LMB orbit, Shift snap, Alt+MMB pan, Alt+RMB/Wheel zoom", 140.0f, 214.0f, 15.0f, Color{ 205, 213, 220, 255 });
-        DrawUiText(font, "Esc deselects    Ctrl+Q quits    Tabs: X/middle closes", 140.0f, 240.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        DrawUiText(font, "HOTKEYS", 198.0f, 110.0f, 16.0f, Color{ 165, 182, 196, 255 });
+        DrawUiText(font, "Ctrl+O open FBX    V view mode    T textures", 198.0f, 136.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        DrawUiText(font, "Ctrl+Z undo    Ctrl+Y redo    C channels", 198.0f, 162.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        DrawUiText(font, "Blender: MMB orbit, Alt snap, Shift+MMB pan, Wheel zoom", 198.0f, 188.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        DrawUiText(font, "Maya: Alt+LMB orbit, Shift snap, Alt+MMB pan, Alt+RMB/Wheel zoom", 198.0f, 214.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        DrawUiText(font, "Esc deselects    Ctrl+Q quits    Tabs: X/middle closes", 198.0f, 240.0f, 15.0f, Color{ 205, 213, 220, 255 });
     }
 }
 
@@ -4022,8 +5662,10 @@ void UpdateAnimation(AnimationState& animation, const LoadedFbxModel& loaded)
     }
 }
 
-void DrawTimeline(Font font, LoadedFbxModel& loaded, AnimationState& animation, bool& collapsed)
+void DrawTimeline(Font font, ModelTab& tab, RenameEditor& renameEditor, bool& collapsed)
 {
+    LoadedFbxModel& loaded = tab.loaded;
+    AnimationState& animation = tab.animation;
     const int width = GetScreenWidth();
     const int height = GetScreenHeight();
     const float panelHeight = collapsed ? kTimelineCollapsedHeight : kTimelinePanelHeight;
@@ -4089,7 +5731,7 @@ void DrawTimeline(Font font, LoadedFbxModel& loaded, AnimationState& animation, 
                      static_cast<int>(clipListBounds.y),
                      static_cast<int>(clipListBounds.width),
                      static_cast<int>(clipListBounds.height));
-    const Rectangle contextMenuBounds{ animation.contextPosition.x, animation.contextPosition.y, 152.0f, 38.0f };
+    const Rectangle contextMenuBounds{ animation.contextPosition.x, animation.contextPosition.y, 152.0f, 62.0f };
     const bool mouseOverContextMenu = animation.contextMenuOpen && CheckCollisionPointRec(mouse, contextMenuBounds);
     for (int visible = 0; visible < visibleRows; ++visible)
     {
@@ -4122,7 +5764,7 @@ void DrawTimeline(Font font, LoadedFbxModel& loaded, AnimationState& animation, 
             animation.contextClipIndex = i;
             animation.contextPosition = Vector2{
                 ClampFloat(mouse.x, 4.0f, static_cast<float>(GetScreenWidth()) - 156.0f),
-                ClampFloat(mouse.y, 4.0f, static_cast<float>(GetScreenHeight()) - 42.0f)
+                ClampFloat(mouse.y, 4.0f, static_cast<float>(GetScreenHeight()) - 66.0f)
             };
             animation.contextMenuOpen = true;
             animation.contextMenuJustOpened = true;
@@ -4146,7 +5788,7 @@ void DrawTimeline(Font font, LoadedFbxModel& loaded, AnimationState& animation, 
 
     if (animation.contextMenuOpen)
     {
-        const Rectangle menu{ animation.contextPosition.x, animation.contextPosition.y, 152.0f, 38.0f };
+        const Rectangle menu{ animation.contextPosition.x, animation.contextPosition.y, 152.0f, 62.0f };
         DrawRectangleRec(menu, Color{ 24, 27, 31, 248 });
         DrawRectangleLinesEx(menu, 1.0f, Color{ 84, 94, 104, 255 });
         const bool validContextClip = animation.contextClipIndex >= 0 && animation.contextClipIndex < static_cast<int>(loaded.animations.size());
@@ -4156,13 +5798,17 @@ void DrawTimeline(Font font, LoadedFbxModel& loaded, AnimationState& animation, 
         }
         else
         {
-            const bool hovered = CheckCollisionPointRec(mouse, menu);
-            DrawRectangleRec(menu, hovered ? Color{ 54, 63, 72, 255 } : Color{ 35, 40, 46, 255 });
-            DrawRectangleLinesEx(menu, 1.0f, Color{ 70, 80, 90, 255 });
-            const Vector2 labelSize = MeasureTextEx(font, "Remove", 14.0f, 1.0f);
-            DrawUiText(font, "Remove", menu.x + (menu.width - labelSize.x) * 0.5f, menu.y + 10.0f, 14.0f, Color{ 230, 215, 210, 255 });
-            if (validContextClip && hovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+            const Rectangle renameItem{ menu.x, menu.y, menu.width, 30.0f };
+            const Rectangle deleteItem{ menu.x, menu.y + 30.0f, menu.width, 30.0f };
+            if (validContextClip && DrawPanelButton(font, renameItem, "Rename"))
             {
+                StartRenameAnimation(renameEditor, loaded, animation.contextClipIndex);
+                animation.contextMenuOpen = false;
+                animation.contextClipIndex = -1;
+            }
+            if (validContextClip && DrawPanelButton(font, deleteItem, "Delete"))
+            {
+                PushUndoSnapshot(tab);
                 loaded.animations.erase(loaded.animations.begin() + animation.contextClipIndex);
                 if (animation.clipIndex == animation.contextClipIndex)
                 {
@@ -4265,6 +5911,7 @@ int main(int argc, char** argv)
     std::string compareResultPath;
     std::string compareResultText;
     TextureClipboard textureClipboard;
+    RenameEditor renameEditor;
 
     auto openPathInNewTab = [&](const std::string& path)
     {
@@ -4291,7 +5938,9 @@ int main(int argc, char** argv)
         tab->visibleBones = tab->loaded.bones;
         tab->visibleBonePoses = tab->loaded.bonePoses;
         tab->collapsedNodes.assign(tab->loaded.nodes.size(), false);
+        tab->deletedNodes.assign(tab->loaded.nodes.size(), false);
         tab->selectedNode = tab->loaded.nodes.empty() ? -1 : 0;
+        tab->isolatedNode = -1;
         tab->path = path;
         tab->title = MakeTabTitle(path);
 
@@ -4310,9 +5959,12 @@ int main(int argc, char** argv)
     {
         const bool controlDown = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
         const bool shiftDown = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
-        bool openRequested = controlDown && IsKeyPressed(KEY_O);
-        bool saveFbxRequested = controlDown && !shiftDown && IsKeyPressed(KEY_S);
-        bool saveAsFbxRequested = controlDown && shiftDown && IsKeyPressed(KEY_S);
+        const bool altDown = IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT);
+        bool openRequested = !renameEditor.active && controlDown && IsKeyPressed(KEY_O);
+        bool saveFbxRequested = !renameEditor.active && controlDown && !shiftDown && IsKeyPressed(KEY_S);
+        bool saveAsFbxRequested = !renameEditor.active && controlDown && shiftDown && IsKeyPressed(KEY_S);
+        bool undoRequested = false;
+        bool redoRequested = false;
 
         if (openRequested)
         {
@@ -4324,6 +5976,15 @@ int main(int argc, char** argv)
         }
 
         ModelTab* active = activeTab >= 0 && activeTab < static_cast<int>(tabs.size()) ? tabs[static_cast<size_t>(activeTab)].get() : nullptr;
+        if (!renameEditor.active && active && controlDown && !shiftDown && IsKeyPressed(KEY_Z))
+        {
+            undoRequested = true;
+        }
+        if (!renameEditor.active && active &&
+            ((controlDown && IsKeyPressed(KEY_Y)) || (controlDown && shiftDown && IsKeyPressed(KEY_Z))))
+        {
+            redoRequested = true;
+        }
         gBottomPanelReservedHeight = animationPanelCollapsed ? kTimelineCollapsedHeight : kTimelinePanelHeight;
         const Vector2 mouse = GetMousePosition();
         std::vector<std::string> droppedPaths;
@@ -4343,12 +6004,16 @@ int main(int argc, char** argv)
         const float hierarchyBlockW = GetHierarchyPanelBlockWidth(hierarchyPanel);
         const bool mouseInViewport = mouse.x > hierarchyBlockW && mouse.y >= 61.0f && mouse.y < static_cast<float>(GetScreenHeight()) - gBottomPanelReservedHeight && openMenu == OpenMenu::None && !hierarchyPanel.resizing;
 
-        if (controlDown && IsKeyPressed(KEY_Q))
+        if (!renameEditor.active && active && altDown && IsKeyPressed(KEY_Q))
+        {
+            ToggleSelectedNodeIsolation(*active, notice, error);
+        }
+        if (!renameEditor.active && controlDown && !altDown && IsKeyPressed(KEY_Q))
         {
             quitRequested = true;
             continue;
         }
-        if (IsKeyPressed(KEY_ESCAPE))
+        if (!renameEditor.active && IsKeyPressed(KEY_ESCAPE))
         {
             openMenu = OpenMenu::None;
             if (active)
@@ -4357,7 +6022,7 @@ int main(int argc, char** argv)
             }
         }
 
-        if (active && IsKeyPressed(KEY_F) && active->loaded.valid)
+        if (!renameEditor.active && active && IsKeyPressed(KEY_F) && active->loaded.valid)
         {
             if (!FocusCameraOnSelection(*active))
             {
@@ -4365,35 +6030,35 @@ int main(int argc, char** argv)
             }
         }
 
-        if (IsKeyPressed(KEY_V))
+        if (!renameEditor.active && IsKeyPressed(KEY_V))
         {
             viewMode = NextViewMode(viewMode);
         }
-        if (IsKeyPressed(KEY_C))
+        if (!renameEditor.active && IsKeyPressed(KEY_C))
         {
             materialPreviewMode = NextMaterialPreviewMode(materialPreviewMode);
         }
-        if (IsKeyPressed(KEY_M))
+        if (!renameEditor.active && IsKeyPressed(KEY_M))
         {
             materialPreviewMode = MaterialPreviewMode::Shaded;
         }
-        if (IsKeyPressed(KEY_T))
+        if (!renameEditor.active && IsKeyPressed(KEY_T))
         {
             visibility.textures = !visibility.textures;
         }
-        if (IsKeyPressed(KEY_G))
+        if (!renameEditor.active && IsKeyPressed(KEY_G))
         {
             visibility.geometry = !visibility.geometry;
         }
-        if (IsKeyPressed(KEY_B))
+        if (!renameEditor.active && IsKeyPressed(KEY_B))
         {
             visibility.bones = !visibility.bones;
         }
-        if (!controlDown && IsKeyPressed(KEY_O))
+        if (!renameEditor.active && !controlDown && IsKeyPressed(KEY_O))
         {
             visibility.boneRotations = !visibility.boneRotations;
         }
-        if (IsKeyPressed(KEY_E))
+        if (!renameEditor.active && IsKeyPressed(KEY_E))
         {
             visibility.empties = !visibility.empties;
         }
@@ -4421,7 +6086,10 @@ int main(int argc, char** argv)
                 UpdateOrbitCameraTransform(active->orbit);
             }
 
-            UpdateAnimation(active->animation, active->loaded);
+            if (!renameEditor.active)
+            {
+                UpdateAnimation(active->animation, active->loaded);
+            }
             ApplyAnimatedMeshFrame(*active);
             ApplyAnimatedBoneFrame(*active);
             UpdateLitShader(litShader, active->orbit);
@@ -4466,6 +6134,11 @@ int main(int argc, char** argv)
                     BeginBlendMode(BLEND_ALPHA);
                     DrawMaterialModel(*active, litShader, materialPreviewMode, visibility.textures);
                     EndBlendMode();
+                }
+
+                if (visibility.skinWeights)
+                {
+                    DrawSkinWeightHeatMap(*active);
                 }
 
                 if (viewMode == ViewMode::ShadedWireframe || viewMode == ViewMode::Wireframe)
@@ -4530,7 +6203,7 @@ int main(int argc, char** argv)
 
         if (active)
         {
-            DrawTimeline(uiFont, active->loaded, active->animation, animationPanelCollapsed);
+            DrawTimeline(uiFont, *active, renameEditor, animationPanelCollapsed);
         }
         else
         {
@@ -4551,13 +6224,15 @@ int main(int argc, char** argv)
         }
         gBottomPanelReservedHeight = animationPanelCollapsed ? kTimelineCollapsedHeight : kTimelinePanelHeight;
 
-        DrawHierarchyPanel(uiFont, active, hierarchyPanel, droppedPaths, droppedTextureHandled, textureClipboard, notice, error);
+        DrawHierarchyPanel(uiFont, active, hierarchyPanel, renameEditor, droppedPaths, droppedTextureHandled, textureClipboard, notice, error);
         DrawOrientationGizmo(uiFont, active ? active->orbit.camera : emptyOrbit.camera);
 
         DrawTabs(uiFont, tabs, activeTab);
         active = activeTab >= 0 && activeTab < static_cast<int>(tabs.size()) ? tabs[static_cast<size_t>(activeTab)].get() : nullptr;
 
         bool menuOpenRequested = false;
+        bool menuUndoRequested = false;
+        bool menuRedoRequested = false;
         bool menuSaveFbxRequested = false;
         bool menuSaveAsFbxRequested = false;
         bool importAnimationsRequested = false;
@@ -4566,6 +6241,8 @@ int main(int argc, char** argv)
         DrawMenuBar(uiFont,
                     openMenu,
                     menuOpenRequested,
+                    menuUndoRequested,
+                    menuRedoRequested,
                     menuSaveFbxRequested,
                     menuSaveAsFbxRequested,
                     importAnimationsRequested,
@@ -4574,11 +6251,33 @@ int main(int argc, char** argv)
                     quitRequested,
                     viewMode,
                     navigation,
-                    visibility);
+                    visibility,
+                    active && !active->undoStack.empty(),
+                    active && !active->redoStack.empty());
+        undoRequested = undoRequested || menuUndoRequested;
+        redoRequested = redoRequested || menuRedoRequested;
         saveFbxRequested = saveFbxRequested || menuSaveFbxRequested;
         saveAsFbxRequested = saveAsFbxRequested || menuSaveAsFbxRequested;
         DrawSkeletonCompareResultWindow(uiFont, compareResultVisible, compareResultCompatible, compareResultPath, compareResultText);
+        DrawRenameEditor(uiFont, active, renameEditor, notice, error);
         EndDrawing();
+
+        if (undoRequested && active)
+        {
+            if (UndoEdit(*active))
+            {
+                notice = "Undo.";
+                error.clear();
+            }
+        }
+        if (redoRequested && active)
+        {
+            if (RedoEdit(*active))
+            {
+                notice = "Redo.";
+                error.clear();
+            }
+        }
 
         if (!droppedPaths.empty() && !droppedTextureHandled)
         {
@@ -4586,7 +6285,12 @@ int main(int argc, char** argv)
             bool ignoredTexture = false;
             if (active && active->loaded.valid)
             {
+                EditSnapshot before = CaptureEditSnapshot(*active);
                 const int assignedTextures = AutoAssignDroppedTextures(*active, droppedPaths, notice, error);
+                if (assignedTextures > 0)
+                {
+                    PushUndoSnapshot(*active, std::move(before));
+                }
                 droppedTextureHandled = assignedTextures > 0;
             }
             for (const std::string& droppedPath : droppedPaths)
@@ -4629,8 +6333,10 @@ int main(int argc, char** argv)
                 {
                     int importedCount = 0;
                     std::string importError;
+                    EditSnapshot before = CaptureEditSnapshot(*active);
                     if (ImportAnimationsFromFbx(*active, importPath, importedCount, importError))
                     {
+                        PushUndoSnapshot(*active, std::move(before));
                         notice = "Imported animations: " + std::to_string(importedCount);
                         error.clear();
                     }

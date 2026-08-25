@@ -62,6 +62,7 @@ enum class SceneNodeType
 struct SceneNode
 {
     std::string name;
+    std::string sourceName;
     int parent = -1;
     int depth = 0;
     SceneNodeType type = SceneNodeType::Empty;
@@ -76,6 +77,13 @@ struct SceneNode
     int meshVertexStart = -1;
     int meshVertexCount = 0;
     int meshTriangleCount = 0;
+    bool meshHadNormals = true;
+    bool meshHadUvs = true;
+    bool meshHasSkin = false;
+    bool hasSkinBindPose = false;
+    int degenerateTriangleCount = 0;
+    int badSkinWeightCount = 0;
+    int missingSkinWeightCount = 0;
     std::string materialName;
 };
 
