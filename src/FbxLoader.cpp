@@ -1020,6 +1020,33 @@ const BonePose* FindFramePose(const BoneFrame& frame, int nodeIndex)
     return nullptr;
 }
 
+FbxAMatrix MatrixFromSceneNode(const SceneNode& node)
+{
+    BonePose pose;
+    pose.position = node.position;
+    pose.axisX = node.axisX;
+    pose.axisY = node.axisY;
+    pose.axisZ = node.axisZ;
+    pose.rotation = node.rotation;
+    pose.scale = node.scale;
+    return MatrixFromPose(pose);
+}
+
+FbxAMatrix GetFrameNodeGlobalMatrix(const LoadedFbxModel& model, const BoneFrame& frame, int nodeIndex)
+{
+    const BonePose* pose = FindFramePose(frame, nodeIndex);
+    if (pose) return MatrixFromPose(*pose);
+
+    if (nodeIndex >= 0 && nodeIndex < static_cast<int>(model.nodes.size()))
+    {
+        return MatrixFromSceneNode(model.nodes[static_cast<size_t>(nodeIndex)]);
+    }
+
+    FbxAMatrix identity;
+    identity.SetIdentity();
+    return identity;
+}
+
 void AddSkeletonNodesByName(FbxNode* node, std::unordered_map<std::string, FbxNode*>& nodesByName)
 {
     if (!node) return;
@@ -1116,10 +1143,9 @@ bool WriteAnimationStacks(FbxScene* scene, const LoadedFbxModel& model, std::str
                 FbxAMatrix global = MatrixFromPose(pose);
                 FbxAMatrix local = global;
                 const int parentIndex = sceneNode.parent;
-                const BonePose* parentPose = parentIndex >= 0 ? FindFramePose(frame, parentIndex) : nullptr;
-                if (parentPose)
+                if (parentIndex >= 0)
                 {
-                    local = MatrixFromPose(*parentPose).Inverse() * global;
+                    local = GetFrameNodeGlobalMatrix(model, frame, parentIndex).Inverse() * global;
                 }
 
                 FbxNode* targetNode = target->second;

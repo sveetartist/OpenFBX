@@ -71,6 +71,7 @@ constexpr float kTimelineCollapsedHeight = 28.0f;
 constexpr float kMetersPerGridCell = 1.0f;
 constexpr double kNearClipPlane = 0.0005;
 constexpr double kFarClipPlane = 10000.0;
+constexpr Color kSelectionColor{ 204, 154, 42, 255 };
 float gBottomPanelReservedHeight = kTimelinePanelHeight;
 
 struct OrbitCamera
@@ -651,7 +652,7 @@ void ApplyNeutralMaterial(LoadedFbxModel& loaded)
     {
         for (int i = 0; i < loaded.model.materialCount; ++i)
         {
-            loaded.model.materials[i].maps[MATERIAL_MAP_DIFFUSE].color = Color{ 135, 135, 135, 255 };
+            loaded.model.materials[i].maps[MATERIAL_MAP_DIFFUSE].color = Color{ 170, 170, 170, 255 };
         }
     }
 }
@@ -1190,8 +1191,8 @@ void UpdateLitShader(const LitShader& lit, const OrbitCamera& orbit)
     Vector3 light = Vector3Normalize(Vector3Subtract(orbit.target, orbit.camera.position));
     light = Vector3Normalize(Vector3Add(light, Vector3{ 0.0f, -0.35f, 0.0f }));
     const float lightDirection[3] = { light.x, light.y, light.z };
-    const float lightColor[4] = { 1.0f, 0.96f, 0.88f, 1.0f };
-    const float ambient[4] = { 0.32f, 0.35f, 0.38f, 1.0f };
+    const float lightColor[4] = { 1.12f, 1.08f, 1.0f, 1.0f };
+    const float ambient[4] = { 0.46f, 0.48f, 0.50f, 1.0f };
 
     SetShaderValue(lit.shader, lit.viewPositionLoc, viewPosition, SHADER_UNIFORM_VEC3);
     SetShaderValue(lit.shader, lit.lightDirectionLoc, lightDirection, SHADER_UNIFORM_VEC3);
@@ -1549,13 +1550,13 @@ void DrawBones(const std::vector<BoneSegment>& bones, int selectedNode)
     for (const BoneSegment& bone : bones)
     {
         const bool selected = bone.startNode == selectedNode;
-        DrawMayaBone(bone.start, bone.end, radius, selected ? Color{ 255, 214, 80, 255 } : Color{ 100, 185, 255, 255 });
+        DrawMayaBone(bone.start, bone.end, radius, selected ? kSelectionColor : Color{ 100, 185, 255, 255 });
     }
 
     for (const BoneSegment& bone : bones)
     {
-        DrawJointSphere(bone.start, bone.startNode == selectedNode ? radius * 1.15f : radius * 0.85f, bone.startNode == selectedNode ? Color{ 255, 214, 80, 255 } : Color{ 142, 210, 255, 255 });
-        DrawJointSphere(bone.end, bone.endNode == selectedNode ? radius * 1.15f : radius * 0.85f, bone.endNode == selectedNode ? Color{ 255, 214, 80, 255 } : Color{ 142, 210, 255, 255 });
+        DrawJointSphere(bone.start, bone.startNode == selectedNode ? radius * 1.15f : radius * 0.85f, bone.startNode == selectedNode ? kSelectionColor : Color{ 142, 210, 255, 255 });
+        DrawJointSphere(bone.end, bone.endNode == selectedNode ? radius * 1.15f : radius * 0.85f, bone.endNode == selectedNode ? kSelectionColor : Color{ 142, 210, 255, 255 });
     }
 }
 
@@ -1608,8 +1609,8 @@ void DrawMeshOrigin(const SceneNode& node, float sceneDiagonal)
     const float crossLength = axisLength * 0.32f;
     const float sphereRadius = axisLength * 0.045f;
 
-    DrawEmptyCross(node, crossLength, Color{ 255, 214, 80, 255 });
-    DrawSphere(node.position, sphereRadius, Color{ 255, 214, 80, 255 });
+    DrawEmptyCross(node, crossLength, kSelectionColor);
+    DrawSphere(node.position, sphereRadius, kSelectionColor);
     DrawMeshOriginAxis(node.position, node.axisX, axisLength, Color{ 235, 74, 74, 255 });
     DrawMeshOriginAxis(node.position, node.axisY, axisLength, Color{ 92, 210, 94, 255 });
     DrawMeshOriginAxis(node.position, node.axisZ, axisLength, Color{ 86, 142, 255, 255 });
@@ -1622,7 +1623,7 @@ void DrawEmptyCrosses(const ModelTab& tab)
     {
         const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(i)];
         if (node.type != SceneNodeType::Empty || node.parent < 0) continue;
-        DrawEmptyCross(node, length, i == tab.selectedNode ? Color{ 255, 214, 80, 255 } : Color{ 100, 185, 255, 230 });
+        DrawEmptyCross(node, length, i == tab.selectedNode ? kSelectionColor : Color{ 100, 185, 255, 230 });
     }
 }
 
@@ -1876,7 +1877,7 @@ void DrawSelectedMeshOverlay(const ModelTab& tab, const VisibilityState& visibil
     const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(tab.selectedNode)];
     if (node.type == SceneNodeType::Mesh && node.hasBounds)
     {
-        DrawMeshNodeWireframe(tab, node, Color{ 255, 214, 80, 255 });
+        DrawMeshNodeWireframe(tab, node, kSelectionColor);
     }
 }
 
@@ -1901,7 +1902,7 @@ void DrawSelectedNodeOverlay(const ModelTab& tab, const VisibilityState& visibil
     {
         if (!visibility.empties) return;
         const float length = ClampFloat(GetBoundsDiagonal(tab.loaded.bounds) * 0.055f, 0.08f, 0.8f);
-        DrawEmptyCross(node, length, Color{ 255, 214, 80, 255 });
+        DrawEmptyCross(node, length, kSelectionColor);
     }
 }
 
@@ -2545,53 +2546,13 @@ Matrix GetPoseMatrixByNode(const std::vector<Matrix>& matrices, int nodeIndex)
     return MatrixIdentity();
 }
 
-Matrix ComposeMatrix(Vector3 translation, Quaternion rotation, Vector3 scale)
+const BonePose* FindFramePoseByNode(const BoneFrame& frame, int nodeIndex)
 {
-    Matrix matrix = QuaternionToMatrix(rotation);
-    matrix.m0 *= scale.x;
-    matrix.m1 *= scale.x;
-    matrix.m2 *= scale.x;
-    matrix.m4 *= scale.y;
-    matrix.m5 *= scale.y;
-    matrix.m6 *= scale.y;
-    matrix.m8 *= scale.z;
-    matrix.m9 *= scale.z;
-    matrix.m10 *= scale.z;
-    matrix.m12 = translation.x;
-    matrix.m13 = translation.y;
-    matrix.m14 = translation.z;
-    matrix.m15 = 1.0f;
-    return matrix;
-}
-
-Matrix RetargetLocalMatrix(Matrix sourceBindLocal, Matrix sourceAnimLocal, Matrix targetBindLocal, bool isRoot)
-{
-    Vector3 sourceBindT{};
-    Vector3 sourceAnimT{};
-    Vector3 targetBindT{};
-    Vector3 sourceBindS{};
-    Vector3 sourceAnimS{};
-    Vector3 targetBindS{};
-    Quaternion sourceBindR{};
-    Quaternion sourceAnimR{};
-    Quaternion targetBindR{};
-    MatrixDecompose(sourceBindLocal, &sourceBindT, &sourceBindR, &sourceBindS);
-    MatrixDecompose(sourceAnimLocal, &sourceAnimT, &sourceAnimR, &sourceAnimS);
-    MatrixDecompose(targetBindLocal, &targetBindT, &targetBindR, &targetBindS);
-
-    const Quaternion rotationDelta = QuaternionMultiply(QuaternionInvert(sourceBindR), sourceAnimR);
-    const Quaternion targetAnimR = QuaternionNormalize(QuaternionMultiply(targetBindR, rotationDelta));
-    Vector3 targetAnimT = targetBindT;
-    if (isRoot)
+    for (const BonePose& pose : frame.poses)
     {
-        targetAnimT = Vector3Add(targetBindT, Vector3Subtract(sourceAnimT, sourceBindT));
+        if (pose.node == nodeIndex) return &pose;
     }
-
-    Vector3 targetAnimS = targetBindS;
-    if (std::fabs(sourceBindS.x) > 0.000001f) targetAnimS.x *= sourceAnimS.x / sourceBindS.x;
-    if (std::fabs(sourceBindS.y) > 0.000001f) targetAnimS.y *= sourceAnimS.y / sourceBindS.y;
-    if (std::fabs(sourceBindS.z) > 0.000001f) targetAnimS.z *= sourceAnimS.z / sourceBindS.z;
-    return ComposeMatrix(targetAnimT, targetAnimR, targetAnimS);
+    return nullptr;
 }
 
 std::vector<Matrix> BuildBindPoseMatrices(const LoadedFbxModel& loaded)
@@ -2634,52 +2595,32 @@ std::vector<Matrix> BuildFramePoseMatrices(const LoadedFbxModel& loaded, const B
     return matrices;
 }
 
-BoneFrame RetargetImportedBoneFrame(const BoneFrame& sourceFrame,
-                                    const LoadedFbxModel& source,
-                                    const LoadedFbxModel& target,
-                                    const std::vector<Matrix>& sourceBindMatrices,
-                                    const std::vector<Matrix>& targetBindMatrices)
+BoneFrame RemapImportedBoneFrame(const BoneFrame& sourceFrame,
+                                 const LoadedFbxModel& source,
+                                 const LoadedFbxModel& target,
+                                 const std::unordered_map<std::string, int>& sourceBoneNodesByName)
 {
     BoneFrame frame;
     frame.time = sourceFrame.time;
     const std::vector<Matrix> sourceFrameMatrices = BuildFramePoseMatrices(source, sourceFrame);
-    std::vector<Matrix> targetFrameMatrices = targetBindMatrices;
+    frame.poses.reserve(target.bonePoses.size());
 
     for (int targetNodeIndex = 0; targetNodeIndex < static_cast<int>(target.nodes.size()); ++targetNodeIndex)
     {
         const SceneNode& targetNode = target.nodes[static_cast<size_t>(targetNodeIndex)];
         if (targetNode.type != SceneNodeType::Bone) continue;
 
-        int sourceNodeIndex = -1;
-        for (int i = 0; i < static_cast<int>(source.nodes.size()); ++i)
-        {
-            if (source.nodes[static_cast<size_t>(i)].type == SceneNodeType::Bone &&
-                source.nodes[static_cast<size_t>(i)].name == targetNode.name)
-            {
-                sourceNodeIndex = i;
-                break;
-            }
-        }
-        if (sourceNodeIndex < 0) continue;
+        const auto sourceNode = sourceBoneNodesByName.find(targetNode.name);
+        if (sourceNode == sourceBoneNodesByName.end()) continue;
 
-        const int sourceParent = FindNearestBoneParent(source, sourceNodeIndex);
-        const int targetParent = FindNearestBoneParent(target, targetNodeIndex);
-
-        const Matrix sourceBindGlobal = GetPoseMatrixByNode(sourceBindMatrices, sourceNodeIndex);
-        const Matrix sourceAnimGlobal = GetPoseMatrixByNode(sourceFrameMatrices, sourceNodeIndex);
-        const Matrix sourceBindParent = sourceParent >= 0 ? GetPoseMatrixByNode(sourceBindMatrices, sourceParent) : MatrixIdentity();
-        const Matrix sourceAnimParent = sourceParent >= 0 ? GetPoseMatrixByNode(sourceFrameMatrices, sourceParent) : MatrixIdentity();
-        const Matrix sourceBindLocal = MatrixMultiply(MatrixInvert(sourceBindParent), sourceBindGlobal);
-        const Matrix sourceAnimLocal = MatrixMultiply(MatrixInvert(sourceAnimParent), sourceAnimGlobal);
-        const Matrix targetBindGlobal = GetPoseMatrixByNode(targetBindMatrices, targetNodeIndex);
-        const Matrix targetBindParent = targetParent >= 0 ? GetPoseMatrixByNode(targetBindMatrices, targetParent) : MatrixIdentity();
-        const Matrix targetBindLocal = MatrixMultiply(MatrixInvert(targetBindParent), targetBindGlobal);
-        const Matrix targetAnimLocal = RetargetLocalMatrix(sourceBindLocal, sourceAnimLocal, targetBindLocal, targetParent < 0);
-        const Matrix targetAnimParent = targetParent >= 0 ? GetPoseMatrixByNode(targetFrameMatrices, targetParent) : MatrixIdentity();
-        targetFrameMatrices[static_cast<size_t>(targetNodeIndex)] = MatrixMultiply(targetAnimParent, targetAnimLocal);
-        frame.poses.push_back(PoseFromMatrix(targetFrameMatrices[static_cast<size_t>(targetNodeIndex)], targetNodeIndex));
+        const BonePose* sourcePose = FindFramePoseByNode(sourceFrame, sourceNode->second);
+        BonePose remappedPose = sourcePose ? *sourcePose : PoseFromMatrix(GetPoseMatrixByNode(sourceFrameMatrices, sourceNode->second), targetNodeIndex);
+        remappedPose.node = targetNodeIndex;
+        frame.poses.push_back(remappedPose);
     }
 
+    const std::vector<Matrix> targetFrameMatrices = BuildFramePoseMatrices(target, frame);
+    frame.bones.reserve(target.bones.size());
     for (int targetNodeIndex = 0; targetNodeIndex < static_cast<int>(target.nodes.size()); ++targetNodeIndex)
     {
         const int parent = FindNearestBoneParent(target, targetNodeIndex);
@@ -2786,8 +2727,7 @@ bool ImportAnimationsFromFbx(ModelTab& targetTab, const std::string& importPath,
         return false;
     }
 
-    const std::vector<Matrix> sourceBindMatrices = BuildBindPoseMatrices(source);
-    const std::vector<Matrix> targetBindMatrices = BuildBindPoseMatrices(targetTab.loaded);
+    const std::unordered_map<std::string, int> sourceBoneNodesByName = BuildBoneNodeNameMap(source);
     for (const AnimationClip& sourceClip : source.animations)
     {
         AnimationClip clip;
@@ -2796,7 +2736,7 @@ bool ImportAnimationsFromFbx(ModelTab& targetTab, const std::string& importPath,
         clip.frames.reserve(sourceClip.frames.size());
         for (const BoneFrame& sourceFrame : sourceClip.frames)
         {
-            clip.frames.push_back(RetargetImportedBoneFrame(sourceFrame, source, targetTab.loaded, sourceBindMatrices, targetBindMatrices));
+            clip.frames.push_back(RemapImportedBoneFrame(sourceFrame, source, targetTab.loaded, sourceBoneNodesByName));
         }
         clip.meshFrames.reserve(clip.frames.size());
         for (const BoneFrame& frame : clip.frames)
