@@ -189,6 +189,29 @@ enum class MaterialPreviewMode
     Opacity
 };
 
+enum class TransformTool
+{
+    Select,
+    Move,
+    Rotate,
+    Scale
+};
+
+enum class TransformAxis
+{
+    None,
+    X,
+    Y,
+    Z,
+    Center
+};
+
+enum class GizmoOrientation
+{
+    Global,
+    Local
+};
+
 struct PbrTexture
 {
     Texture2D texture{};
@@ -225,6 +248,10 @@ struct PbrMaterialSnapshot
 struct EditSnapshot
 {
     std::vector<SceneNode> nodes;
+    std::vector<float> bindVertices;
+    std::vector<float> bindNormals;
+    std::vector<float> currentVertices;
+    std::vector<float> currentNormals;
     std::vector<SkinnedVertex> skinnedVertices;
     std::vector<AnimationClip> animations;
     std::vector<bool> deletedNodes;
@@ -234,6 +261,16 @@ struct EditSnapshot
     int animationClipIndex = -1;
     int animationClipScroll = 0;
     float animationTime = 0.0f;
+    bool manualSkinnedMeshPose = false;
+};
+
+struct TransformGizmoState
+{
+    bool dragging = false;
+    TransformAxis axis = TransformAxis::None;
+    int nodeIndex = -1;
+    Vector2 lastMouse{};
+    float lastAngle = 0.0f;
 };
 
 struct TextureClipboard
@@ -288,6 +325,7 @@ struct ModelTab
     int appliedBoneFrameIndex = -1;
     int appliedNextBoneFrameIndex = -1;
     float appliedBoneFrameAlpha = -1.0f;
+    bool manualSkinnedMeshPose = false;
     int selectedNode = -1;
     int isolatedNode = -1;
     std::string path;
@@ -1076,6 +1114,7 @@ const PbrMaterialState& GetSelectedPbrMaterial(const ModelTab& tab)
 
 bool IsDeletedNode(const ModelTab& tab, int nodeIndex);
 void RefreshDisplayedMesh(ModelTab& tab);
+MeshFrame BuildSkinnedMeshFrame(const LoadedFbxModel& target, const BoneFrame& boneFrame);
 void DrawUiText(Font font, const char* text, float x, float y, float size, Color color);
 void DrawUiTextClipped(Font font, const char* text, float x, float y, float size, float maxWidth, Color color);
 bool DrawPanelButton(Font font, Rectangle bounds, const char* label);
@@ -1148,6 +1187,10 @@ EditSnapshot CaptureEditSnapshot(const ModelTab& tab)
 {
     EditSnapshot snapshot;
     snapshot.nodes = tab.loaded.nodes;
+    snapshot.bindVertices = tab.loaded.bindVertices;
+    snapshot.bindNormals = tab.loaded.bindNormals;
+    snapshot.currentVertices = tab.currentVertices;
+    snapshot.currentNormals = tab.currentNormals;
     snapshot.skinnedVertices = tab.loaded.skinnedVertices;
     snapshot.animations = tab.loaded.animations;
     snapshot.deletedNodes = tab.deletedNodes;
@@ -1156,6 +1199,7 @@ EditSnapshot CaptureEditSnapshot(const ModelTab& tab)
     snapshot.animationClipIndex = tab.animation.clipIndex;
     snapshot.animationClipScroll = tab.animation.clipScroll;
     snapshot.animationTime = tab.animation.time;
+    snapshot.manualSkinnedMeshPose = tab.manualSkinnedMeshPose;
     snapshot.pbrMaterials.reserve(tab.pbrMaterials.size());
 
     for (const PbrMaterialState& material : tab.pbrMaterials)
@@ -1204,6 +1248,10 @@ void PushUndoSnapshot(ModelTab& tab)
 void RestoreEditSnapshot(ModelTab& tab, const EditSnapshot& snapshot)
 {
     tab.loaded.nodes = snapshot.nodes;
+    tab.loaded.bindVertices = snapshot.bindVertices;
+    tab.loaded.bindNormals = snapshot.bindNormals;
+    tab.currentVertices = snapshot.currentVertices;
+    tab.currentNormals = snapshot.currentNormals;
     tab.loaded.skinnedVertices = snapshot.skinnedVertices;
     tab.loaded.animations = snapshot.animations;
     tab.deletedNodes = snapshot.deletedNodes;
@@ -1212,6 +1260,7 @@ void RestoreEditSnapshot(ModelTab& tab, const EditSnapshot& snapshot)
     tab.animation.clipIndex = snapshot.animationClipIndex;
     tab.animation.clipScroll = snapshot.animationClipScroll;
     tab.animation.time = snapshot.animationTime;
+    tab.manualSkinnedMeshPose = snapshot.manualSkinnedMeshPose;
     tab.animation.playing = false;
     tab.animation.scrubbing = false;
     tab.animation.contextMenuOpen = false;
@@ -1960,7 +2009,14 @@ void ApplyAnimatedMeshFrame(ModelTab& tab)
     {
         if (tab.appliedClipIndex == -1) return;
 
-        if (tab.loaded.bindVertices.size() == tab.loaded.bindNormals.size())
+        const bool useManualPose = tab.manualSkinnedMeshPose &&
+                                   tab.currentVertices.size() == tab.loaded.bindVertices.size() &&
+                                   tab.currentNormals.size() == tab.loaded.bindNormals.size();
+        if (useManualPose)
+        {
+            UploadGlobalMeshFrame(tab, tab.currentVertices.data(), tab.currentNormals.data(), tab.currentVertices.size());
+        }
+        else if (tab.loaded.bindVertices.size() == tab.loaded.bindNormals.size())
         {
             UploadGlobalMeshFrame(tab, tab.loaded.bindVertices.data(), tab.loaded.bindNormals.data(), tab.loaded.bindVertices.size());
         }
@@ -2387,6 +2443,575 @@ void DrawSkinWeightHeatMap(const ModelTab& tab)
     rlEnableDepthMask();
 }
 
+Vector3 GetTransformAxisVector(TransformAxis axis)
+{
+    switch (axis)
+    {
+    case TransformAxis::X: return Vector3{ 1.0f, 0.0f, 0.0f };
+    case TransformAxis::Y: return Vector3{ 0.0f, 1.0f, 0.0f };
+    case TransformAxis::Z: return Vector3{ 0.0f, 0.0f, 1.0f };
+    case TransformAxis::Center:
+    case TransformAxis::None: break;
+    }
+    return Vector3Zero();
+}
+
+Vector3 GetCameraForward(const Camera3D& camera)
+{
+    return NormalizeOrFallback(Vector3Subtract(camera.target, camera.position), Vector3{ 0.0f, 0.0f, -1.0f });
+}
+
+Vector3 GetCameraRight(const Camera3D& camera)
+{
+    const Vector3 forward = GetCameraForward(camera);
+    return NormalizeOrFallback(Vector3CrossProduct(forward, camera.up), Vector3{ 1.0f, 0.0f, 0.0f });
+}
+
+Vector3 GetCameraUpVector(const Camera3D& camera)
+{
+    const Vector3 forward = GetCameraForward(camera);
+    const Vector3 right = GetCameraRight(camera);
+    return NormalizeOrFallback(Vector3CrossProduct(right, forward), Vector3{ 0.0f, 1.0f, 0.0f });
+}
+
+bool GetSelectedNodeLocalAxis(const ModelTab& tab, TransformAxis axis, Vector3& outAxis)
+{
+    if (tab.selectedNode < 0 || tab.selectedNode >= static_cast<int>(tab.loaded.nodes.size())) return false;
+    const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(tab.selectedNode)];
+    if (axis == TransformAxis::X)
+    {
+        outAxis = NormalizeOrFallback(node.axisX, Vector3{ 1.0f, 0.0f, 0.0f });
+        return true;
+    }
+    if (axis == TransformAxis::Y)
+    {
+        outAxis = NormalizeOrFallback(node.axisY, Vector3{ 0.0f, 1.0f, 0.0f });
+        return true;
+    }
+    if (axis == TransformAxis::Z)
+    {
+        outAxis = NormalizeOrFallback(node.axisZ, Vector3{ 0.0f, 0.0f, 1.0f });
+        return true;
+    }
+    return false;
+}
+
+Vector3 GetTransformAxisVector(const ModelTab& tab, TransformAxis axis, GizmoOrientation orientation)
+{
+    if (orientation == GizmoOrientation::Local)
+    {
+        Vector3 localAxis{};
+        if (GetSelectedNodeLocalAxis(tab, axis, localAxis)) return localAxis;
+    }
+    return GetTransformAxisVector(axis);
+}
+
+bool GetTransformPlaneBasis(const ModelTab& tab,
+                            TransformAxis axis,
+                            GizmoOrientation orientation,
+                            Vector3& axisA,
+                            Vector3& axisB)
+{
+    if (orientation == GizmoOrientation::Local && tab.selectedNode >= 0 && tab.selectedNode < static_cast<int>(tab.loaded.nodes.size()))
+    {
+        const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(tab.selectedNode)];
+        if (axis == TransformAxis::X)
+        {
+            axisA = NormalizeOrFallback(node.axisY, Vector3{ 0.0f, 1.0f, 0.0f });
+            axisB = NormalizeOrFallback(node.axisZ, Vector3{ 0.0f, 0.0f, 1.0f });
+            return true;
+        }
+        if (axis == TransformAxis::Y)
+        {
+            axisA = NormalizeOrFallback(node.axisX, Vector3{ 1.0f, 0.0f, 0.0f });
+            axisB = NormalizeOrFallback(node.axisZ, Vector3{ 0.0f, 0.0f, 1.0f });
+            return true;
+        }
+        if (axis == TransformAxis::Z)
+        {
+            axisA = NormalizeOrFallback(node.axisX, Vector3{ 1.0f, 0.0f, 0.0f });
+            axisB = NormalizeOrFallback(node.axisY, Vector3{ 0.0f, 1.0f, 0.0f });
+            return true;
+        }
+    }
+
+    axisA = Vector3{ 1.0f, 0.0f, 0.0f };
+    axisB = Vector3{ 0.0f, 1.0f, 0.0f };
+    if (axis == TransformAxis::X)
+    {
+        axisA = Vector3{ 0.0f, 1.0f, 0.0f };
+        axisB = Vector3{ 0.0f, 0.0f, 1.0f };
+        return true;
+    }
+    if (axis == TransformAxis::Y)
+    {
+        axisA = Vector3{ 1.0f, 0.0f, 0.0f };
+        axisB = Vector3{ 0.0f, 0.0f, 1.0f };
+        return true;
+    }
+    if (axis == TransformAxis::Z)
+    {
+        axisA = Vector3{ 1.0f, 0.0f, 0.0f };
+        axisB = Vector3{ 0.0f, 1.0f, 0.0f };
+        return true;
+    }
+    return false;
+}
+
+Color GetTransformAxisColor(TransformAxis axis, bool active = false)
+{
+    const unsigned char alpha = active ? 255 : 220;
+    switch (axis)
+    {
+    case TransformAxis::X: return Color{ 235, 74, 74, alpha };
+    case TransformAxis::Y: return Color{ 92, 210, 94, alpha };
+    case TransformAxis::Z: return Color{ 86, 142, 255, alpha };
+    case TransformAxis::Center:
+    case TransformAxis::None: break;
+    }
+    return Color{ 210, 218, 226, alpha };
+}
+
+bool IsNodeInTransformScope(const LoadedFbxModel& loaded, int nodeIndex, int rootNode)
+{
+    if (nodeIndex < 0 || rootNode < 0) return false;
+    return nodeIndex == rootNode || IsDescendantNode(loaded, nodeIndex, rootNode);
+}
+
+Vector3 RotatePointAroundAxis(Vector3 point, Vector3 pivot, Vector3 axis, float radians)
+{
+    return Vector3Add(pivot, Vector3RotateByAxisAngle(Vector3Subtract(point, pivot), axis, radians));
+}
+
+Vector3 ScalePointAlongAxis(Vector3 point, Vector3 pivot, Vector3 axis, float factor)
+{
+    const Vector3 offset = Vector3Subtract(point, pivot);
+    const float along = Vector3DotProduct(offset, axis);
+    const Vector3 parallel = Vector3Scale(axis, along);
+    const Vector3 perpendicular = Vector3Subtract(offset, parallel);
+    return Vector3Add(pivot, Vector3Add(perpendicular, Vector3Scale(parallel, factor)));
+}
+
+Vector3 ScalePointUniform(Vector3 point, Vector3 pivot, float factor)
+{
+    return Vector3Add(pivot, Vector3Scale(Vector3Subtract(point, pivot), factor));
+}
+
+Vector3 ScaleNormalAlongAxis(Vector3 normal, Vector3 axis, float factor)
+{
+    const float safeFactor = std::max(0.001f, std::fabs(factor));
+    const float along = Vector3DotProduct(normal, axis);
+    const Vector3 parallel = Vector3Scale(axis, along / safeFactor);
+    const Vector3 perpendicular = Vector3Subtract(normal, Vector3Scale(axis, along));
+    return NormalizeOrFallback(Vector3Add(perpendicular, parallel), normal);
+}
+
+Vector3 EulerDegreesFromAxes(Vector3 axisX, Vector3 axisY, Vector3 axisZ)
+{
+    Matrix rotationMatrix = MatrixIdentity();
+    axisX = NormalizeOrFallback(axisX, Vector3{ 1.0f, 0.0f, 0.0f });
+    axisY = NormalizeOrFallback(axisY, Vector3{ 0.0f, 1.0f, 0.0f });
+    axisZ = NormalizeOrFallback(axisZ, Vector3{ 0.0f, 0.0f, 1.0f });
+    rotationMatrix.m0 = axisX.x;
+    rotationMatrix.m1 = axisX.y;
+    rotationMatrix.m2 = axisX.z;
+    rotationMatrix.m4 = axisY.x;
+    rotationMatrix.m5 = axisY.y;
+    rotationMatrix.m6 = axisY.z;
+    rotationMatrix.m8 = axisZ.x;
+    rotationMatrix.m9 = axisZ.y;
+    rotationMatrix.m10 = axisZ.z;
+    return Vector3Scale(QuaternionToEuler(QuaternionFromMatrix(rotationMatrix)), RAD2DEG);
+}
+
+void ApplyTransformValueUpdates(SceneNode& node, TransformTool tool, TransformAxis axis, float amount)
+{
+    if (tool == TransformTool::Rotate)
+    {
+        node.rotation = EulerDegreesFromAxes(node.axisX, node.axisY, node.axisZ);
+    }
+    else if (tool == TransformTool::Scale)
+    {
+        if (axis == TransformAxis::X) node.scale.x *= amount;
+        else if (axis == TransformAxis::Y) node.scale.y *= amount;
+        else if (axis == TransformAxis::Z) node.scale.z *= amount;
+        else if (axis == TransformAxis::Center)
+        {
+            node.scale.x *= amount;
+            node.scale.y *= amount;
+            node.scale.z *= amount;
+        }
+    }
+}
+
+void ApplyTransformValueUpdates(BonePose& pose, TransformTool tool, TransformAxis axis, float amount)
+{
+    if (tool == TransformTool::Rotate)
+    {
+        pose.rotation = EulerDegreesFromAxes(pose.axisX, pose.axisY, pose.axisZ);
+    }
+    else if (tool == TransformTool::Scale)
+    {
+        if (axis == TransformAxis::X) pose.scale.x *= amount;
+        else if (axis == TransformAxis::Y) pose.scale.y *= amount;
+        else if (axis == TransformAxis::Z) pose.scale.z *= amount;
+        else if (axis == TransformAxis::Center)
+        {
+            pose.scale.x *= amount;
+            pose.scale.y *= amount;
+            pose.scale.z *= amount;
+        }
+    }
+}
+
+void RecomputeMeshNodeBounds(ModelTab& tab, SceneNode& node)
+{
+    if (node.type != SceneNodeType::Mesh || node.meshVertexStart < 0 || node.meshVertexCount <= 0 ||
+        tab.loaded.bindVertices.empty())
+    {
+        return;
+    }
+
+    const std::vector<float>& vertices = tab.currentVertices.size() == tab.loaded.bindVertices.size() ? tab.currentVertices : tab.loaded.bindVertices;
+    const int start = std::max(0, node.meshVertexStart);
+    const int end = std::min(node.meshVertexStart + node.meshVertexCount, static_cast<int>(vertices.size() / 3));
+    if (start >= end) return;
+
+    const int firstBase = start * 3;
+    BoundingBox bounds{
+        Vector3{ vertices[static_cast<size_t>(firstBase)], vertices[static_cast<size_t>(firstBase + 1)], vertices[static_cast<size_t>(firstBase + 2)] },
+        Vector3{ vertices[static_cast<size_t>(firstBase)], vertices[static_cast<size_t>(firstBase + 1)], vertices[static_cast<size_t>(firstBase + 2)] }
+    };
+    for (int vertex = start + 1; vertex < end; ++vertex)
+    {
+        const int base = vertex * 3;
+        const Vector3 point{ vertices[static_cast<size_t>(base)], vertices[static_cast<size_t>(base + 1)], vertices[static_cast<size_t>(base + 2)] };
+        bounds.min.x = std::min(bounds.min.x, point.x);
+        bounds.min.y = std::min(bounds.min.y, point.y);
+        bounds.min.z = std::min(bounds.min.z, point.z);
+        bounds.max.x = std::max(bounds.max.x, point.x);
+        bounds.max.y = std::max(bounds.max.y, point.y);
+        bounds.max.z = std::max(bounds.max.z, point.z);
+    }
+
+    node.bounds = bounds;
+    node.hasBounds = true;
+    node.position = Vector3Scale(Vector3Add(bounds.min, bounds.max), 0.5f);
+}
+
+void RecomputeSceneBounds(ModelTab& tab)
+{
+    bool found = false;
+    BoundingBox bounds{};
+    for (const SceneNode& node : tab.loaded.nodes)
+    {
+        if (!node.hasBounds) continue;
+        if (!found)
+        {
+            bounds = node.bounds;
+            found = true;
+            continue;
+        }
+        bounds.min.x = std::min(bounds.min.x, node.bounds.min.x);
+        bounds.min.y = std::min(bounds.min.y, node.bounds.min.y);
+        bounds.min.z = std::min(bounds.min.z, node.bounds.min.z);
+        bounds.max.x = std::max(bounds.max.x, node.bounds.max.x);
+        bounds.max.y = std::max(bounds.max.y, node.bounds.max.y);
+        bounds.max.z = std::max(bounds.max.z, node.bounds.max.z);
+    }
+    if (found)
+    {
+        tab.loaded.bounds = bounds;
+    }
+}
+
+template <typename PointTransform>
+void TransformPositionBuffer(std::vector<float>& values, int startVertex, int vertexCount, PointTransform transform)
+{
+    if (values.empty() || startVertex < 0 || vertexCount <= 0) return;
+    const int start = std::max(0, startVertex);
+    const int end = std::min(startVertex + vertexCount, static_cast<int>(values.size() / 3));
+    for (int vertex = start; vertex < end; ++vertex)
+    {
+        const int base = vertex * 3;
+        const Vector3 value{ values[static_cast<size_t>(base)], values[static_cast<size_t>(base + 1)], values[static_cast<size_t>(base + 2)] };
+        const Vector3 transformed = transform(value);
+        values[static_cast<size_t>(base)] = transformed.x;
+        values[static_cast<size_t>(base + 1)] = transformed.y;
+        values[static_cast<size_t>(base + 2)] = transformed.z;
+    }
+}
+
+template <typename DirectionTransform>
+void TransformDirectionBuffer(std::vector<float>& values, int startVertex, int vertexCount, DirectionTransform transform)
+{
+    if (values.empty() || startVertex < 0 || vertexCount <= 0) return;
+    const int start = std::max(0, startVertex);
+    const int end = std::min(startVertex + vertexCount, static_cast<int>(values.size() / 3));
+    for (int vertex = start; vertex < end; ++vertex)
+    {
+        const int base = vertex * 3;
+        const Vector3 value{ values[static_cast<size_t>(base)], values[static_cast<size_t>(base + 1)], values[static_cast<size_t>(base + 2)] };
+        const Vector3 transformed = transform(value);
+        values[static_cast<size_t>(base)] = transformed.x;
+        values[static_cast<size_t>(base + 1)] = transformed.y;
+        values[static_cast<size_t>(base + 2)] = transformed.z;
+    }
+}
+
+template <typename PointTransform, typename DirectionTransform>
+void TransformMeshNodeRange(ModelTab& tab, SceneNode& node, PointTransform transformPoint, DirectionTransform transformDirection)
+{
+    TransformPositionBuffer(tab.loaded.bindVertices, node.meshVertexStart, node.meshVertexCount, transformPoint);
+    TransformDirectionBuffer(tab.loaded.bindNormals, node.meshVertexStart, node.meshVertexCount, transformDirection);
+    TransformPositionBuffer(tab.currentVertices, node.meshVertexStart, node.meshVertexCount, transformPoint);
+    TransformDirectionBuffer(tab.currentNormals, node.meshVertexStart, node.meshVertexCount, transformDirection);
+
+    const int start = std::max(0, node.meshVertexStart);
+    const int end = std::min(node.meshVertexStart + node.meshVertexCount, static_cast<int>(tab.loaded.skinnedVertices.size()));
+    for (int vertex = start; vertex < end; ++vertex)
+    {
+        SkinnedVertex& skinned = tab.loaded.skinnedVertices[static_cast<size_t>(vertex)];
+        skinned.bindPosition = transformPoint(skinned.bindPosition);
+        skinned.bindNormal = transformDirection(skinned.bindNormal);
+    }
+
+    for (AnimationClip& clip : tab.loaded.animations)
+    {
+        for (MeshFrame& frame : clip.meshFrames)
+        {
+            TransformPositionBuffer(frame.vertices, node.meshVertexStart, node.meshVertexCount, transformPoint);
+            TransformDirectionBuffer(frame.normals, node.meshVertexStart, node.meshVertexCount, transformDirection);
+        }
+    }
+
+    RecomputeMeshNodeBounds(tab, node);
+}
+
+template <typename PointTransform, typename DirectionTransform>
+void TransformBoneData(ModelTab& tab,
+                       int rootNode,
+                       PointTransform transformPoint,
+                       DirectionTransform transformDirection,
+                       TransformTool tool,
+                       TransformAxis axis,
+                       float amount)
+{
+    auto transformBoneSegment = [&](BoneSegment& bone)
+    {
+        if (IsNodeInTransformScope(tab.loaded, bone.startNode, rootNode))
+        {
+            bone.start = transformPoint(bone.start);
+        }
+        if (IsNodeInTransformScope(tab.loaded, bone.endNode, rootNode))
+        {
+            bone.end = transformPoint(bone.end);
+        }
+    };
+    auto transformBonePose = [&](BonePose& pose)
+    {
+        if (!IsNodeInTransformScope(tab.loaded, pose.node, rootNode)) return;
+        pose.position = transformPoint(pose.position);
+        pose.axisX = NormalizeOrFallback(transformDirection(pose.axisX), pose.axisX);
+        pose.axisY = NormalizeOrFallback(transformDirection(pose.axisY), pose.axisY);
+        pose.axisZ = NormalizeOrFallback(transformDirection(pose.axisZ), pose.axisZ);
+        ApplyTransformValueUpdates(pose, tool, axis, amount);
+    };
+
+    for (BoneSegment& bone : tab.loaded.bones) transformBoneSegment(bone);
+    for (BoneSegment& bone : tab.visibleBones) transformBoneSegment(bone);
+    for (BonePose& pose : tab.loaded.bonePoses) transformBonePose(pose);
+    for (BonePose& pose : tab.visibleBonePoses) transformBonePose(pose);
+    for (AnimationClip& clip : tab.loaded.animations)
+    {
+        for (BoneFrame& frame : clip.frames)
+        {
+            for (BoneSegment& bone : frame.bones) transformBoneSegment(bone);
+            for (BonePose& pose : frame.poses) transformBonePose(pose);
+        }
+    }
+}
+
+void InvalidateDisplayedAnimationCaches(ModelTab& tab)
+{
+    tab.appliedClipIndex = -2;
+    tab.appliedMeshFrameIndex = -1;
+    tab.appliedNextMeshFrameIndex = -1;
+    tab.appliedMeshFrameAlpha = -1.0f;
+    tab.appliedBoneClipIndex = -2;
+    tab.appliedBoneFrameIndex = -1;
+    tab.appliedNextBoneFrameIndex = -1;
+    tab.appliedBoneFrameAlpha = -1.0f;
+}
+
+bool HasCpuSkinnedMesh(const LoadedFbxModel& loaded)
+{
+    return loaded.hasMesh &&
+           !loaded.skinnedVertices.empty() &&
+           loaded.skinnedVertices.size() == loaded.bindVertices.size() / 3 &&
+           loaded.bindVertices.size() == loaded.bindNormals.size();
+}
+
+BoneFrame BuildBindBoneFrame(const LoadedFbxModel& loaded)
+{
+    BoneFrame frame;
+    frame.bones = loaded.bones;
+    frame.poses = loaded.bonePoses;
+    return frame;
+}
+
+void RecomputeAllMeshNodeBounds(ModelTab& tab)
+{
+    for (SceneNode& node : tab.loaded.nodes)
+    {
+        if (node.type == SceneNodeType::Mesh)
+        {
+            RecomputeMeshNodeBounds(tab, node);
+        }
+    }
+    RecomputeSceneBounds(tab);
+}
+
+bool RebuildCurrentSkinnedMeshFromBones(ModelTab& tab)
+{
+    if (!HasCpuSkinnedMesh(tab.loaded) || tab.loaded.bonePoses.empty()) return false;
+
+    const MeshFrame meshFrame = BuildSkinnedMeshFrame(tab.loaded, BuildBindBoneFrame(tab.loaded));
+    if (meshFrame.vertices.size() != tab.loaded.bindVertices.size() ||
+        meshFrame.normals.size() != tab.loaded.bindNormals.size())
+    {
+        return false;
+    }
+
+    tab.currentVertices = meshFrame.vertices;
+    tab.currentNormals = meshFrame.normals;
+    tab.manualSkinnedMeshPose = true;
+    RecomputeAllMeshNodeBounds(tab);
+    InvalidateDisplayedAnimationCaches(tab);
+    RefreshDisplayedMesh(tab);
+    return true;
+}
+
+bool RebuildSkinnedAnimationMeshFrames(ModelTab& tab)
+{
+    if (!HasCpuSkinnedMesh(tab.loaded)) return false;
+
+    bool rebuilt = false;
+    for (AnimationClip& clip : tab.loaded.animations)
+    {
+        if (clip.frames.empty()) continue;
+        clip.meshFrames.clear();
+        clip.meshFrames.reserve(clip.frames.size());
+        for (const BoneFrame& frame : clip.frames)
+        {
+            clip.meshFrames.push_back(BuildSkinnedMeshFrame(tab.loaded, frame));
+        }
+        rebuilt = true;
+    }
+    if (rebuilt)
+    {
+        InvalidateDisplayedAnimationCaches(tab);
+    }
+    return rebuilt;
+}
+
+template <typename PointTransform, typename DirectionTransform>
+void ApplyTransformToSelectedSubtree(ModelTab& tab,
+                                     PointTransform transformPoint,
+                                     DirectionTransform transformDirection,
+                                     TransformTool tool,
+                                     TransformAxis axis,
+                                     float amount)
+{
+    if (tab.selectedNode < 0 || tab.selectedNode >= static_cast<int>(tab.loaded.nodes.size())) return;
+    const int rootNode = tab.selectedNode;
+    const bool rootIsBone = tab.loaded.nodes[static_cast<size_t>(rootNode)].type == SceneNodeType::Bone;
+    const bool canCpuSkin = HasCpuSkinnedMesh(tab.loaded);
+
+    for (int nodeIndex = 0; nodeIndex < static_cast<int>(tab.loaded.nodes.size()); ++nodeIndex)
+    {
+        if (!IsNodeInTransformScope(tab.loaded, nodeIndex, rootNode)) continue;
+        SceneNode& node = tab.loaded.nodes[static_cast<size_t>(nodeIndex)];
+        node.position = transformPoint(node.position);
+        node.axisX = NormalizeOrFallback(transformDirection(node.axisX), node.axisX);
+        node.axisY = NormalizeOrFallback(transformDirection(node.axisY), node.axisY);
+        node.axisZ = NormalizeOrFallback(transformDirection(node.axisZ), node.axisZ);
+        ApplyTransformValueUpdates(node, tool, axis, amount);
+
+        const bool skinnedMeshHandledByBones = rootIsBone && canCpuSkin && node.type == SceneNodeType::Mesh && node.meshHasSkin;
+        if (node.type == SceneNodeType::Mesh && !skinnedMeshHandledByBones)
+        {
+            TransformMeshNodeRange(tab, node, transformPoint, transformDirection);
+        }
+    }
+
+    TransformBoneData(tab, rootNode, transformPoint, transformDirection, tool, axis, amount);
+    if (rootIsBone && canCpuSkin)
+    {
+        RebuildSkinnedAnimationMeshFrames(tab);
+        if (!RebuildCurrentSkinnedMeshFromBones(tab))
+        {
+            RecomputeSceneBounds(tab);
+            RefreshDisplayedMesh(tab);
+        }
+    }
+    else
+    {
+        RecomputeSceneBounds(tab);
+        RefreshDisplayedMesh(tab);
+    }
+}
+
+void MoveSelectedSubtree(ModelTab& tab, Vector3 delta)
+{
+    auto transformPoint = [&](Vector3 point) { return Vector3Add(point, delta); };
+    auto transformDirection = [](Vector3 direction) { return direction; };
+    ApplyTransformToSelectedSubtree(tab, transformPoint, transformDirection, TransformTool::Move, TransformAxis::None, 0.0f);
+}
+
+void RotateSelectedSubtree(ModelTab& tab, Vector3 pivot, TransformAxis axis, Vector3 axisVector, float radians)
+{
+    axisVector = NormalizeOrFallback(axisVector, GetTransformAxisVector(axis));
+    auto transformPoint = [&](Vector3 point) { return RotatePointAroundAxis(point, pivot, axisVector, radians); };
+    auto transformDirection = [&](Vector3 direction) { return NormalizeOrFallback(Vector3RotateByAxisAngle(direction, axisVector, radians), direction); };
+    ApplyTransformToSelectedSubtree(tab, transformPoint, transformDirection, TransformTool::Rotate, axis, radians);
+}
+
+void RotateSelectedSubtreeArcball(ModelTab& tab, Vector3 pivot, Vector3 rightAxis, float rightRadians, Vector3 upAxis, float upRadians)
+{
+    rightAxis = NormalizeOrFallback(rightAxis, Vector3{ 1.0f, 0.0f, 0.0f });
+    upAxis = NormalizeOrFallback(upAxis, Vector3{ 0.0f, 1.0f, 0.0f });
+    auto rotatePoint = [&](Vector3 point)
+    {
+        point = RotatePointAroundAxis(point, pivot, rightAxis, rightRadians);
+        return RotatePointAroundAxis(point, pivot, upAxis, upRadians);
+    };
+    auto rotateDirection = [&](Vector3 direction)
+    {
+        Vector3 rotated = Vector3RotateByAxisAngle(direction, rightAxis, rightRadians);
+        rotated = Vector3RotateByAxisAngle(rotated, upAxis, upRadians);
+        return NormalizeOrFallback(rotated, direction);
+    };
+    ApplyTransformToSelectedSubtree(tab, rotatePoint, rotateDirection, TransformTool::Rotate, TransformAxis::Center, 0.0f);
+}
+
+void ScaleSelectedSubtree(ModelTab& tab, Vector3 pivot, TransformAxis axis, Vector3 axisVector, float factor)
+{
+    factor = ClampFloat(factor, 0.05f, 20.0f);
+    axisVector = NormalizeOrFallback(axisVector, GetTransformAxisVector(axis));
+    auto transformPoint = [&](Vector3 point) { return ScalePointAlongAxis(point, pivot, axisVector, factor); };
+    auto transformDirection = [&](Vector3 direction) { return ScaleNormalAlongAxis(direction, axisVector, factor); };
+    ApplyTransformToSelectedSubtree(tab, transformPoint, transformDirection, TransformTool::Scale, axis, factor);
+}
+
+void ScaleSelectedSubtreeUniform(ModelTab& tab, Vector3 pivot, float factor)
+{
+    factor = ClampFloat(factor, 0.05f, 20.0f);
+    auto transformPoint = [&](Vector3 point) { return ScalePointUniform(point, pivot, factor); };
+    auto transformDirection = [](Vector3 direction) { return direction; };
+    ApplyTransformToSelectedSubtree(tab, transformPoint, transformDirection, TransformTool::Scale, TransformAxis::Center, factor);
+}
+
 void DrawMeshNodeWireframe(const ModelTab& tab, const SceneNode& node, Color color)
 {
     const float* vertices = GetCurrentMeshVertices(tab);
@@ -2659,6 +3284,428 @@ void DrawSelectedNodeOverlay(const ModelTab& tab, const VisibilityState& visibil
         if (!visibility.empties) return;
         const float length = ClampFloat(GetBoundsDiagonal(tab.loaded.bounds) * 0.055f, 0.08f, 0.8f);
         DrawEmptyCross(node, length, kSelectionColor);
+    }
+}
+
+const char* GetTransformToolName(TransformTool tool)
+{
+    switch (tool)
+    {
+    case TransformTool::Select: return "Select";
+    case TransformTool::Move: return "Move";
+    case TransformTool::Rotate: return "Rotate";
+    case TransformTool::Scale: return "Scale";
+    }
+    return "Select";
+}
+
+const char* GetTransformToolHotkey(TransformTool tool)
+{
+    switch (tool)
+    {
+    case TransformTool::Select: return "Q";
+    case TransformTool::Move: return "W";
+    case TransformTool::Rotate: return "E";
+    case TransformTool::Scale: return "R";
+    }
+    return "";
+}
+
+const char* GetGizmoOrientationName(GizmoOrientation orientation)
+{
+    switch (orientation)
+    {
+    case GizmoOrientation::Global: return "Global";
+    case GizmoOrientation::Local: return "Local";
+    }
+    return "Global";
+}
+
+float GetTransformGizmoLength(const ModelTab& tab)
+{
+    return ClampFloat(GetBoundsDiagonal(tab.loaded.bounds) * 0.18f, 0.15f, 2.0f);
+}
+
+bool GetGizmoPivot(const ModelTab& tab, Vector3& pivot)
+{
+    if (tab.selectedNode < 0 || tab.selectedNode >= static_cast<int>(tab.loaded.nodes.size())) return false;
+    if (!IsViewportNodeVisible(tab, tab.selectedNode)) return false;
+    return GetSelectedNodePosition(tab, pivot);
+}
+
+float GetViewPlaneWorldPerPixel(const ModelTab& tab, Vector3 pivot)
+{
+    const Camera3D& camera = tab.orbit.camera;
+    const float screenHeight = std::max(1.0f, static_cast<float>(GetScreenHeight()));
+    if (camera.projection == CAMERA_ORTHOGRAPHIC)
+    {
+        return std::max(0.000001f, camera.fovy / screenHeight);
+    }
+
+    const Vector3 forward = GetCameraForward(camera);
+    const float depth = std::max(0.0001f, Vector3DotProduct(Vector3Subtract(pivot, camera.position), forward));
+    return std::max(0.000001f, (2.0f * depth * std::tan(camera.fovy * DEG2RAD * 0.5f)) / screenHeight);
+}
+
+float GetAxisWorldPerPixel(const ModelTab& tab, Vector3 pivot, Vector3 axisVector)
+{
+    const float length = GetTransformGizmoLength(tab);
+    const Vector2 start = GetWorldToScreen(pivot, tab.orbit.camera);
+    const Vector2 end = GetWorldToScreen(Vector3Add(pivot, Vector3Scale(axisVector, length)), tab.orbit.camera);
+    const float screenLength = Vector2Distance(start, end);
+    if (screenLength <= 0.001f) return GetViewPlaneWorldPerPixel(tab, pivot);
+    return length / screenLength;
+}
+
+float GetScreenAngleAroundPivot(Vector2 mouse, Vector2 pivotScreen)
+{
+    return std::atan2(mouse.y - pivotScreen.y, mouse.x - pivotScreen.x);
+}
+
+float WrapAngleDelta(float radians)
+{
+    while (radians > PI) radians -= PI * 2.0f;
+    while (radians < -PI) radians += PI * 2.0f;
+    return radians;
+}
+
+Vector2 GetAxisScreenDirection(const ModelTab& tab, Vector3 pivot, TransformAxis axis, GizmoOrientation orientation)
+{
+    const Vector3 axisVector = GetTransformAxisVector(tab, axis, orientation);
+    const float length = GetTransformGizmoLength(tab);
+    const Vector2 start = GetWorldToScreen(pivot, tab.orbit.camera);
+    const Vector2 end = GetWorldToScreen(Vector3Add(pivot, Vector3Scale(axisVector, length)), tab.orbit.camera);
+    Vector2 direction = Vector2Subtract(end, start);
+    const float lengthSq = Vector2DotProduct(direction, direction);
+    if (lengthSq <= 0.001f) return Vector2{ 1.0f, 0.0f };
+    return Vector2Scale(direction, 1.0f / std::sqrt(lengthSq));
+}
+
+float DistanceMouseToGizmoRing(ModelTab& tab, Vector2 mouse, Vector3 pivot, TransformAxis axis, GizmoOrientation orientation)
+{
+    const float radius = GetTransformGizmoLength(tab) * 0.82f;
+    Vector3 axisA{};
+    Vector3 axisB{};
+    if (!GetTransformPlaneBasis(tab, axis, orientation, axisA, axisB)) return std::numeric_limits<float>::max();
+
+    float best = std::numeric_limits<float>::max();
+    Vector2 previous{};
+    constexpr int kSegments = 64;
+    for (int i = 0; i <= kSegments; ++i)
+    {
+        const float angle = (static_cast<float>(i) / static_cast<float>(kSegments)) * PI * 2.0f;
+        const Vector3 point = Vector3Add(pivot,
+                                         Vector3Add(Vector3Scale(axisA, std::cos(angle) * radius),
+                                                    Vector3Scale(axisB, std::sin(angle) * radius)));
+        const Vector2 screen = GetWorldToScreen(point, tab.orbit.camera);
+        if (i > 0)
+        {
+            best = std::min(best, DistancePointToScreenSegment(mouse, previous, screen));
+        }
+        previous = screen;
+    }
+    return best;
+}
+
+TransformAxis PickTransformGizmoAxis(ModelTab& tab, TransformTool tool, GizmoOrientation orientation, Vector2 mouse)
+{
+    Vector3 pivot{};
+    if (tool == TransformTool::Select || !GetGizmoPivot(tab, pivot)) return TransformAxis::None;
+
+    const Vector2 pivotScreen = GetWorldToScreen(pivot, tab.orbit.camera);
+    if (Vector2Distance(mouse, pivotScreen) <= 15.0f)
+    {
+        return TransformAxis::Center;
+    }
+
+    TransformAxis bestAxis = TransformAxis::None;
+    float bestDistance = 12.0f;
+    const float length = GetTransformGizmoLength(tab);
+    for (TransformAxis axis : { TransformAxis::X, TransformAxis::Y, TransformAxis::Z })
+    {
+        float distance = std::numeric_limits<float>::max();
+        if (tool == TransformTool::Rotate)
+        {
+            distance = DistanceMouseToGizmoRing(tab, mouse, pivot, axis, orientation);
+        }
+        else
+        {
+            const Vector3 axisVector = GetTransformAxisVector(tab, axis, orientation);
+            const Vector2 start = GetWorldToScreen(pivot, tab.orbit.camera);
+            const Vector2 end = GetWorldToScreen(Vector3Add(pivot, Vector3Scale(axisVector, length)), tab.orbit.camera);
+            distance = DistancePointToScreenSegment(mouse, start, end);
+            distance = std::min(distance, Vector2Distance(mouse, end));
+        }
+        if (distance < bestDistance)
+        {
+            bestDistance = distance;
+            bestAxis = axis;
+        }
+    }
+    return bestAxis;
+}
+
+bool UpdateTransformGizmoInput(ModelTab* active,
+                               TransformGizmoState& state,
+                               TransformTool tool,
+                               GizmoOrientation orientation,
+                               bool mouseInViewport,
+                               std::string& notice,
+                               std::string& error)
+{
+    if (!active || !active->loaded.valid || tool == TransformTool::Select)
+    {
+        state = TransformGizmoState{};
+        return false;
+    }
+
+    const Vector2 mouse = GetMousePosition();
+    if (state.dragging)
+    {
+        if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT))
+        {
+            state = TransformGizmoState{};
+            return true;
+        }
+
+        Vector3 pivot{};
+        if (!GetGizmoPivot(*active, pivot))
+        {
+            state = TransformGizmoState{};
+            return false;
+        }
+
+        const Vector2 delta = Vector2Subtract(mouse, state.lastMouse);
+        state.lastMouse = mouse;
+        if (state.axis == TransformAxis::Center)
+        {
+            if (tool == TransformTool::Move)
+            {
+                const float worldPerPixel = GetViewPlaneWorldPerPixel(*active, pivot);
+                const Vector3 right = GetCameraRight(active->orbit.camera);
+                const Vector3 up = GetCameraUpVector(active->orbit.camera);
+                Vector3 moveDelta = Vector3Scale(right, delta.x * worldPerPixel);
+                moveDelta = Vector3Add(moveDelta, Vector3Scale(up, -delta.y * worldPerPixel));
+                if (Vector3Length(moveDelta) > 0.000001f)
+                {
+                    MoveSelectedSubtree(*active, moveDelta);
+                }
+            }
+            else if (tool == TransformTool::Rotate)
+            {
+                const Vector3 right = GetCameraRight(active->orbit.camera);
+                const Vector3 up = GetCameraUpVector(active->orbit.camera);
+                const float rightRadians = -delta.y * 0.006f;
+                const float upRadians = delta.x * 0.006f;
+                if (std::fabs(rightRadians) > 0.000001f || std::fabs(upRadians) > 0.000001f)
+                {
+                    RotateSelectedSubtreeArcball(*active, pivot, right, rightRadians, up, upRadians);
+                }
+            }
+            else if (tool == TransformTool::Scale)
+            {
+                const float scalarPixels = delta.x - delta.y;
+                if (std::fabs(scalarPixels) > 0.001f)
+                {
+                    ScaleSelectedSubtreeUniform(*active, pivot, std::exp(scalarPixels * 0.006f));
+                }
+            }
+        }
+        else
+        {
+            const Vector3 axisVector = GetTransformAxisVector(*active, state.axis, orientation);
+            if (tool == TransformTool::Rotate)
+            {
+                const Vector2 pivotScreen = GetWorldToScreen(pivot, active->orbit.camera);
+                const float currentAngle = GetScreenAngleAroundPivot(mouse, pivotScreen);
+                float radians = WrapAngleDelta(currentAngle - state.lastAngle);
+                state.lastAngle = currentAngle;
+                const float facing = Vector3DotProduct(axisVector, GetCameraForward(active->orbit.camera));
+                radians *= facing < 0.0f ? -1.0f : 1.0f;
+                if (std::fabs(radians) > 0.000001f)
+                {
+                    RotateSelectedSubtree(*active, pivot, state.axis, axisVector, radians);
+                }
+            }
+            else
+            {
+                const Vector2 axisDirection = GetAxisScreenDirection(*active, pivot, state.axis, orientation);
+                const float scalarPixels = Vector2DotProduct(delta, axisDirection);
+                if (std::fabs(scalarPixels) > 0.001f)
+                {
+                    if (tool == TransformTool::Move)
+                    {
+                        MoveSelectedSubtree(*active, Vector3Scale(axisVector, scalarPixels * GetAxisWorldPerPixel(*active, pivot, axisVector)));
+                    }
+                    else if (tool == TransformTool::Scale)
+                    {
+                        ScaleSelectedSubtree(*active, pivot, state.axis, axisVector, std::exp(scalarPixels * 0.006f));
+                    }
+                }
+            }
+        }
+        return true;
+    }
+
+    if (!mouseInViewport || !IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) return false;
+    const TransformAxis axis = PickTransformGizmoAxis(*active, tool, orientation, mouse);
+    if (axis == TransformAxis::None) return false;
+
+    PushUndoSnapshot(*active);
+    state.dragging = true;
+    state.axis = axis;
+    state.nodeIndex = active->selectedNode;
+    state.lastMouse = mouse;
+    Vector3 pivot{};
+    if (GetGizmoPivot(*active, pivot))
+    {
+        state.lastAngle = GetScreenAngleAroundPivot(mouse, GetWorldToScreen(pivot, active->orbit.camera));
+    }
+    notice = std::string(GetTransformToolName(tool)) + " gizmo.";
+    error.clear();
+    return true;
+}
+
+void DrawMoveGizmoArrow(const ModelTab& tab, Vector3 start, Vector3 end, Vector3 axisVector, float length, Color color)
+{
+    DrawLine3D(start, end, color);
+
+    const Vector3 cameraForward = GetCameraForward(tab.orbit.camera);
+    Vector3 side = Vector3CrossProduct(axisVector, cameraForward);
+    if (Vector3Length(side) < 0.0001f)
+    {
+        side = ChoosePerpendicular(axisVector);
+    }
+    side = NormalizeOrFallback(side, Vector3{ 1.0f, 0.0f, 0.0f });
+
+    const float headLength = length * 0.12f;
+    const float headWidth = length * 0.05f;
+    const Vector3 base = Vector3Subtract(end, Vector3Scale(axisVector, headLength));
+    DrawLine3D(end, Vector3Add(base, Vector3Scale(side, headWidth)), color);
+    DrawLine3D(end, Vector3Subtract(base, Vector3Scale(side, headWidth)), color);
+
+    const Vector3 upWing = NormalizeOrFallback(Vector3CrossProduct(axisVector, side), ChoosePerpendicular(axisVector));
+    DrawLine3D(end, Vector3Add(base, Vector3Scale(upWing, headWidth)), color);
+    DrawLine3D(end, Vector3Subtract(base, Vector3Scale(upWing, headWidth)), color);
+}
+
+void DrawTransformGizmo(const ModelTab& tab, TransformTool tool, const TransformGizmoState& state, GizmoOrientation orientation)
+{
+    if (tool == TransformTool::Select) return;
+
+    Vector3 pivot{};
+    if (!GetGizmoPivot(tab, pivot)) return;
+
+    const float length = GetTransformGizmoLength(tab);
+    const float handleRadius = ClampFloat(length * 0.045f, 0.012f, 0.08f);
+    rlDrawRenderBatchActive();
+    rlDisableDepthTest();
+    rlDisableDepthMask();
+    rlSetLineWidth(4.5f);
+
+    const bool centerActive = state.dragging && state.axis == TransformAxis::Center;
+    DrawSphere(pivot, handleRadius * 1.75f, centerActive ? Color{ 255, 235, 128, 255 } : Color{ 225, 232, 238, 235 });
+
+    for (TransformAxis axis : { TransformAxis::X, TransformAxis::Y, TransformAxis::Z })
+    {
+        const bool active = state.dragging && state.axis == axis;
+        const Color color = GetTransformAxisColor(axis, active);
+        const Vector3 axisVector = GetTransformAxisVector(tab, axis, orientation);
+        if (tool == TransformTool::Rotate)
+        {
+            const float radius = length * 0.82f;
+            Vector3 axisA{};
+            Vector3 axisB{};
+            if (GetTransformPlaneBasis(tab, axis, orientation, axisA, axisB))
+            {
+                DrawJointCircle(pivot, axisA, axisB, radius, color);
+            }
+        }
+        else
+        {
+            const Vector3 end = Vector3Add(pivot, Vector3Scale(axisVector, length));
+            if (tool == TransformTool::Move)
+            {
+                DrawMoveGizmoArrow(tab, pivot, end, axisVector, length, color);
+            }
+            else if (tool == TransformTool::Scale)
+            {
+                DrawLine3D(pivot, end, color);
+                DrawCubeV(end, Vector3{ handleRadius * 2.0f, handleRadius * 2.0f, handleRadius * 2.0f }, color);
+            }
+        }
+    }
+    rlSetLineWidth(1.0f);
+    rlDrawRenderBatchActive();
+    rlEnableDepthMask();
+    rlEnableDepthTest();
+}
+
+Rectangle GetTransformToolbarButtonRect(float hierarchyBlockW, int index)
+{
+    return Rectangle{ hierarchyBlockW + 10.0f, 104.0f + static_cast<float>(index) * 38.0f, 112.0f, 32.0f };
+}
+
+Rectangle GetGizmoOrientationButtonRect(float hierarchyBlockW, int index)
+{
+    return Rectangle{ hierarchyBlockW + 10.0f + static_cast<float>(index) * 57.0f, 266.0f, 55.0f, 28.0f };
+}
+
+bool UpdateTransformToolbarInput(TransformTool& tool, GizmoOrientation& orientation, float hierarchyBlockW)
+{
+    const Vector2 mouse = GetMousePosition();
+    const TransformTool tools[] = { TransformTool::Select, TransformTool::Move, TransformTool::Rotate, TransformTool::Scale };
+    for (int i = 0; i < 4; ++i)
+    {
+        if (CheckCollisionPointRec(mouse, GetTransformToolbarButtonRect(hierarchyBlockW, i)))
+        {
+            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+            {
+                tool = tools[i];
+            }
+            return true;
+        }
+    }
+
+    const GizmoOrientation orientations[] = { GizmoOrientation::Global, GizmoOrientation::Local };
+    for (int i = 0; i < 2; ++i)
+    {
+        if (CheckCollisionPointRec(mouse, GetGizmoOrientationButtonRect(hierarchyBlockW, i)))
+        {
+            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+            {
+                orientation = orientations[i];
+            }
+            return true;
+        }
+    }
+    return false;
+}
+
+void DrawTransformToolbar(Font font, TransformTool tool, GizmoOrientation orientation, float hierarchyBlockW)
+{
+    const TransformTool tools[] = { TransformTool::Select, TransformTool::Move, TransformTool::Rotate, TransformTool::Scale };
+    for (int i = 0; i < 4; ++i)
+    {
+        const Rectangle bounds = GetTransformToolbarButtonRect(hierarchyBlockW, i);
+        const bool selected = tool == tools[i];
+        const bool hovered = CheckCollisionPointRec(GetMousePosition(), bounds);
+        DrawRectangleRec(bounds, selected ? Color{ 58, 78, 98, 245 } : hovered ? Color{ 42, 48, 55, 245 } : Color{ 24, 27, 31, 232 });
+        DrawRectangleLinesEx(bounds, 1.0f, selected ? Color{ 128, 188, 235, 255 } : Color{ 78, 88, 98, 255 });
+        DrawUiText(font, GetTransformToolHotkey(tools[i]), bounds.x + 8.0f, bounds.y + 4.0f, 16.0f, RAYWHITE);
+        DrawUiText(font, GetTransformToolName(tools[i]), bounds.x + 48.0f, bounds.y + 7.0f, 13.0f, selected ? Color{ 205, 224, 238, 255 } : Color{ 154, 166, 178, 255 });
+    }
+
+    DrawUiText(font, "Space", hierarchyBlockW + 12.0f, 242.0f, 13.0f, Color{ 154, 166, 178, 255 });
+    const GizmoOrientation orientations[] = { GizmoOrientation::Global, GizmoOrientation::Local };
+    for (int i = 0; i < 2; ++i)
+    {
+        const Rectangle bounds = GetGizmoOrientationButtonRect(hierarchyBlockW, i);
+        const bool selected = orientation == orientations[i];
+        const bool hovered = CheckCollisionPointRec(GetMousePosition(), bounds);
+        DrawRectangleRec(bounds, selected ? Color{ 58, 78, 98, 245 } : hovered ? Color{ 42, 48, 55, 245 } : Color{ 24, 27, 31, 232 });
+        DrawRectangleLinesEx(bounds, 1.0f, selected ? Color{ 128, 188, 235, 255 } : Color{ 78, 88, 98, 255 });
+        DrawUiText(font, GetGizmoOrientationName(orientations[i]), bounds.x + 8.0f, bounds.y + 7.0f, 13.0f, selected ? Color{ 205, 224, 238, 255 } : Color{ 154, 166, 178, 255 });
     }
 }
 
@@ -5497,7 +6544,7 @@ void DrawMenuBar(Font font,
         {
             visibility.boneRotations = !visibility.boneRotations;
         }
-        if (DrawMenuItem(font, Rectangle{ 124.0f, 277.0f, 230.0f, 30.0f }, visibility.empties ? "[x] Empties        E" : "[ ] Empties        E"))
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 277.0f, 230.0f, 30.0f }, visibility.empties ? "[x] Empties" : "[ ] Empties"))
         {
             visibility.empties = !visibility.empties;
         }
@@ -5520,8 +6567,8 @@ void DrawMenuBar(Font font,
         }
 
         DrawUiText(font, "HOTKEYS", 198.0f, 110.0f, 16.0f, Color{ 165, 182, 196, 255 });
-        DrawUiText(font, "Ctrl+O open FBX    V view mode    T textures", 198.0f, 136.0f, 15.0f, Color{ 205, 213, 220, 255 });
-        DrawUiText(font, "Ctrl+Z undo    Ctrl+Y redo    C channels", 198.0f, 162.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        DrawUiText(font, "Q/W/E/R tools    Ctrl+O open FBX    V view mode", 198.0f, 136.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        DrawUiText(font, "Ctrl+Z undo    Ctrl+Y redo    T textures    C channels", 198.0f, 162.0f, 15.0f, Color{ 205, 213, 220, 255 });
         DrawUiText(font, "Blender: MMB orbit, Alt snap, Shift+MMB pan, Wheel zoom", 198.0f, 188.0f, 15.0f, Color{ 205, 213, 220, 255 });
         DrawUiText(font, "Maya: Alt+LMB orbit, Shift snap, Alt+MMB pan, Alt+RMB/Wheel zoom", 198.0f, 214.0f, 15.0f, Color{ 205, 213, 220, 255 });
         DrawUiText(font, "Esc deselects    Ctrl+Q quits    Tabs: X/middle closes", 198.0f, 240.0f, 15.0f, Color{ 205, 213, 220, 255 });
@@ -5912,6 +6959,9 @@ int main(int argc, char** argv)
     std::string compareResultText;
     TextureClipboard textureClipboard;
     RenameEditor renameEditor;
+    TransformTool transformTool = TransformTool::Select;
+    GizmoOrientation gizmoOrientation = GizmoOrientation::Global;
+    TransformGizmoState transformGizmo;
 
     auto openPathInNewTab = [&](const std::string& path)
     {
@@ -6004,6 +7054,18 @@ int main(int argc, char** argv)
         const float hierarchyBlockW = GetHierarchyPanelBlockWidth(hierarchyPanel);
         const bool mouseInViewport = mouse.x > hierarchyBlockW && mouse.y >= 61.0f && mouse.y < static_cast<float>(GetScreenHeight()) - gBottomPanelReservedHeight && openMenu == OpenMenu::None && !hierarchyPanel.resizing;
 
+        const bool toolbarConsumedMouse = !renameEditor.active && UpdateTransformToolbarInput(transformTool, gizmoOrientation, hierarchyBlockW);
+        if (!renameEditor.active && !controlDown && !altDown)
+        {
+            if (IsKeyPressed(KEY_Q)) transformTool = TransformTool::Select;
+            if (IsKeyPressed(KEY_W)) transformTool = TransformTool::Move;
+            if (IsKeyPressed(KEY_E)) transformTool = TransformTool::Rotate;
+            if (IsKeyPressed(KEY_R)) transformTool = TransformTool::Scale;
+        }
+        const bool transformConsumedMouse = !toolbarConsumedMouse &&
+                                            !renameEditor.active &&
+                                            UpdateTransformGizmoInput(active, transformGizmo, transformTool, gizmoOrientation, mouseInViewport, notice, error);
+
         if (!renameEditor.active && active && altDown && IsKeyPressed(KEY_Q))
         {
             ToggleSelectedNodeIsolation(*active, notice, error);
@@ -6058,12 +7120,7 @@ int main(int argc, char** argv)
         {
             visibility.boneRotations = !visibility.boneRotations;
         }
-        if (!renameEditor.active && IsKeyPressed(KEY_E))
-        {
-            visibility.empties = !visibility.empties;
-        }
-
-        if (active && mouseInViewport && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+        if (active && mouseInViewport && !toolbarConsumedMouse && !transformConsumedMouse && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
         {
             if (SelectNodeFromViewport(*active, mouse, visibility))
             {
@@ -6077,7 +7134,7 @@ int main(int argc, char** argv)
 
         if (active)
         {
-            if (mouseInViewport)
+            if (mouseInViewport && !toolbarConsumedMouse && !transformConsumedMouse)
             {
                 UpdateNavigation(active->orbit, navigation);
             }
@@ -6166,14 +7223,15 @@ int main(int argc, char** argv)
                 }
             }
             DrawSelectedNodeOverlay(*active, visibility);
+            DrawTransformGizmo(*active, transformTool, transformGizmo, gizmoOrientation);
             rlDrawRenderBatchActive();
             rlEnableDepthTest();
         }
         EndMode3D();
 
         char statusText[256] = {};
-        std::snprintf(statusText, sizeof(statusText), "VIEW: %s    MAT: %s    NAV: %s", GetViewModeName(viewMode), GetMaterialPreviewModeName(materialPreviewMode), GetNavigationPresetName(navigation));
-        DrawUiText(uiFont, statusText, static_cast<float>(GetScreenWidth() - 360), 8, 16, Color{ 165, 220, 255, 255 });
+        std::snprintf(statusText, sizeof(statusText), "VIEW: %s    MAT: %s    TOOL: %s    SPACE: %s    NAV: %s", GetViewModeName(viewMode), GetMaterialPreviewModeName(materialPreviewMode), GetTransformToolName(transformTool), GetGizmoOrientationName(gizmoOrientation), GetNavigationPresetName(navigation));
+        DrawUiText(uiFont, statusText, static_cast<float>(GetScreenWidth() - 660), 8, 16, Color{ 165, 220, 255, 255 });
 
         if (active)
         {
@@ -6225,6 +7283,7 @@ int main(int argc, char** argv)
         gBottomPanelReservedHeight = animationPanelCollapsed ? kTimelineCollapsedHeight : kTimelinePanelHeight;
 
         DrawHierarchyPanel(uiFont, active, hierarchyPanel, renameEditor, droppedPaths, droppedTextureHandled, textureClipboard, notice, error);
+        DrawTransformToolbar(uiFont, transformTool, gizmoOrientation, hierarchyBlockW);
         DrawOrientationGizmo(uiFont, active ? active->orbit.camera : emptyOrbit.camera);
 
         DrawTabs(uiFont, tabs, activeTab);
