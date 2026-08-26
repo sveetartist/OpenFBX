@@ -115,5 +115,9 @@ struct LoadedFbxModel
 };
 
 bool LoadFbxModel(const std::string& path, LoadedFbxModel& outModel, std::string& error);
-bool SaveFbxModelAnimations(const std::string& sourcePath, const std::string& outputPath, const LoadedFbxModel& model, std::string& error);
+bool SaveFbxModelAnimations(const std::string& sourcePath,
+                            const std::string& outputPath,
+                            const LoadedFbxModel& model,
+                            const std::vector<bool>& deletedNodes,
+                            std::string& error);
 void UnloadFbxModel(LoadedFbxModel& model);

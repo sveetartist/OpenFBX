@@ -1091,6 +1091,279 @@ FbxAMatrix MatrixFromSceneNode(const SceneNode& node)
     return MatrixFromPose(pose);
 }
 
+FbxVector4 ToFbxPoint(Vector3 value, double w = 1.0)
+{
+    return FbxVector4(value.x, value.y, value.z, w);
+}
+
+FbxDouble3 ToFbxDouble3(const FbxVector4& value)
+{
+    return FbxDouble3(value[0], value[1], value[2]);
+}
+
+void CollectSceneNodes(FbxNode* node, std::vector<FbxNode*>& nodes)
+{
+    if (!node) return;
+    nodes.push_back(node);
+    for (int i = 0; i < node->GetChildCount(); ++i)
+    {
+        CollectSceneNodes(node->GetChild(i), nodes);
+    }
+}
+
+std::vector<FbxNode*> BuildSceneNodeIndex(FbxScene* scene)
+{
+    std::vector<FbxNode*> nodes;
+    CollectSceneNodes(scene ? scene->GetRootNode() : nullptr, nodes);
+    return nodes;
+}
+
+std::vector<FbxNode*> BuildMappedSceneNodes(const LoadedFbxModel& model, const std::vector<FbxNode*>& sceneNodes)
+{
+    std::vector<FbxNode*> mapped(model.nodes.size(), nullptr);
+    if (sceneNodes.size() == model.nodes.size())
+    {
+        for (size_t i = 0; i < model.nodes.size(); ++i)
+        {
+            mapped[i] = sceneNodes[i];
+        }
+        return mapped;
+    }
+
+    std::vector<bool> used(sceneNodes.size(), false);
+    auto findByName = [&](const std::string& name) -> FbxNode*
+    {
+        if (name.empty()) return nullptr;
+        for (size_t i = 0; i < sceneNodes.size(); ++i)
+        {
+            FbxNode* node = sceneNodes[i];
+            if (used[i] || !node || !node->GetName()) continue;
+            if (name == node->GetName())
+            {
+                used[i] = true;
+                return node;
+            }
+        }
+        return nullptr;
+    };
+
+    for (size_t i = 0; i < model.nodes.size(); ++i)
+    {
+        const SceneNode& node = model.nodes[i];
+        mapped[i] = findByName(node.sourceName);
+        if (!mapped[i])
+        {
+            mapped[i] = findByName(node.name);
+        }
+    }
+
+    return mapped;
+}
+
+bool IsDeletedModelNode(const std::vector<bool>& deletedNodes, int nodeIndex)
+{
+    return nodeIndex >= 0 &&
+           nodeIndex < static_cast<int>(deletedNodes.size()) &&
+           deletedNodes[static_cast<size_t>(nodeIndex)];
+}
+
+bool IsDeletedModelSubtreeRoot(const LoadedFbxModel& model, const std::vector<bool>& deletedNodes, int nodeIndex)
+{
+    if (!IsDeletedModelNode(deletedNodes, nodeIndex)) return false;
+
+    int parent = nodeIndex >= 0 && nodeIndex < static_cast<int>(model.nodes.size()) ? model.nodes[static_cast<size_t>(nodeIndex)].parent : -1;
+    while (parent >= 0)
+    {
+        if (IsDeletedModelNode(deletedNodes, parent)) return false;
+        parent = parent < static_cast<int>(model.nodes.size()) ? model.nodes[static_cast<size_t>(parent)].parent : -1;
+    }
+    return true;
+}
+
+FbxAMatrix GetEditedGlobalMatrix(const LoadedFbxModel& model, int nodeIndex)
+{
+    if (nodeIndex >= 0 && nodeIndex < static_cast<int>(model.nodes.size()))
+    {
+        return MatrixFromSceneNode(model.nodes[static_cast<size_t>(nodeIndex)]);
+    }
+
+    FbxAMatrix identity;
+    identity.SetIdentity();
+    return identity;
+}
+
+void ApplyEditedNodeTransforms(const LoadedFbxModel& model,
+                               const std::vector<bool>& deletedNodes,
+                               const std::vector<FbxNode*>& sceneNodes)
+{
+    const int count = static_cast<int>(model.nodes.size());
+    for (int nodeIndex = 0; nodeIndex < count; ++nodeIndex)
+    {
+        if (IsDeletedModelNode(deletedNodes, nodeIndex)) continue;
+
+        FbxNode* targetNode = sceneNodes[static_cast<size_t>(nodeIndex)];
+        if (!targetNode) continue;
+
+        const SceneNode& sceneNode = model.nodes[static_cast<size_t>(nodeIndex)];
+        FbxAMatrix global = MatrixFromSceneNode(sceneNode);
+        FbxAMatrix local = global;
+        if (sceneNode.parent >= 0 && sceneNode.parent < static_cast<int>(model.nodes.size()))
+        {
+            local = GetEditedGlobalMatrix(model, sceneNode.parent).Inverse() * global;
+        }
+
+        targetNode->LclTranslation.Set(ToFbxDouble3(local.GetT()));
+        targetNode->LclRotation.Set(ToFbxDouble3(local.GetR()));
+        targetNode->LclScaling.Set(ToFbxDouble3(local.GetS()));
+    }
+}
+
+void ApplyEditedMeshGeometry(const LoadedFbxModel& model,
+                             const std::vector<bool>& deletedNodes,
+                             const std::vector<FbxNode*>& sceneNodes)
+{
+    if (model.bindVertices.empty()) return;
+
+    const int nodeCount = static_cast<int>(model.nodes.size());
+    for (int nodeIndex = 0; nodeIndex < nodeCount; ++nodeIndex)
+    {
+        if (IsDeletedModelNode(deletedNodes, nodeIndex)) continue;
+
+        const SceneNode& sceneNode = model.nodes[static_cast<size_t>(nodeIndex)];
+        if (sceneNode.type != SceneNodeType::Mesh ||
+            sceneNode.meshVertexStart < 0 ||
+            sceneNode.meshVertexCount <= 0)
+        {
+            continue;
+        }
+
+        FbxNode* fbxNode = sceneNodes[static_cast<size_t>(nodeIndex)];
+        if (!fbxNode) continue;
+
+        FbxAMatrix editedMeshGlobal = MatrixFromSceneNode(sceneNode) * GetNodeGeometryTransform(fbxNode);
+        FbxAMatrix worldToLocal = editedMeshGlobal.Inverse();
+
+        int globalVertex = sceneNode.meshVertexStart;
+        const int globalVertexEnd = sceneNode.meshVertexStart + sceneNode.meshVertexCount;
+
+        for (int attributeIndex = 0; attributeIndex < fbxNode->GetNodeAttributeCount(); ++attributeIndex)
+        {
+            FbxNodeAttribute* attribute = fbxNode->GetNodeAttributeByIndex(attributeIndex);
+            if (!attribute || attribute->GetAttributeType() != FbxNodeAttribute::eMesh) continue;
+
+            FbxMesh* mesh = static_cast<FbxMesh*>(attribute);
+            const int controlPointCount = mesh->GetControlPointsCount();
+            if (controlPointCount <= 0) continue;
+
+            std::vector<FbxVector4> accumulated(static_cast<size_t>(controlPointCount), FbxVector4(0.0, 0.0, 0.0, 0.0));
+            std::vector<int> counts(static_cast<size_t>(controlPointCount), 0);
+
+            const int polygonCount = mesh->GetPolygonCount();
+            for (int polygon = 0; polygon < polygonCount; ++polygon)
+            {
+                const int polygonSize = mesh->GetPolygonSize(polygon);
+                for (int vertex = 0; vertex < polygonSize && globalVertex < globalVertexEnd; ++vertex, ++globalVertex)
+                {
+                    const int controlPoint = mesh->GetPolygonVertex(polygon, vertex);
+                    if (controlPoint < 0 || controlPoint >= controlPointCount) continue;
+
+                    const size_t base = static_cast<size_t>(globalVertex) * 3;
+                    if (base + 2 >= model.bindVertices.size()) continue;
+
+                    const Vector3 editedWorld{
+                        model.bindVertices[base],
+                        model.bindVertices[base + 1],
+                        model.bindVertices[base + 2]
+                    };
+                    const FbxVector4 editedLocal = worldToLocal.MultT(ToFbxPoint(editedWorld));
+                    FbxVector4& sum = accumulated[static_cast<size_t>(controlPoint)];
+                    sum[0] += editedLocal[0];
+                    sum[1] += editedLocal[1];
+                    sum[2] += editedLocal[2];
+                    ++counts[static_cast<size_t>(controlPoint)];
+                }
+            }
+
+            for (int controlPoint = 0; controlPoint < controlPointCount; ++controlPoint)
+            {
+                const int count = counts[static_cast<size_t>(controlPoint)];
+                if (count <= 0) continue;
+
+                FbxVector4 value = accumulated[static_cast<size_t>(controlPoint)];
+                value[0] /= static_cast<double>(count);
+                value[1] /= static_cast<double>(count);
+                value[2] /= static_cast<double>(count);
+                value[3] = 1.0;
+                mesh->SetControlPointAt(value, controlPoint);
+            }
+
+            mesh->GenerateNormals(true, false);
+        }
+    }
+}
+
+void ApplyEditedNodeNames(const LoadedFbxModel& model,
+                          const std::vector<bool>& deletedNodes,
+                          const std::vector<FbxNode*>& sceneNodes)
+{
+    const int count = static_cast<int>(model.nodes.size());
+    for (int nodeIndex = 0; nodeIndex < count; ++nodeIndex)
+    {
+        if (IsDeletedModelNode(deletedNodes, nodeIndex)) continue;
+        FbxNode* targetNode = sceneNodes[static_cast<size_t>(nodeIndex)];
+        if (!targetNode) continue;
+
+        const std::string& name = model.nodes[static_cast<size_t>(nodeIndex)].name;
+        if (!name.empty())
+        {
+            targetNode->SetName(name.c_str());
+        }
+    }
+}
+
+void ApplyDeletedNodes(FbxScene* scene,
+                       const LoadedFbxModel& model,
+                       const std::vector<bool>& deletedNodes,
+                       const std::vector<FbxNode*>& sceneNodes)
+{
+    if (deletedNodes.empty()) return;
+
+    const int count = static_cast<int>(model.nodes.size());
+    for (int nodeIndex = 0; nodeIndex < count; ++nodeIndex)
+    {
+        if (!IsDeletedModelSubtreeRoot(model, deletedNodes, nodeIndex)) continue;
+
+        FbxNode* node = sceneNodes[static_cast<size_t>(nodeIndex)];
+        if (!node || node == scene->GetRootNode()) continue;
+
+        if (FbxNode* parent = node->GetParent())
+        {
+            parent->RemoveChild(node);
+        }
+        node->Destroy(true);
+    }
+}
+
+bool ApplyEditedModelToScene(FbxScene* scene,
+                             const LoadedFbxModel& model,
+                             const std::vector<bool>& deletedNodes,
+                             std::string& error)
+{
+    const std::vector<FbxNode*> sceneNodes = BuildSceneNodeIndex(scene);
+    if (sceneNodes.empty())
+    {
+        error = "FBX scene has no nodes to save.";
+        return false;
+    }
+
+    const std::vector<FbxNode*> mappedSceneNodes = BuildMappedSceneNodes(model, sceneNodes);
+    ApplyEditedNodeTransforms(model, deletedNodes, mappedSceneNodes);
+    ApplyEditedMeshGeometry(model, deletedNodes, mappedSceneNodes);
+    ApplyEditedNodeNames(model, deletedNodes, mappedSceneNodes);
+    ApplyDeletedNodes(scene, model, deletedNodes, mappedSceneNodes);
+    return true;
+}
+
 FbxAMatrix GetFrameNodeGlobalMatrix(const LoadedFbxModel& model, const BoneFrame& frame, int nodeIndex)
 {
     const BonePose* pose = FindFramePose(frame, nodeIndex);
@@ -1146,7 +1419,10 @@ std::string MakeUniqueAnimationName(const std::string& name, std::unordered_set<
     return result + "_copy";
 }
 
-bool WriteAnimationStacks(FbxScene* scene, const LoadedFbxModel& model, std::string& error)
+bool WriteAnimationStacks(FbxScene* scene,
+                          const LoadedFbxModel& model,
+                          const std::vector<FbxNode*>& sceneNodes,
+                          std::string& error)
 {
     FbxArray<FbxString*> stackNames;
     scene->FillAnimStackNameArray(stackNames);
@@ -1160,9 +1436,6 @@ bool WriteAnimationStacks(FbxScene* scene, const LoadedFbxModel& model, std::str
         }
     }
     FbxArrayDelete(stackNames);
-
-    std::unordered_map<std::string, FbxNode*> nodesByName;
-    AddSkeletonNodesByName(scene->GetRootNode(), nodesByName);
 
     std::unordered_set<std::string> usedNames;
     for (const AnimationClip& clip : model.animations)
@@ -1195,10 +1468,10 @@ bool WriteAnimationStacks(FbxScene* scene, const LoadedFbxModel& model, std::str
             for (const BonePose& pose : frame.poses)
             {
                 if (pose.node < 0 || pose.node >= static_cast<int>(model.nodes.size())) continue;
+                FbxNode* targetNode = pose.node < static_cast<int>(sceneNodes.size()) ? sceneNodes[static_cast<size_t>(pose.node)] : nullptr;
+                if (!targetNode || !IsSkeletonNode(targetNode)) continue;
+
                 const SceneNode& sceneNode = model.nodes[static_cast<size_t>(pose.node)];
-                const std::string targetName = sceneNode.sourceName.empty() ? sceneNode.name : sceneNode.sourceName;
-                const auto target = nodesByName.find(targetName);
-                if (target == nodesByName.end() || !target->second) continue;
 
                 FbxAMatrix global = MatrixFromPose(pose);
                 FbxAMatrix local = global;
@@ -1208,7 +1481,6 @@ bool WriteAnimationStacks(FbxScene* scene, const LoadedFbxModel& model, std::str
                     local = GetFrameNodeGlobalMatrix(model, frame, parentIndex).Inverse() * global;
                 }
 
-                FbxNode* targetNode = target->second;
                 AddVectorKey(targetNode->LclTranslation, layer, time, local.GetT());
                 AddVectorKey(targetNode->LclRotation, layer, time, local.GetR());
                 AddVectorKey(targetNode->LclScaling, layer, time, local.GetS());
@@ -1505,7 +1777,11 @@ bool LoadFbxModel(const std::string& path, LoadedFbxModel& outModel, std::string
     return BuildRaylibModel(builder, outModel, error);
 }
 
-bool SaveFbxModelAnimations(const std::string& sourcePath, const std::string& outputPath, const LoadedFbxModel& model, std::string& error)
+bool SaveFbxModelAnimations(const std::string& sourcePath,
+                            const std::string& outputPath,
+                            const LoadedFbxModel& model,
+                            const std::vector<bool>& deletedNodes,
+                            std::string& error)
 {
     error.clear();
     if (sourcePath.empty() || outputPath.empty())
@@ -1544,7 +1820,21 @@ bool SaveFbxModelAnimations(const std::string& sourcePath, const std::string& ou
     FbxAxisSystem::OpenGL.ConvertScene(scene);
     FbxSystemUnit::m.ConvertScene(scene);
 
-    if (!WriteAnimationStacks(scene, model, error))
+    FbxGeometryConverter converter(manager.get());
+    if (!converter.Triangulate(scene, true))
+    {
+        error = "FBX SDK triangulation failed.";
+        return false;
+    }
+    PrepareMeshNormals(scene->GetRootNode(), converter);
+
+    const std::vector<FbxNode*> sceneNodes = BuildMappedSceneNodes(model, BuildSceneNodeIndex(scene));
+    if (!WriteAnimationStacks(scene, model, sceneNodes, error))
+    {
+        return false;
+    }
+
+    if (!ApplyEditedModelToScene(scene, model, deletedNodes, error))
     {
         return false;
     }

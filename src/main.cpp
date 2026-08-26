@@ -2915,6 +2915,110 @@ bool RebuildSkinnedAnimationMeshFrames(ModelTab& tab)
     return rebuilt;
 }
 
+bool IsScaleApproximatelyApplied(Vector3 scale)
+{
+    constexpr float epsilon = 0.000001f;
+    return std::fabs(scale.x - 1.0f) <= epsilon &&
+           std::fabs(scale.y - 1.0f) <= epsilon &&
+           std::fabs(scale.z - 1.0f) <= epsilon;
+}
+
+bool SetScaleToApplied(Vector3& scale)
+{
+    if (IsScaleApproximatelyApplied(scale)) return false;
+    scale = Vector3{ 1.0f, 1.0f, 1.0f };
+    return true;
+}
+
+Vector3 MultiplyComponents(Vector3 a, Vector3 b)
+{
+    return Vector3{ a.x * b.x, a.y * b.y, a.z * b.z };
+}
+
+void BakeBoneScaleIntoSkinBindData(ModelTab& tab, const SceneNode& node, Vector3 scale)
+{
+    if (!HasCpuSkinnedMesh(tab.loaded) || IsScaleApproximatelyApplied(scale)) return;
+
+    for (SkinnedVertex& vertex : tab.loaded.skinnedVertices)
+    {
+        for (SkinnedVertexInfluence& influence : vertex.influences)
+        {
+            const bool nameMatches = influence.boneName == node.name ||
+                                     (!node.sourceName.empty() && influence.boneName == node.sourceName);
+            if (!nameMatches) continue;
+
+            influence.bindPositionInBone = MultiplyComponents(influence.bindPositionInBone, scale);
+            influence.bindNormalInBone = NormalizeOrFallback(MultiplyComponents(influence.bindNormalInBone, scale), influence.bindNormalInBone);
+        }
+    }
+}
+
+bool ApplyScaleToNode(ModelTab& tab, int nodeIndex)
+{
+    if (nodeIndex < 0 ||
+        nodeIndex >= static_cast<int>(tab.loaded.nodes.size()) ||
+        IsDeletedNode(tab, nodeIndex))
+    {
+        return false;
+    }
+
+    SceneNode& node = tab.loaded.nodes[static_cast<size_t>(nodeIndex)];
+    bool changed = false;
+    Vector3 boneScaleToBake = node.scale;
+
+    if (node.type == SceneNodeType::Bone)
+    {
+        for (const BonePose& pose : tab.loaded.bonePoses)
+        {
+            if (pose.node == nodeIndex && !IsScaleApproximatelyApplied(pose.scale))
+            {
+                boneScaleToBake = pose.scale;
+                break;
+            }
+        }
+        BakeBoneScaleIntoSkinBindData(tab, node, boneScaleToBake);
+    }
+
+    changed = SetScaleToApplied(node.scale) || changed;
+
+    auto applyPoseScale = [&](BonePose& pose)
+    {
+        if (pose.node == nodeIndex)
+        {
+            changed = SetScaleToApplied(pose.scale) || changed;
+        }
+    };
+
+    if (node.type == SceneNodeType::Bone)
+    {
+        for (BonePose& pose : tab.loaded.bonePoses) applyPoseScale(pose);
+        for (BonePose& pose : tab.visibleBonePoses) applyPoseScale(pose);
+        for (AnimationClip& clip : tab.loaded.animations)
+        {
+            for (BoneFrame& frame : clip.frames)
+            {
+                for (BonePose& pose : frame.poses) applyPoseScale(pose);
+            }
+        }
+    }
+
+    if (!changed) return false;
+
+    if (node.type == SceneNodeType::Bone)
+    {
+        RebuildSkinnedAnimationMeshFrames(tab);
+        if (tab.animation.clipIndex < 0 && RebuildCurrentSkinnedMeshFromBones(tab))
+        {
+            return true;
+        }
+        InvalidateDisplayedAnimationCaches(tab);
+    }
+
+    RecomputeSceneBounds(tab);
+    RefreshDisplayedMesh(tab);
+    return true;
+}
+
 template <typename PointTransform, typename DirectionTransform>
 void ApplyTransformToSelectedSubtree(ModelTab& tab,
                                      PointTransform transformPoint,
@@ -3323,7 +3427,27 @@ const char* GetGizmoOrientationName(GizmoOrientation orientation)
 
 float GetTransformGizmoLength(const ModelTab& tab)
 {
-    return ClampFloat(GetBoundsDiagonal(tab.loaded.bounds) * 0.18f, 0.15f, 2.0f);
+    Vector3 pivot{};
+    if (!GetSelectedNodePosition(tab, pivot))
+    {
+        return ClampFloat(GetBoundsDiagonal(tab.loaded.bounds) * 0.18f, 0.15f, 2.0f);
+    }
+
+    const Camera3D& camera = tab.orbit.camera;
+    const float screenHeight = std::max(1.0f, static_cast<float>(GetScreenHeight()));
+    float worldPerPixel = 0.001f;
+    if (camera.projection == CAMERA_ORTHOGRAPHIC)
+    {
+        worldPerPixel = std::max(0.000001f, camera.fovy / screenHeight);
+    }
+    else
+    {
+        const Vector3 forward = GetCameraForward(camera);
+        const float depth = std::max(0.0001f, Vector3DotProduct(Vector3Subtract(pivot, camera.position), forward));
+        worldPerPixel = std::max(0.000001f, (2.0f * depth * std::tan(camera.fovy * DEG2RAD * 0.5f)) / screenHeight);
+    }
+
+    return ClampFloat(worldPerPixel * 96.0f, 0.03f, 1000.0f);
 }
 
 bool GetGizmoPivot(const ModelTab& tab, Vector3& pivot)
@@ -6149,6 +6273,8 @@ void DrawHierarchyPanel(Font font,
     constexpr float panelX = 0.0f;
     constexpr float panelY = 61.0f;
     constexpr float rowH = 22.0f;
+    constexpr float contextMenuW = 152.0f;
+    constexpr float contextMenuH = 92.0f;
     const float panelH = GetHierarchyPanelHeight();
 
     if (panel.hidden)
@@ -6253,7 +6379,7 @@ void DrawHierarchyPanel(Font font,
         const bool selected = active->selectedNode == i;
         const bool hasChildren = HasVisibleSceneNodeChildren(*active, i);
         const float indent = static_cast<float>(node.depth) * 14.0f;
-        const Rectangle contextMenuBounds{ panel.contextPosition.x, panel.contextPosition.y, 132.0f, 62.0f };
+        const Rectangle contextMenuBounds{ panel.contextPosition.x, panel.contextPosition.y, contextMenuW, contextMenuH };
         const bool mouseOverContextMenu = panel.contextMenuOpen && CheckCollisionPointRec(mouse, contextMenuBounds);
 
         if (selected)
@@ -6294,8 +6420,8 @@ void DrawHierarchyPanel(Font font,
             active->selectedNode = i;
             panel.contextNodeIndex = i;
             panel.contextPosition = Vector2{
-                ClampFloat(mouse.x, 4.0f, static_cast<float>(GetScreenWidth()) - 136.0f),
-                ClampFloat(mouse.y, 4.0f, static_cast<float>(GetScreenHeight()) - 66.0f)
+                ClampFloat(mouse.x, 4.0f, static_cast<float>(GetScreenWidth()) - contextMenuW - 4.0f),
+                ClampFloat(mouse.y, 4.0f, static_cast<float>(GetScreenHeight()) - contextMenuH - 4.0f)
             };
             panel.contextMenuOpen = true;
             panel.contextMenuJustOpened = true;
@@ -6321,7 +6447,7 @@ void DrawHierarchyPanel(Font font,
 
     if (panel.contextMenuOpen)
     {
-        const Rectangle menu{ panel.contextPosition.x, panel.contextPosition.y, 132.0f, 62.0f };
+        const Rectangle menu{ panel.contextPosition.x, panel.contextPosition.y, contextMenuW, contextMenuH };
         DrawRectangleRec(menu, Color{ 24, 27, 31, 248 });
         DrawRectangleLinesEx(menu, 1.0f, Color{ 84, 94, 104, 255 });
         const bool validContextNode = panel.contextNodeIndex >= 0 &&
@@ -6335,6 +6461,7 @@ void DrawHierarchyPanel(Font font,
         {
             const Rectangle renameItem{ menu.x, menu.y, menu.width, 30.0f };
             const Rectangle deleteItem{ menu.x, menu.y + 30.0f, menu.width, 30.0f };
+            const Rectangle applyScaleItem{ menu.x, menu.y + 60.0f, menu.width, 30.0f };
             if (DrawPanelButton(font, renameItem, "Rename"))
             {
                 if (validContextNode)
@@ -6350,6 +6477,24 @@ void DrawHierarchyPanel(Font font,
                     PushUndoSnapshot(*active);
                     const int deletedCount = MarkNodeSubtreeDeleted(*active, panel.contextNodeIndex);
                     notice = "Deleted tree object" + std::string(deletedCount == 1 ? "." : "s.");
+                    error.clear();
+                }
+                panel.contextMenuOpen = false;
+            }
+            if (DrawPanelButton(font, applyScaleItem, "Apply Scale"))
+            {
+                if (validContextNode)
+                {
+                    EditSnapshot before = CaptureEditSnapshot(*active);
+                    if (ApplyScaleToNode(*active, panel.contextNodeIndex))
+                    {
+                        PushUndoSnapshot(*active, std::move(before));
+                        notice = "Applied scale.";
+                    }
+                    else
+                    {
+                        notice = "Scale already applied.";
+                    }
                     error.clear();
                 }
                 panel.contextMenuOpen = false;
@@ -7418,7 +7563,7 @@ int main(int argc, char** argv)
             else
             {
                 std::string saveError;
-                if (SaveFbxModelAnimations(active->path, active->path, active->loaded, saveError))
+                if (SaveFbxModelAnimations(active->path, active->path, active->loaded, active->deletedNodes, saveError))
                 {
                     notice = "Saved FBX: " + active->path;
                     error.clear();
@@ -7444,7 +7589,7 @@ int main(int argc, char** argv)
                 if (!savePath.empty())
                 {
                     std::string saveError;
-                    if (SaveFbxModelAnimations(active->path, savePath, active->loaded, saveError))
+                    if (SaveFbxModelAnimations(active->path, savePath, active->loaded, active->deletedNodes, saveError))
                     {
                         active->path = savePath;
                         active->title = MakeTabTitle(savePath);
