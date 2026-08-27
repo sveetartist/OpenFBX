@@ -4319,9 +4319,117 @@ const BonePose* FindCurrentBonePose(const ModelTab& tab, int nodeIndex)
     return nullptr;
 }
 
+std::vector<int> GetSelectedMeshNodeIndices(const ModelTab& tab)
+{
+    std::vector<int> meshNodes;
+    for (int nodeIndex : tab.selectedNodes)
+    {
+        if (nodeIndex < 0 || nodeIndex >= static_cast<int>(tab.loaded.nodes.size())) continue;
+        if (IsDeletedNode(tab, nodeIndex)) continue;
+
+        const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(nodeIndex)];
+        if (node.type == SceneNodeType::Mesh)
+        {
+            meshNodes.push_back(nodeIndex);
+        }
+    }
+    return meshNodes;
+}
+
+bool SameVector3(Vector3 a, Vector3 b)
+{
+    return Vector3Distance(a, b) <= 0.000001f;
+}
+
+std::string FormatVector3Value(Vector3 value, int decimals)
+{
+    char line[128] = {};
+    if (decimals == 2)
+    {
+        std::snprintf(line, sizeof(line), "%.2f  %.2f  %.2f", value.x, value.y, value.z);
+    }
+    else
+    {
+        std::snprintf(line, sizeof(line), "%.3f  %.3f  %.3f", value.x, value.y, value.z);
+    }
+    return line;
+}
+
+std::string FormatMaterialSummary(const std::vector<std::string>& materialNames)
+{
+    if (materialNames.empty()) return "None";
+
+    std::string summary;
+    for (size_t i = 0; i < materialNames.size(); ++i)
+    {
+        if (i > 0) summary += ", ";
+        summary += materialNames[i];
+    }
+    return summary;
+}
+
 void DrawSelectedInfoPanel(Font font, const ModelTab* active)
 {
     if (!active || active->selectedNode < 0 || active->selectedNode >= static_cast<int>(active->loaded.nodes.size())) return;
+
+    const std::vector<int> selectedMeshNodes = GetSelectedMeshNodeIndices(*active);
+    if (selectedMeshNodes.size() > 1)
+    {
+        const SceneNode& firstMesh = active->loaded.nodes[static_cast<size_t>(selectedMeshNodes.front())];
+        int totalPolys = 0;
+        std::vector<std::string> materialNames;
+        bool samePosition = true;
+        bool sameRotation = true;
+        bool sameScale = true;
+
+        for (int nodeIndex : selectedMeshNodes)
+        {
+            const SceneNode& meshNode = active->loaded.nodes[static_cast<size_t>(nodeIndex)];
+            totalPolys += meshNode.meshTriangleCount;
+            if (!SameVector3(firstMesh.position, meshNode.position)) samePosition = false;
+            if (!SameVector3(firstMesh.rotation, meshNode.rotation)) sameRotation = false;
+            if (!SameVector3(firstMesh.scale, meshNode.scale)) sameScale = false;
+
+            const std::string materialName = meshNode.materialName.empty() ? "None" : meshNode.materialName;
+            if (std::find(materialNames.begin(), materialNames.end(), materialName) == materialNames.end())
+            {
+                materialNames.push_back(materialName);
+            }
+        }
+
+        constexpr float panelW = 360.0f;
+        constexpr float panelH = 176.0f;
+        const float panelX = static_cast<float>(GetScreenWidth()) - panelW - 12.0f;
+        const float panelY = static_cast<float>(GetScreenHeight()) - gBottomPanelReservedHeight - panelH - 12.0f;
+
+        DrawRectangleRec(Rectangle{ panelX, panelY, panelW, panelH }, Color{ 18, 20, 23, 225 });
+        DrawRectangleLinesEx(Rectangle{ panelX, panelY, panelW, panelH }, 1.0f, Color{ 70, 78, 88, 255 });
+
+        DrawUiText(font, "SELECTION", panelX + 12.0f, panelY + 10.0f, 15.0f, Color{ 165, 182, 196, 255 });
+
+        char line[256] = {};
+        std::snprintf(line, sizeof(line), "%d meshes", static_cast<int>(selectedMeshNodes.size()));
+        DrawUiTextClipped(font, line, panelX + 108.0f, panelY + 10.0f, 15.0f, panelW - 120.0f, RAYWHITE);
+
+        std::snprintf(line, sizeof(line), "Type: Mesh selection");
+        DrawUiText(font, line, panelX + 12.0f, panelY + 36.0f, 14.0f, Color{ 205, 213, 220, 255 });
+
+        const std::string positionLine = std::string("Pos:  ") + (samePosition ? FormatVector3Value(firstMesh.position, 3) : "multiple values");
+        DrawUiText(font, positionLine.c_str(), panelX + 12.0f, panelY + 58.0f, 14.0f, Color{ 205, 213, 220, 255 });
+
+        const std::string rotationLine = std::string("Rot:  ") + (sameRotation ? FormatVector3Value(firstMesh.rotation, 2) : "multiple values");
+        DrawUiText(font, rotationLine.c_str(), panelX + 12.0f, panelY + 80.0f, 14.0f, Color{ 205, 213, 220, 255 });
+
+        const std::string scaleLine = std::string("Scale: ") + (sameScale ? FormatVector3Value(firstMesh.scale, 3) : "multiple values");
+        DrawUiText(font, scaleLine.c_str(), panelX + 12.0f, panelY + 102.0f, 14.0f, Color{ 205, 213, 220, 255 });
+
+        std::snprintf(line, sizeof(line), "Total polys: %d", totalPolys);
+        DrawUiText(font, line, panelX + 12.0f, panelY + 124.0f, 14.0f, Color{ 205, 213, 220, 255 });
+
+        const std::string materialsLine = std::string("Materials: ") + std::to_string(static_cast<int>(materialNames.size())) + " - " + FormatMaterialSummary(materialNames);
+        DrawUiTextClipped(font, materialsLine.c_str(), panelX + 12.0f, panelY + 146.0f, 14.0f, panelW - 24.0f, Color{ 205, 213, 220, 255 });
+        return;
+    }
 
     const SceneNode& node = active->loaded.nodes[static_cast<size_t>(active->selectedNode)];
     const BonePose* currentBonePose = node.type == SceneNodeType::Bone ? FindCurrentBonePose(*active, active->selectedNode) : nullptr;
