@@ -445,12 +445,12 @@ void UpdateSnappedOrbitCamera(OrbitCamera& orbit, Vector2 mouseDelta)
     }
     while (orbit.snapDragY >= snapDragPixels)
     {
-        orbit.pitch = ClampFloat(orbit.pitch - snapStep, -89.0f * DEG2RAD, 89.0f * DEG2RAD);
+        orbit.pitch = ClampFloat(orbit.pitch + snapStep, -89.0f * DEG2RAD, 89.0f * DEG2RAD);
         orbit.snapDragY -= snapDragPixels;
     }
     while (orbit.snapDragY <= -snapDragPixels)
     {
-        orbit.pitch = ClampFloat(orbit.pitch + snapStep, -89.0f * DEG2RAD, 89.0f * DEG2RAD);
+        orbit.pitch = ClampFloat(orbit.pitch - snapStep, -89.0f * DEG2RAD, 89.0f * DEG2RAD);
         orbit.snapDragY += snapDragPixels;
     }
 }
@@ -618,7 +618,7 @@ void UpdateBlenderNavigation(OrbitCamera& orbit)
         {
             ExitSnappedOrbitView(orbit);
             orbit.yaw -= mouseDelta.x * 0.008f;
-            orbit.pitch -= mouseDelta.y * 0.008f;
+            orbit.pitch += mouseDelta.y * 0.008f;
             orbit.pitch = ClampFloat(orbit.pitch, -89.0f * DEG2RAD, 89.0f * DEG2RAD);
         }
     }
@@ -664,7 +664,7 @@ void UpdateMayaNavigation(OrbitCamera& orbit)
         {
             ExitSnappedOrbitView(orbit);
             orbit.yaw -= mouseDelta.x * 0.008f;
-            orbit.pitch -= mouseDelta.y * 0.008f;
+            orbit.pitch += mouseDelta.y * 0.008f;
             orbit.pitch = ClampFloat(orbit.pitch, -89.0f * DEG2RAD, 89.0f * DEG2RAD);
         }
     }
@@ -3902,7 +3902,7 @@ bool UpdateTransformGizmoInput(ModelTab* active,
             {
                 const Vector3 right = GetCameraRight(active->orbit.camera);
                 const Vector3 up = GetCameraUpVector(active->orbit.camera);
-                const float rightRadians = -delta.y * 0.006f;
+                const float rightRadians = delta.y * 0.006f;
                 const float upRadians = delta.x * 0.006f;
                 if (std::fabs(rightRadians) > 0.000001f || std::fabs(upRadians) > 0.000001f)
                 {
@@ -5929,7 +5929,7 @@ void DrawValidatorPanel(Font font, ModelTab& tab, HierarchyPanelState& panel, fl
 
         if (hovered && issue.node >= 0 && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
         {
-            SelectNode(tab, issue.node, IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL));
+            SelectNode(tab, issue.node, IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT));
         }
 
         rowY += rowH;
@@ -7310,7 +7310,7 @@ void DrawHierarchyPanel(Font font,
     }
 
     const Vector2 mouse = GetMousePosition();
-    const bool additiveSelection = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
+    const bool additiveSelection = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
     auto getContextMenuHeight = [&]()
     {
         if (panel.contextNodeIndex >= 0 &&
@@ -8249,13 +8249,13 @@ int main(int argc, char** argv)
         }
         if (active && mouseInViewport && !toolbarConsumedMouse && !transformConsumedMouse && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
         {
-            if (SelectNodeFromViewport(*active, mouse, visibility, controlDown))
+            if (SelectNodeFromViewport(*active, mouse, visibility, shiftDown))
             {
                 RevealNodeInHierarchy(*active, hierarchyPanel, active->selectedNode);
             }
             else
             {
-                if (!controlDown)
+                if (!shiftDown)
                 {
                     ClearNodeSelection(*active);
                 }
