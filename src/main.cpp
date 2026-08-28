@@ -72,7 +72,10 @@ constexpr float kMetersPerGridCell = 1.0f;
 constexpr double kNearClipPlane = 0.0005;
 constexpr double kFarClipPlane = 10000.0;
 constexpr Color kSelectionColor{ 204, 154, 42, 255 };
+constexpr float kMinTransformGizmoScale = 0.5f;
+constexpr float kMaxTransformGizmoScale = 2.0f;
 float gBottomPanelReservedHeight = kTimelinePanelHeight;
+float gTransformGizmoScale = 1.0f;
 
 struct OrbitCamera
 {
@@ -247,12 +250,18 @@ struct PbrMaterialSnapshot
 
 struct EditSnapshot
 {
+    BoundingBox bounds{};
     std::vector<SceneNode> nodes;
+    std::vector<BoneSegment> bones;
+    std::vector<BonePose> bonePoses;
     std::vector<float> bindVertices;
     std::vector<float> bindNormals;
     std::vector<float> currentVertices;
     std::vector<float> currentNormals;
     std::vector<SkinnedVertex> skinnedVertices;
+    std::vector<BoneSegment> visibleBones;
+    std::vector<BonePose> visibleBonePoses;
+    std::vector<BonePose> originalBindBonePoses;
     std::vector<AnimationClip> animations;
     std::vector<bool> deletedNodes;
     std::vector<PbrMaterialSnapshot> pbrMaterials;
@@ -1133,6 +1142,7 @@ void PruneSelectedNodes(ModelTab& tab);
 void ClearNodeSelection(ModelTab& tab);
 void SetSingleSelectedNode(ModelTab& tab, int nodeIndex);
 void SelectNode(ModelTab& tab, int nodeIndex, bool additive);
+void InvalidateDisplayedAnimationCaches(ModelTab& tab);
 void RefreshDisplayedMesh(ModelTab& tab);
 MeshFrame BuildSkinnedMeshFrame(const LoadedFbxModel& target, const BoneFrame& boneFrame);
 void DrawUiText(Font font, const char* text, float x, float y, float size, Color color);
@@ -1206,12 +1216,18 @@ void UnloadPbrTextures(ModelTab& tab)
 EditSnapshot CaptureEditSnapshot(const ModelTab& tab)
 {
     EditSnapshot snapshot;
+    snapshot.bounds = tab.loaded.bounds;
     snapshot.nodes = tab.loaded.nodes;
+    snapshot.bones = tab.loaded.bones;
+    snapshot.bonePoses = tab.loaded.bonePoses;
     snapshot.bindVertices = tab.loaded.bindVertices;
     snapshot.bindNormals = tab.loaded.bindNormals;
     snapshot.currentVertices = tab.currentVertices;
     snapshot.currentNormals = tab.currentNormals;
     snapshot.skinnedVertices = tab.loaded.skinnedVertices;
+    snapshot.visibleBones = tab.visibleBones;
+    snapshot.visibleBonePoses = tab.visibleBonePoses;
+    snapshot.originalBindBonePoses = tab.originalBindBonePoses;
     snapshot.animations = tab.loaded.animations;
     snapshot.deletedNodes = tab.deletedNodes;
     snapshot.selectedNode = tab.selectedNode;
@@ -1268,12 +1284,18 @@ void PushUndoSnapshot(ModelTab& tab)
 
 void RestoreEditSnapshot(ModelTab& tab, const EditSnapshot& snapshot)
 {
+    tab.loaded.bounds = snapshot.bounds;
     tab.loaded.nodes = snapshot.nodes;
+    tab.loaded.bones = snapshot.bones;
+    tab.loaded.bonePoses = snapshot.bonePoses;
     tab.loaded.bindVertices = snapshot.bindVertices;
     tab.loaded.bindNormals = snapshot.bindNormals;
     tab.currentVertices = snapshot.currentVertices;
     tab.currentNormals = snapshot.currentNormals;
     tab.loaded.skinnedVertices = snapshot.skinnedVertices;
+    tab.visibleBones = snapshot.visibleBones;
+    tab.visibleBonePoses = snapshot.visibleBonePoses;
+    tab.originalBindBonePoses = snapshot.originalBindBonePoses;
     tab.loaded.animations = snapshot.animations;
     tab.deletedNodes = snapshot.deletedNodes;
     tab.selectedNode = snapshot.selectedNode;
@@ -1314,6 +1336,7 @@ void RestoreEditSnapshot(ModelTab& tab, const EditSnapshot& snapshot)
 
     EnsurePbrMaterialStates(tab);
     tab.selectedMaterial = std::max(0, std::min(tab.selectedMaterial, static_cast<int>(tab.pbrMaterials.size()) - 1));
+    InvalidateDisplayedAnimationCaches(tab);
     RefreshDisplayedMesh(tab);
 }
 
@@ -2447,7 +2470,7 @@ void DrawMeshOrigin(const SceneNode& node, float sceneDiagonal)
 {
     const float axisLength = ClampFloat(sceneDiagonal * 0.045f, 0.07f, 0.55f);
     const float crossLength = axisLength * 0.32f;
-    const float sphereRadius = axisLength * 0.045f;
+    const float sphereRadius = axisLength * 0.026f;
 
     DrawEmptyCross(node, crossLength, kSelectionColor);
     DrawSphere(node.position, sphereRadius, kSelectionColor);
@@ -3766,7 +3789,7 @@ float GetTransformGizmoLength(const ModelTab& tab)
         worldPerPixel = std::max(0.000001f, (2.0f * depth * std::tan(camera.fovy * DEG2RAD * 0.5f)) / screenHeight);
     }
 
-    return ClampFloat(worldPerPixel * 96.0f, 0.03f, 1000.0f);
+    return ClampFloat(worldPerPixel * 96.0f * gTransformGizmoScale, 0.03f, 1000.0f);
 }
 
 bool GetGizmoPivot(const ModelTab& tab, Vector3& pivot)
@@ -4047,7 +4070,7 @@ void DrawTransformGizmo(const ModelTab& tab, TransformTool tool, const Transform
     rlSetLineWidth(4.5f);
 
     const bool centerActive = state.dragging && state.axis == TransformAxis::Center;
-    DrawSphere(pivot, handleRadius * 1.75f, centerActive ? Color{ 255, 235, 128, 255 } : Color{ 225, 232, 238, 235 });
+    DrawSphere(pivot, handleRadius * 0.9f, centerActive ? Color{ 255, 235, 128, 255 } : Color{ 225, 232, 238, 235 });
 
     for (TransformAxis axis : { TransformAxis::X, TransformAxis::Y, TransformAxis::Z })
     {
@@ -7752,7 +7775,7 @@ void DrawMenuBar(Font font,
         openMenuBounds = Rectangle{ 124.0f, 29.0f, 230.0f, 308.0f };
         break;
     case OpenMenu::Preferences:
-        openMenuBounds = Rectangle{ 186.0f, 29.0f, 420.0f, 246.0f };
+        openMenuBounds = Rectangle{ 186.0f, 29.0f, 420.0f, 318.0f };
         break;
     case OpenMenu::None:
         break;
@@ -7875,7 +7898,7 @@ void DrawMenuBar(Font font,
     }
     else if (openMenu == OpenMenu::Preferences)
     {
-        DrawRectangle(186, 29, 420, 246, Color{ 28, 31, 35, 245 });
+        DrawRectangle(186, 29, 420, 318, Color{ 28, 31, 35, 245 });
         DrawUiText(font, "NAVIGATION", 198.0f, 39.0f, 16.0f, Color{ 165, 182, 196, 255 });
         if (DrawMenuItem(font, Rectangle{ 196.0f, 64.0f, 185.0f, 30.0f }, "Blender", navigation == NavigationPreset::Blender))
         {
@@ -7886,12 +7909,29 @@ void DrawMenuBar(Font font,
             navigation = NavigationPreset::Maya;
         }
 
-        DrawUiText(font, "HOTKEYS", 198.0f, 110.0f, 16.0f, Color{ 165, 182, 196, 255 });
-        DrawUiText(font, "Q/W/E/R tools    Ctrl+O open FBX    V view mode", 198.0f, 136.0f, 15.0f, Color{ 205, 213, 220, 255 });
-        DrawUiText(font, "Ctrl+Z undo    Ctrl+Y redo    T textures    C channels", 198.0f, 162.0f, 15.0f, Color{ 205, 213, 220, 255 });
-        DrawUiText(font, "Blender: MMB orbit, Alt snap, Shift+MMB pan, Wheel zoom", 198.0f, 188.0f, 15.0f, Color{ 205, 213, 220, 255 });
-        DrawUiText(font, "Maya: Alt+LMB orbit, Shift snap, Alt+MMB pan, Alt+RMB/Wheel zoom", 198.0f, 214.0f, 15.0f, Color{ 205, 213, 220, 255 });
-        DrawUiText(font, "Esc deselects    Ctrl+Q quits    Tabs: X/middle closes", 198.0f, 240.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        DrawUiText(font, "GIZMO", 198.0f, 110.0f, 16.0f, Color{ 165, 182, 196, 255 });
+        char gizmoSizeText[64] = {};
+        std::snprintf(gizmoSizeText, sizeof(gizmoSizeText), "Size: %d%%", static_cast<int>(std::round(gTransformGizmoScale * 100.0f)));
+        DrawUiText(font, gizmoSizeText, 198.0f, 139.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        if (DrawPanelButton(font, Rectangle{ 330.0f, 132.0f, 34.0f, 26.0f }, "-"))
+        {
+            gTransformGizmoScale = ClampFloat(gTransformGizmoScale - 0.1f, kMinTransformGizmoScale, kMaxTransformGizmoScale);
+        }
+        if (DrawPanelButton(font, Rectangle{ 372.0f, 132.0f, 34.0f, 26.0f }, "+"))
+        {
+            gTransformGizmoScale = ClampFloat(gTransformGizmoScale + 0.1f, kMinTransformGizmoScale, kMaxTransformGizmoScale);
+        }
+        if (DrawPanelButton(font, Rectangle{ 416.0f, 132.0f, 70.0f, 26.0f }, "Reset"))
+        {
+            gTransformGizmoScale = 1.0f;
+        }
+
+        DrawUiText(font, "HOTKEYS", 198.0f, 184.0f, 16.0f, Color{ 165, 182, 196, 255 });
+        DrawUiText(font, "Q/W/E/R tools    Ctrl+O open FBX    V view mode", 198.0f, 210.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        DrawUiText(font, "Ctrl+Z undo    Ctrl+Y redo    T textures    C channels", 198.0f, 236.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        DrawUiText(font, "Blender: MMB orbit, Alt snap, Shift+MMB pan, Wheel zoom", 198.0f, 262.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        DrawUiText(font, "Maya: Alt+LMB orbit, Shift snap, Alt+MMB pan, Alt+RMB/Wheel zoom", 198.0f, 288.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        DrawUiText(font, "Esc deselects    Ctrl+Q quits    Tabs: X/middle closes", 198.0f, 314.0f, 15.0f, Color{ 205, 213, 220, 255 });
     }
 }
 

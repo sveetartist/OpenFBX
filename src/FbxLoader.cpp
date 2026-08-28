@@ -92,7 +92,7 @@ struct ControlPointBindInfluence
 {
     std::string boneName;
     float weight = 0.0f;
-    FbxAMatrix inverseBindLink;
+    FbxAMatrix bindFromControlPoint;
 };
 
 struct SkinBindData
@@ -102,7 +102,8 @@ struct SkinBindData
 };
 
 FbxVector4 TransformVector(const FbxAMatrix& matrix, FbxVector4 vector);
-SkinBindData BuildSkinBindData(FbxMesh* mesh);
+SkinBindData BuildSkinBindData(FbxNode* node, FbxMesh* mesh);
+FbxAMatrix MatrixFromPose(const BonePose& pose);
 
 void ExpandBounds(BoundingBox& bounds, Vector3 p, bool& hasBounds)
 {
@@ -266,8 +267,21 @@ void AddTriangle(MeshBuilder& out,
             const FbxVector4 bindNormal(normal.x, normal.y, normal.z, 0.0);
             for (const ControlPointBindInfluence& influence : skinBind.influences[static_cast<size_t>(refs[i].controlPointIndex)])
             {
-                const FbxVector4 positionInBone = influence.inverseBindLink.MultT(bindPosition);
-                const FbxVector4 normalInBone = TransformVector(influence.inverseBindLink, bindNormal);
+                FbxVector4 localBindPosition = bindPosition;
+                if (refs[i].mesh && refs[i].controlPointIndex >= 0 && refs[i].controlPointIndex < refs[i].mesh->GetControlPointsCount())
+                {
+                    localBindPosition = refs[i].mesh->GetControlPoints()[refs[i].controlPointIndex];
+                    localBindPosition[3] = 1.0;
+                }
+                FbxVector4 localBindNormal = bindNormal;
+                if (refs[i].hasNormal)
+                {
+                    localBindNormal = refs[i].localNormal;
+                    localBindNormal[3] = 0.0;
+                }
+
+                const FbxVector4 positionInBone = influence.bindFromControlPoint.MultT(localBindPosition);
+                const FbxVector4 normalInBone = TransformVector(influence.bindFromControlPoint, localBindNormal);
                 skinned.influences.push_back(SkinnedVertexInfluence{
                     influence.boneName,
                     influence.weight,
@@ -375,7 +389,7 @@ void AppendMesh(FbxNode* node, FbxMesh* mesh, MeshBuilder& out)
     const FbxAMatrix geometry = GetNodeGeometryTransform(node);
     const FbxAMatrix meshTransform = nodeGlobal * geometry;
     const FbxAMatrix normalTransform = meshTransform.Inverse().Transpose();
-    const SkinBindData skinBind = BuildSkinBindData(mesh);
+    const SkinBindData skinBind = BuildSkinBindData(node, mesh);
     bool meshHadNormals = true;
     bool meshHadUvs = uvSetName != nullptr;
     int degenerateTriangles = 0;
@@ -537,7 +551,7 @@ FbxVector4 TransformVector(const FbxAMatrix& matrix, FbxVector4 vector)
     return FbxVector4(end[0] - origin[0], end[1] - origin[1], end[2] - origin[2], 0.0);
 }
 
-SkinBindData BuildSkinBindData(FbxMesh* mesh)
+SkinBindData BuildSkinBindData(FbxNode* node, FbxMesh* mesh)
 {
     SkinBindData data;
     if (!mesh) return data;
@@ -558,9 +572,16 @@ SkinBindData BuildSkinBindData(FbxMesh* mesh)
             FbxNode* link = cluster ? cluster->GetLink() : nullptr;
             if (!cluster || !link || !link->GetName() || !link->GetName()[0]) continue;
 
+            FbxAMatrix referenceGlobalInit;
+            cluster->GetTransformMatrix(referenceGlobalInit);
+            if (node)
+            {
+                referenceGlobalInit *= GetNodeGeometryTransform(node);
+            }
+
             FbxAMatrix bindLink;
             cluster->GetTransformLinkMatrix(bindLink);
-            const FbxAMatrix inverseBindLink = bindLink.Inverse();
+            const FbxAMatrix bindFromControlPoint = bindLink.Inverse() * referenceGlobalInit;
 
             const int* indices = cluster->GetControlPointIndices();
             const double* weights = cluster->GetControlPointWeights();
@@ -574,7 +595,7 @@ SkinBindData BuildSkinBindData(FbxMesh* mesh)
                 data.influences[static_cast<size_t>(controlPointIndex)].push_back(ControlPointBindInfluence{
                     link->GetName(),
                     static_cast<float>(weights[i]),
-                    inverseBindLink
+                    bindFromControlPoint
                 });
             }
         }
@@ -955,6 +976,32 @@ void RebuildBindSkeleton(FbxNode* node, MeshBuilder& out, const std::unordered_m
     for (int childIndex = 0; childIndex < node->GetChildCount(); ++childIndex)
     {
         RebuildBindSkeleton(node->GetChild(childIndex), out, bindMatrices);
+    }
+}
+
+void RebuildSkinBindDataForAppPose(MeshBuilder& out)
+{
+    std::unordered_map<std::string, FbxAMatrix> inverseBindPosesByName;
+    for (const BonePose& pose : out.bonePoses)
+    {
+        if (pose.node < 0 || pose.node >= static_cast<int>(out.nodes.size())) continue;
+        inverseBindPosesByName[out.nodes[static_cast<size_t>(pose.node)].name] = MatrixFromPose(pose).Inverse();
+    }
+
+    for (SkinnedVertex& vertex : out.skinnedVertices)
+    {
+        const FbxVector4 bindPosition(vertex.bindPosition.x, vertex.bindPosition.y, vertex.bindPosition.z, 1.0);
+        const FbxVector4 bindNormal(vertex.bindNormal.x, vertex.bindNormal.y, vertex.bindNormal.z, 0.0);
+        for (SkinnedVertexInfluence& influence : vertex.influences)
+        {
+            const auto inverseBindPose = inverseBindPosesByName.find(influence.boneName);
+            if (inverseBindPose == inverseBindPosesByName.end()) continue;
+
+            const FbxVector4 positionInBone = inverseBindPose->second.MultT(bindPosition);
+            const FbxVector4 normalInBone = TransformVector(inverseBindPose->second, bindNormal);
+            influence.bindPositionInBone = ToVector3(positionInBone);
+            influence.bindNormalInBone = NormalizeOrFallback(ToVector3(normalInBone), vertex.bindNormal);
+        }
     }
 }
 
@@ -1771,6 +1818,7 @@ bool LoadFbxModel(const std::string& path, LoadedFbxModel& outModel, std::string
     std::unordered_map<FbxNode*, FbxAMatrix> bindMatrices;
     CollectSkinBindMatrices(scene->GetRootNode(), bindMatrices);
     RebuildBindSkeleton(scene->GetRootNode(), builder, bindMatrices);
+    RebuildSkinBindDataForAppPose(builder);
 
     SampleAnimations(scene, builder);
 
