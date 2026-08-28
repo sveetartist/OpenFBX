@@ -355,6 +355,9 @@ struct HierarchyPanelState
     bool contextMenuJustOpened = false;
     bool hidden = false;
     bool resizing = false;
+    bool shiftDragSelecting = false;
+    int shiftDragAnchorNode = -1;
+    int shiftDragLastNode = -1;
     LeftPanelTab activeTab = LeftPanelTab::Hierarchy;
 };
 
@@ -1124,6 +1127,7 @@ const PbrMaterialState& GetSelectedPbrMaterial(const ModelTab& tab)
 }
 
 bool IsDeletedNode(const ModelTab& tab, int nodeIndex);
+bool IsSceneNodeVisible(const ModelTab& tab, const std::vector<bool>& collapsed, int nodeIndex);
 bool IsNodeSelected(const ModelTab& tab, int nodeIndex);
 void PruneSelectedNodes(ModelTab& tab);
 void ClearNodeSelection(ModelTab& tab);
@@ -1729,6 +1733,39 @@ void SelectNode(ModelTab& tab, int nodeIndex, bool additive)
     {
         SetSingleSelectedNode(tab, nodeIndex);
     }
+}
+
+void SetVisibleNodeRangeSelection(ModelTab& tab, const std::vector<bool>& collapsed, int anchorNode, int targetNode)
+{
+    if (!IsValidSelectableNode(tab, anchorNode) || !IsValidSelectableNode(tab, targetNode)) return;
+
+    int anchorRow = -1;
+    int targetRow = -1;
+    int visibleRow = 0;
+    for (int i = 0; i < static_cast<int>(tab.loaded.nodes.size()); ++i)
+    {
+        if (!IsSceneNodeVisible(tab, collapsed, i)) continue;
+        if (i == anchorNode) anchorRow = visibleRow;
+        if (i == targetNode) targetRow = visibleRow;
+        ++visibleRow;
+    }
+
+    if (anchorRow < 0 || targetRow < 0) return;
+
+    const int firstRow = std::min(anchorRow, targetRow);
+    const int lastRow = std::max(anchorRow, targetRow);
+    tab.selectedNodes.clear();
+    visibleRow = 0;
+    for (int i = 0; i < static_cast<int>(tab.loaded.nodes.size()); ++i)
+    {
+        if (!IsSceneNodeVisible(tab, collapsed, i)) continue;
+        if (visibleRow >= firstRow && visibleRow <= lastRow && IsValidSelectableNode(tab, i))
+        {
+            tab.selectedNodes.push_back(i);
+        }
+        ++visibleRow;
+    }
+    tab.selectedNode = targetNode;
 }
 
 void RefreshDisplayedMesh(ModelTab& tab)
@@ -2797,7 +2834,6 @@ void RecomputeMeshNodeBounds(ModelTab& tab, SceneNode& node)
 
     node.bounds = bounds;
     node.hasBounds = true;
-    node.position = Vector3Scale(Vector3Add(bounds.min, bounds.max), 0.5f);
 }
 
 void RecomputeSceneBounds(ModelTab& tab)
@@ -3614,7 +3650,7 @@ bool GetSelectedNodePosition(const ModelTab& tab, Vector3& outPosition)
         }
     }
 
-    outPosition = node.hasBounds ? Vector3Scale(Vector3Add(node.bounds.min, node.bounds.max), 0.5f) : node.position;
+    outPosition = node.position;
     return true;
 }
 
@@ -4336,9 +4372,23 @@ std::vector<int> GetSelectedMeshNodeIndices(const ModelTab& tab)
     return meshNodes;
 }
 
-bool SameVector3(Vector3 a, Vector3 b)
+bool SameFloatValue(float a, float b)
 {
-    return Vector3Distance(a, b) <= 0.000001f;
+    return std::fabs(a - b) <= 0.000001f;
+}
+
+std::string FormatFloatValue(float value, int decimals)
+{
+    char text[32] = {};
+    if (decimals == 2)
+    {
+        std::snprintf(text, sizeof(text), "%.2f", value);
+    }
+    else
+    {
+        std::snprintf(text, sizeof(text), "%.3f", value);
+    }
+    return text;
 }
 
 std::string FormatVector3Value(Vector3 value, int decimals)
@@ -4353,6 +4403,13 @@ std::string FormatVector3Value(Vector3 value, int decimals)
         std::snprintf(line, sizeof(line), "%.3f  %.3f  %.3f", value.x, value.y, value.z);
     }
     return line;
+}
+
+std::string FormatMixedVector3Value(Vector3 first, bool sameX, bool sameY, bool sameZ, int decimals)
+{
+    return (sameX ? FormatFloatValue(first.x, decimals) : "multiple") + std::string("  ") +
+           (sameY ? FormatFloatValue(first.y, decimals) : "multiple") + "  " +
+           (sameZ ? FormatFloatValue(first.z, decimals) : "multiple");
 }
 
 std::string FormatMaterialSummary(const std::vector<std::string>& materialNames)
@@ -4378,17 +4435,29 @@ void DrawSelectedInfoPanel(Font font, const ModelTab* active)
         const SceneNode& firstMesh = active->loaded.nodes[static_cast<size_t>(selectedMeshNodes.front())];
         int totalPolys = 0;
         std::vector<std::string> materialNames;
-        bool samePosition = true;
-        bool sameRotation = true;
-        bool sameScale = true;
+        bool samePositionX = true;
+        bool samePositionY = true;
+        bool samePositionZ = true;
+        bool sameRotationX = true;
+        bool sameRotationY = true;
+        bool sameRotationZ = true;
+        bool sameScaleX = true;
+        bool sameScaleY = true;
+        bool sameScaleZ = true;
 
         for (int nodeIndex : selectedMeshNodes)
         {
             const SceneNode& meshNode = active->loaded.nodes[static_cast<size_t>(nodeIndex)];
             totalPolys += meshNode.meshTriangleCount;
-            if (!SameVector3(firstMesh.position, meshNode.position)) samePosition = false;
-            if (!SameVector3(firstMesh.rotation, meshNode.rotation)) sameRotation = false;
-            if (!SameVector3(firstMesh.scale, meshNode.scale)) sameScale = false;
+            if (!SameFloatValue(firstMesh.position.x, meshNode.position.x)) samePositionX = false;
+            if (!SameFloatValue(firstMesh.position.y, meshNode.position.y)) samePositionY = false;
+            if (!SameFloatValue(firstMesh.position.z, meshNode.position.z)) samePositionZ = false;
+            if (!SameFloatValue(firstMesh.rotation.x, meshNode.rotation.x)) sameRotationX = false;
+            if (!SameFloatValue(firstMesh.rotation.y, meshNode.rotation.y)) sameRotationY = false;
+            if (!SameFloatValue(firstMesh.rotation.z, meshNode.rotation.z)) sameRotationZ = false;
+            if (!SameFloatValue(firstMesh.scale.x, meshNode.scale.x)) sameScaleX = false;
+            if (!SameFloatValue(firstMesh.scale.y, meshNode.scale.y)) sameScaleY = false;
+            if (!SameFloatValue(firstMesh.scale.z, meshNode.scale.z)) sameScaleZ = false;
 
             const std::string materialName = meshNode.materialName.empty() ? "None" : meshNode.materialName;
             if (std::find(materialNames.begin(), materialNames.end(), materialName) == materialNames.end())
@@ -4414,13 +4483,13 @@ void DrawSelectedInfoPanel(Font font, const ModelTab* active)
         std::snprintf(line, sizeof(line), "Type: Mesh selection");
         DrawUiText(font, line, panelX + 12.0f, panelY + 36.0f, 14.0f, Color{ 205, 213, 220, 255 });
 
-        const std::string positionLine = std::string("Pos:  ") + (samePosition ? FormatVector3Value(firstMesh.position, 3) : "multiple values");
+        const std::string positionLine = std::string("Pos:  ") + FormatMixedVector3Value(firstMesh.position, samePositionX, samePositionY, samePositionZ, 3);
         DrawUiText(font, positionLine.c_str(), panelX + 12.0f, panelY + 58.0f, 14.0f, Color{ 205, 213, 220, 255 });
 
-        const std::string rotationLine = std::string("Rot:  ") + (sameRotation ? FormatVector3Value(firstMesh.rotation, 2) : "multiple values");
+        const std::string rotationLine = std::string("Rot:  ") + FormatMixedVector3Value(firstMesh.rotation, sameRotationX, sameRotationY, sameRotationZ, 2);
         DrawUiText(font, rotationLine.c_str(), panelX + 12.0f, panelY + 80.0f, 14.0f, Color{ 205, 213, 220, 255 });
 
-        const std::string scaleLine = std::string("Scale: ") + (sameScale ? FormatVector3Value(firstMesh.scale, 3) : "multiple values");
+        const std::string scaleLine = std::string("Scale: ") + FormatMixedVector3Value(firstMesh.scale, sameScaleX, sameScaleY, sameScaleZ, 3);
         DrawUiText(font, scaleLine.c_str(), panelX + 12.0f, panelY + 102.0f, 14.0f, Color{ 205, 213, 220, 255 });
 
         std::snprintf(line, sizeof(line), "Total polys: %d", totalPolys);
@@ -7419,6 +7488,13 @@ void DrawHierarchyPanel(Font font,
 
     const Vector2 mouse = GetMousePosition();
     const bool additiveSelection = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+    if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT) || !additiveSelection)
+    {
+        panel.shiftDragSelecting = false;
+        panel.shiftDragAnchorNode = -1;
+        panel.shiftDragLastNode = -1;
+    }
+
     auto getContextMenuHeight = [&]()
     {
         if (panel.contextNodeIndex >= 0 &&
@@ -7477,7 +7553,21 @@ void DrawHierarchyPanel(Font font,
 
         if (hovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !mouseOverContextMenu && !CheckCollisionPointRec(mouse, collapseRect))
         {
+            if (additiveSelection)
+            {
+                panel.shiftDragSelecting = true;
+                panel.shiftDragAnchorNode = i;
+                panel.shiftDragLastNode = i;
+            }
             SelectNode(*active, i, additiveSelection);
+            panel.contextMenuOpen = false;
+        }
+        else if (hovered && panel.shiftDragSelecting && additiveSelection && IsMouseButtonDown(MOUSE_BUTTON_LEFT) &&
+                 !mouseOverContextMenu && !CheckCollisionPointRec(mouse, collapseRect) &&
+                 i != panel.shiftDragLastNode)
+        {
+            SetVisibleNodeRangeSelection(*active, active->collapsedNodes, panel.shiftDragAnchorNode, i);
+            panel.shiftDragLastNode = i;
             panel.contextMenuOpen = false;
         }
 
