@@ -74,6 +74,9 @@ constexpr double kFarClipPlane = 10000.0;
 constexpr Color kSelectionColor{ 204, 154, 42, 255 };
 constexpr float kMinTransformGizmoScale = 0.5f;
 constexpr float kMaxTransformGizmoScale = 2.0f;
+constexpr float kNodeContextMenuW = 152.0f;
+constexpr float kNodeContextMenuBaseH = 92.0f;
+constexpr float kNodeContextMenuBoneH = 122.0f;
 float gBottomPanelReservedHeight = kTimelinePanelHeight;
 float gTransformGizmoScale = 1.0f;
 
@@ -359,6 +362,7 @@ struct HierarchyPanelState
     float validatorScroll = 0.0f;
     float skinWeightsScroll = 0.0f;
     int contextNodeIndex = -1;
+    std::vector<int> contextNodeIndices;
     Vector2 contextPosition{};
     bool contextMenuOpen = false;
     bool contextMenuJustOpened = false;
@@ -1142,6 +1146,9 @@ void PruneSelectedNodes(ModelTab& tab);
 void ClearNodeSelection(ModelTab& tab);
 void SetSingleSelectedNode(ModelTab& tab, int nodeIndex);
 void SelectNode(ModelTab& tab, int nodeIndex, bool additive);
+bool ApplyScaleToNode(ModelTab& tab, int nodeIndex);
+bool ResetBoneSubtreeToOriginalBindPose(ModelTab& tab, int rootNodeIndex);
+std::vector<int> GetSelectedTransformRoots(const ModelTab& tab);
 void InvalidateDisplayedAnimationCaches(ModelTab& tab);
 void RefreshDisplayedMesh(ModelTab& tab);
 MeshFrame BuildSkinnedMeshFrame(const LoadedFbxModel& target, const BoneFrame& boneFrame);
@@ -1840,6 +1847,142 @@ int MarkNodeSubtreeDeleted(ModelTab& tab, int nodeIndex)
     }
     RefreshDisplayedMesh(tab);
     return deletedCount;
+}
+
+std::vector<int> GetContextActionNodes(const ModelTab& tab, int contextNodeIndex)
+{
+    std::vector<int> nodes;
+    if (!IsValidSelectableNode(tab, contextNodeIndex)) return nodes;
+
+    if (!IsNodeSelected(tab, contextNodeIndex))
+    {
+        nodes.push_back(contextNodeIndex);
+        return nodes;
+    }
+
+    for (int nodeIndex : tab.selectedNodes)
+    {
+        if (IsValidSelectableNode(tab, nodeIndex))
+        {
+            nodes.push_back(nodeIndex);
+        }
+    }
+    return nodes;
+}
+
+std::vector<int> GetValidContextActionNodes(const ModelTab& tab, const std::vector<int>& contextNodeIndices)
+{
+    std::vector<int> nodes;
+    for (int nodeIndex : contextNodeIndices)
+    {
+        if (IsValidSelectableNode(tab, nodeIndex) && std::find(nodes.begin(), nodes.end(), nodeIndex) == nodes.end())
+        {
+            nodes.push_back(nodeIndex);
+        }
+    }
+    return nodes;
+}
+
+std::vector<int> GetContextActionNodes(const ModelTab& tab, int contextNodeIndex, const std::vector<int>& contextNodeIndices)
+{
+    const std::vector<int> frozenNodes = GetValidContextActionNodes(tab, contextNodeIndices);
+    if (!frozenNodes.empty()) return frozenNodes;
+    return GetContextActionNodes(tab, contextNodeIndex);
+}
+
+std::vector<int> GetContextActionRoots(const ModelTab& tab, const std::vector<int>& actionNodes)
+{
+    std::vector<int> roots;
+    for (int nodeIndex : actionNodes)
+    {
+        if (!IsValidSelectableNode(tab, nodeIndex)) continue;
+
+        bool coveredByContextAncestor = false;
+        for (int otherNode : actionNodes)
+        {
+            if (otherNode == nodeIndex || !IsValidSelectableNode(tab, otherNode)) continue;
+            if (IsDescendantNode(tab.loaded, nodeIndex, otherNode))
+            {
+                coveredByContextAncestor = true;
+                break;
+            }
+        }
+        if (!coveredByContextAncestor)
+        {
+            roots.push_back(nodeIndex);
+        }
+    }
+    return roots;
+}
+
+std::vector<int> GetContextActionRoots(const ModelTab& tab, int contextNodeIndex, const std::vector<int>& contextNodeIndices)
+{
+    return GetContextActionRoots(tab, GetContextActionNodes(tab, contextNodeIndex, contextNodeIndices));
+}
+
+bool HasBoneNode(const ModelTab& tab, const std::vector<int>& nodeIndices)
+{
+    for (int nodeIndex : nodeIndices)
+    {
+        if (!IsValidSelectableNode(tab, nodeIndex)) continue;
+        if (tab.loaded.nodes[static_cast<size_t>(nodeIndex)].type == SceneNodeType::Bone)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+int DeleteContextNodeSubtrees(ModelTab& tab, const std::vector<int>& contextRoots)
+{
+    int deletedCount = 0;
+    for (int nodeIndex : contextRoots)
+    {
+        deletedCount += MarkNodeSubtreeDeleted(tab, nodeIndex);
+    }
+    return deletedCount;
+}
+
+int ApplyScaleToContextNodes(ModelTab& tab, const std::vector<int>& contextNodes)
+{
+    int changedCount = 0;
+    for (int nodeIndex : contextNodes)
+    {
+        if (ApplyScaleToNode(tab, nodeIndex))
+        {
+            ++changedCount;
+        }
+    }
+    return changedCount;
+}
+
+int ResetContextBoneSubtreesToOriginalBindPose(ModelTab& tab, const std::vector<int>& actionNodes)
+{
+    int changedCount = 0;
+    for (int nodeIndex : actionNodes)
+    {
+        if (!IsValidSelectableNode(tab, nodeIndex)) continue;
+        if (tab.loaded.nodes[static_cast<size_t>(nodeIndex)].type != SceneNodeType::Bone) continue;
+
+        bool coveredBySelectedBoneAncestor = false;
+        for (int otherNode : actionNodes)
+        {
+            if (otherNode == nodeIndex || !IsValidSelectableNode(tab, otherNode)) continue;
+            if (tab.loaded.nodes[static_cast<size_t>(otherNode)].type != SceneNodeType::Bone) continue;
+            if (IsDescendantNode(tab.loaded, nodeIndex, otherNode))
+            {
+                coveredBySelectedBoneAncestor = true;
+                break;
+            }
+        }
+        if (coveredBySelectedBoneAncestor) continue;
+
+        if (ResetBoneSubtreeToOriginalBindPose(tab, nodeIndex))
+        {
+            ++changedCount;
+        }
+    }
+    return changedCount;
 }
 
 bool ToggleSelectedNodeIsolation(ModelTab& tab, std::string& notice, std::string& error)
@@ -3546,9 +3689,9 @@ float ClosestAlphaOnScreenSegment(Vector2 point, Vector2 a, Vector2 b)
     return ClampFloat(Vector2DotProduct(Vector2Subtract(point, a), ab) / lengthSq, 0.0f, 1.0f);
 }
 
-bool SelectNodeFromViewport(ModelTab& tab, Vector2 mouse, const VisibilityState& visibility, bool additive = false)
+int PickNodeFromViewport(const ModelTab& tab, Vector2 mouse, const VisibilityState& visibility)
 {
-    if (!tab.loaded.valid || tab.loaded.nodes.empty()) return false;
+    if (!tab.loaded.valid || tab.loaded.nodes.empty()) return -1;
 
     const Ray ray = GetScreenToWorldRay(mouse, tab.orbit.camera);
     int bestNode = -1;
@@ -3601,8 +3744,7 @@ bool SelectNodeFromViewport(ModelTab& tab, Vector2 mouse, const VisibilityState&
 
     if (bestBoneNode >= 0)
     {
-        SelectNode(tab, bestBoneNode, additive);
-        return true;
+        return bestBoneNode;
     }
 
     for (int i = 0; i < static_cast<int>(tab.loaded.nodes.size()); ++i)
@@ -3644,11 +3786,19 @@ bool SelectNodeFromViewport(ModelTab& tab, Vector2 mouse, const VisibilityState&
 
     if (bestNode >= 0)
     {
-        SelectNode(tab, bestNode, additive);
-        return true;
+        return bestNode;
     }
 
-    return false;
+    return -1;
+}
+
+bool SelectNodeFromViewport(ModelTab& tab, Vector2 mouse, const VisibilityState& visibility, bool additive = false)
+{
+    const int pickedNode = PickNodeFromViewport(tab, mouse, visibility);
+    if (pickedNode < 0) return false;
+
+    SelectNode(tab, pickedNode, additive);
+    return true;
 }
 
 bool GetSelectedNodePosition(const ModelTab& tab, Vector3& outPosition)
@@ -7419,9 +7569,6 @@ void DrawHierarchyPanel(Font font,
     constexpr float panelX = 0.0f;
     constexpr float panelY = 61.0f;
     constexpr float rowH = 22.0f;
-    constexpr float contextMenuW = 152.0f;
-    constexpr float contextMenuBaseH = 92.0f;
-    constexpr float contextMenuBoneH = 122.0f;
     const float panelH = GetHierarchyPanelHeight();
 
     if (panel.hidden)
@@ -7520,13 +7667,11 @@ void DrawHierarchyPanel(Font font,
 
     auto getContextMenuHeight = [&]()
     {
-        if (panel.contextNodeIndex >= 0 &&
-            panel.contextNodeIndex < static_cast<int>(active->loaded.nodes.size()) &&
-            active->loaded.nodes[static_cast<size_t>(panel.contextNodeIndex)].type == SceneNodeType::Bone)
+        if (HasBoneNode(*active, GetContextActionNodes(*active, panel.contextNodeIndex, panel.contextNodeIndices)))
         {
-            return contextMenuBoneH;
+            return kNodeContextMenuBoneH;
         }
-        return contextMenuBaseH;
+        return kNodeContextMenuBaseH;
     };
     float rowY = GetHierarchyContentStartY();
     int visibleRow = 0;
@@ -7544,7 +7689,8 @@ void DrawHierarchyPanel(Font font,
         const bool selected = IsNodeSelected(*active, i);
         const bool hasChildren = HasVisibleSceneNodeChildren(*active, i);
         const float indent = static_cast<float>(node.depth) * 14.0f;
-        const Rectangle contextMenuBounds{ panel.contextPosition.x, panel.contextPosition.y, contextMenuW, getContextMenuHeight() };
+        const float contextMenuH = panel.contextMenuOpen ? getContextMenuHeight() : kNodeContextMenuBaseH;
+        const Rectangle contextMenuBounds{ panel.contextPosition.x, panel.contextPosition.y, kNodeContextMenuW, contextMenuH };
         const bool mouseOverContextMenu = panel.contextMenuOpen && CheckCollisionPointRec(mouse, contextMenuBounds);
 
         if (selected)
@@ -7574,7 +7720,12 @@ void DrawHierarchyPanel(Font font,
         DrawUiTextClipped(font, label, labelX, rowY + 3.0f, 15.0f, labelMaxW, selected ? RAYWHITE : Color{ 198, 207, 216, 255 });
         EndScissorMode();
 
-        if (hovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !mouseOverContextMenu && !CheckCollisionPointRec(mouse, collapseRect))
+        if (hovered &&
+            IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
+            !IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) &&
+            !IsMouseButtonDown(MOUSE_BUTTON_RIGHT) &&
+            !mouseOverContextMenu &&
+            !CheckCollisionPointRec(mouse, collapseRect))
         {
             if (additiveSelection)
             {
@@ -7596,11 +7747,27 @@ void DrawHierarchyPanel(Font font,
 
         if (hovered && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) && !mouseOverContextMenu)
         {
-            SetSingleSelectedNode(*active, i);
-            panel.contextNodeIndex = i;
-            const float menuHeight = node.type == SceneNodeType::Bone ? contextMenuBoneH : contextMenuBaseH;
+            std::vector<int> selectedContextNodes = GetValidContextActionNodes(*active, active->selectedNodes);
+            if (selectedContextNodes.size() > 1)
+            {
+                panel.contextNodeIndices = std::move(selectedContextNodes);
+                panel.contextNodeIndex = active->selectedNode >= 0 ? active->selectedNode : panel.contextNodeIndices.front();
+            }
+            else if (IsNodeSelected(*active, i))
+            {
+                active->selectedNode = i;
+                panel.contextNodeIndex = i;
+                panel.contextNodeIndices = GetContextActionNodes(*active, i);
+            }
+            else
+            {
+                SetSingleSelectedNode(*active, i);
+                panel.contextNodeIndex = i;
+                panel.contextNodeIndices = GetContextActionNodes(*active, i);
+            }
+            const float menuHeight = getContextMenuHeight();
             panel.contextPosition = Vector2{
-                ClampFloat(mouse.x, 4.0f, static_cast<float>(GetScreenWidth()) - contextMenuW - 4.0f),
+                ClampFloat(mouse.x, 4.0f, static_cast<float>(GetScreenWidth()) - kNodeContextMenuW - 4.0f),
                 ClampFloat(mouse.y, 4.0f, static_cast<float>(GetScreenHeight()) - menuHeight - 4.0f)
             };
             panel.contextMenuOpen = true;
@@ -7627,14 +7794,16 @@ void DrawHierarchyPanel(Font font,
 
     if (panel.contextMenuOpen)
     {
-        const Rectangle menu{ panel.contextPosition.x, panel.contextPosition.y, contextMenuW, getContextMenuHeight() };
+        const Rectangle menu{ panel.contextPosition.x, panel.contextPosition.y, kNodeContextMenuW, getContextMenuHeight() };
         DrawRectangleRec(menu, Color{ 24, 27, 31, 248 });
         DrawRectangleLinesEx(menu, 1.0f, Color{ 84, 94, 104, 255 });
         const bool validContextNode = panel.contextNodeIndex >= 0 &&
                                       panel.contextNodeIndex < static_cast<int>(active->loaded.nodes.size()) &&
                                       !IsDeletedNode(*active, panel.contextNodeIndex);
-        const bool validContextBone = validContextNode &&
-                                      active->loaded.nodes[static_cast<size_t>(panel.contextNodeIndex)].type == SceneNodeType::Bone;
+        const std::vector<int> contextNodes = GetContextActionNodes(*active, panel.contextNodeIndex, panel.contextNodeIndices);
+        const std::vector<int> contextRoots = GetContextActionRoots(*active, contextNodes);
+        const bool validContextBone = validContextNode && HasBoneNode(*active, contextNodes);
+        const bool multiContext = contextNodes.size() > 1;
         if (panel.contextMenuJustOpened)
         {
             panel.contextMenuJustOpened = false;
@@ -7655,10 +7824,10 @@ void DrawHierarchyPanel(Font font,
             }
             if (DrawPanelButton(font, deleteItem, "Delete"))
             {
-                if (validContextNode)
+                if (validContextNode && !contextRoots.empty())
                 {
                     PushUndoSnapshot(*active);
-                    const int deletedCount = MarkNodeSubtreeDeleted(*active, panel.contextNodeIndex);
+                    const int deletedCount = DeleteContextNodeSubtrees(*active, contextRoots);
                     notice = "Deleted tree object" + std::string(deletedCount == 1 ? "." : "s.");
                     error.clear();
                 }
@@ -7669,10 +7838,18 @@ void DrawHierarchyPanel(Font font,
                 if (validContextNode)
                 {
                     EditSnapshot before = CaptureEditSnapshot(*active);
-                    if (ApplyScaleToNode(*active, panel.contextNodeIndex))
+                    const int changedCount = ApplyScaleToContextNodes(*active, contextNodes);
+                    if (changedCount > 0)
                     {
                         PushUndoSnapshot(*active, std::move(before));
-                        notice = "Applied scale.";
+                        if (multiContext)
+                        {
+                            notice = "Applied scale to " + std::to_string(changedCount) + " object" + std::string(changedCount == 1 ? "." : "s.");
+                        }
+                        else
+                        {
+                            notice = "Applied scale.";
+                        }
                     }
                     else
                     {
@@ -7685,10 +7862,18 @@ void DrawHierarchyPanel(Font font,
             if (validContextBone && DrawPanelButton(font, resetBindPoseItem, "Reset Bind Pose"))
             {
                 EditSnapshot before = CaptureEditSnapshot(*active);
-                if (ResetBoneSubtreeToOriginalBindPose(*active, panel.contextNodeIndex))
+                const int changedCount = ResetContextBoneSubtreesToOriginalBindPose(*active, contextNodes);
+                if (changedCount > 0)
                 {
                     PushUndoSnapshot(*active, std::move(before));
-                    notice = "Bone subtree reset to bind pose.";
+                    if (multiContext)
+                    {
+                        notice = "Reset " + std::to_string(changedCount) + " bone subtree" + std::string(changedCount == 1 ? " to bind pose." : "s to bind pose.");
+                    }
+                    else
+                    {
+                        notice = "Bone subtree reset to bind pose.";
+                    }
                 }
                 else
                 {
@@ -8417,7 +8602,14 @@ int main(int argc, char** argv)
 
         UpdateHierarchyPanelInteraction(hierarchyPanel, active);
         const float hierarchyBlockW = GetHierarchyPanelBlockWidth(hierarchyPanel);
-        const bool mouseInViewport = mouse.x > hierarchyBlockW && mouse.y >= 61.0f && mouse.y < static_cast<float>(GetScreenHeight()) - gBottomPanelReservedHeight && openMenu == OpenMenu::None && !hierarchyPanel.resizing;
+        const Rectangle hierarchyContextMenuBounds{ hierarchyPanel.contextPosition.x, hierarchyPanel.contextPosition.y, kNodeContextMenuW, kNodeContextMenuBoneH };
+        const bool mouseOverHierarchyContextMenu = hierarchyPanel.contextMenuOpen && CheckCollisionPointRec(mouse, hierarchyContextMenuBounds);
+        const bool mouseInViewport = mouse.x > hierarchyBlockW &&
+                                     mouse.y >= 61.0f &&
+                                     mouse.y < static_cast<float>(GetScreenHeight()) - gBottomPanelReservedHeight &&
+                                     openMenu == OpenMenu::None &&
+                                     !hierarchyPanel.resizing &&
+                                     !mouseOverHierarchyContextMenu;
 
         const bool toolbarConsumedMouse = !renameEditor.active && UpdateTransformToolbarInput(transformTool, gizmoOrientation, hierarchyBlockW);
         if (!renameEditor.active && !controlDown && !altDown)
@@ -8485,7 +8677,13 @@ int main(int argc, char** argv)
         {
             visibility.boneRotations = !visibility.boneRotations;
         }
-        if (active && mouseInViewport && !toolbarConsumedMouse && !transformConsumedMouse && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+        if (active &&
+            mouseInViewport &&
+            !toolbarConsumedMouse &&
+            !transformConsumedMouse &&
+            IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
+            !IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) &&
+            !IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
         {
             if (SelectNodeFromViewport(*active, mouse, visibility, shiftDown))
             {
@@ -8506,20 +8704,16 @@ int main(int argc, char** argv)
             !transformConsumedMouse &&
             IsMouseButtonPressed(MOUSE_BUTTON_RIGHT))
         {
-            if (SelectNodeFromViewport(*active, mouse, visibility, false))
+            std::vector<int> selectedContextNodes = GetValidContextActionNodes(*active, active->selectedNodes);
+            if (selectedContextNodes.size() > 1)
             {
-                constexpr float nodeContextMenuW = 152.0f;
-                constexpr float nodeContextMenuBaseH = 92.0f;
-                constexpr float nodeContextMenuBoneH = 122.0f;
-                const bool selectedBone = active->selectedNode >= 0 &&
-                                          active->selectedNode < static_cast<int>(active->loaded.nodes.size()) &&
-                                          active->loaded.nodes[static_cast<size_t>(active->selectedNode)].type == SceneNodeType::Bone;
-                const float nodeContextMenuH = selectedBone ? nodeContextMenuBoneH : nodeContextMenuBaseH;
-                RevealNodeInHierarchy(*active, hierarchyPanel, active->selectedNode);
+                hierarchyPanel.contextNodeIndices = std::move(selectedContextNodes);
+                hierarchyPanel.contextNodeIndex = active->selectedNode >= 0 ? active->selectedNode : hierarchyPanel.contextNodeIndices.front();
+                const float nodeContextMenuH = HasBoneNode(*active, hierarchyPanel.contextNodeIndices) ? kNodeContextMenuBoneH : kNodeContextMenuBaseH;
+                RevealNodeInHierarchy(*active, hierarchyPanel, hierarchyPanel.contextNodeIndex);
                 hierarchyPanel.activeTab = LeftPanelTab::Hierarchy;
-                hierarchyPanel.contextNodeIndex = active->selectedNode;
                 hierarchyPanel.contextPosition = Vector2{
-                    ClampFloat(mouse.x, 4.0f, static_cast<float>(GetScreenWidth()) - nodeContextMenuW - 4.0f),
+                    ClampFloat(mouse.x, 4.0f, static_cast<float>(GetScreenWidth()) - kNodeContextMenuW - 4.0f),
                     ClampFloat(mouse.y, 4.0f, static_cast<float>(GetScreenHeight()) - nodeContextMenuH - 4.0f)
                 };
                 hierarchyPanel.contextMenuOpen = true;
@@ -8527,7 +8721,35 @@ int main(int argc, char** argv)
             }
             else
             {
-                hierarchyPanel.contextMenuOpen = false;
+                const int contextNode = PickNodeFromViewport(*active, mouse, visibility);
+                if (contextNode >= 0)
+                {
+                    if (IsNodeSelected(*active, contextNode))
+                    {
+                        active->selectedNode = contextNode;
+                        hierarchyPanel.contextNodeIndex = contextNode;
+                        hierarchyPanel.contextNodeIndices = GetContextActionNodes(*active, contextNode);
+                    }
+                    else
+                    {
+                        SetSingleSelectedNode(*active, contextNode);
+                        hierarchyPanel.contextNodeIndex = contextNode;
+                        hierarchyPanel.contextNodeIndices = GetContextActionNodes(*active, contextNode);
+                    }
+                    const float nodeContextMenuH = HasBoneNode(*active, hierarchyPanel.contextNodeIndices) ? kNodeContextMenuBoneH : kNodeContextMenuBaseH;
+                    RevealNodeInHierarchy(*active, hierarchyPanel, contextNode);
+                    hierarchyPanel.activeTab = LeftPanelTab::Hierarchy;
+                    hierarchyPanel.contextPosition = Vector2{
+                        ClampFloat(mouse.x, 4.0f, static_cast<float>(GetScreenWidth()) - kNodeContextMenuW - 4.0f),
+                        ClampFloat(mouse.y, 4.0f, static_cast<float>(GetScreenHeight()) - nodeContextMenuH - 4.0f)
+                    };
+                    hierarchyPanel.contextMenuOpen = true;
+                    hierarchyPanel.contextMenuJustOpened = true;
+                }
+                else
+                {
+                    hierarchyPanel.contextMenuOpen = false;
+                }
             }
         }
 
