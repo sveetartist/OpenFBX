@@ -200,7 +200,8 @@ enum class TransformTool
     Select,
     Move,
     Rotate,
-    Scale
+    Scale,
+    WeightsBrush
 };
 
 enum class TransformAxis
@@ -284,6 +285,18 @@ struct TransformGizmoState
     int nodeIndex = -1;
     Vector2 lastMouse{};
     float lastAngle = 0.0f;
+};
+
+struct WeightBrushSettings
+{
+    float sizePixels = 48.0f;
+    float strength = 0.35f;
+    bool autoNormalize = true;
+};
+
+struct WeightBrushState
+{
+    bool painting = false;
 };
 
 struct TextureClipboard
@@ -1151,6 +1164,10 @@ bool ResetBoneSubtreeToOriginalBindPose(ModelTab& tab, int rootNodeIndex);
 std::vector<int> GetSelectedTransformRoots(const ModelTab& tab);
 void InvalidateDisplayedAnimationCaches(ModelTab& tab);
 void RefreshDisplayedMesh(ModelTab& tab);
+bool HasCpuSkinnedMesh(const LoadedFbxModel& loaded);
+const BonePose* FindBonePoseByNode(const std::vector<BonePose>& poses, int nodeIndex);
+bool RebuildCurrentSkinnedMeshFromBones(ModelTab& tab);
+bool RebuildSkinnedAnimationMeshFrames(ModelTab& tab);
 MeshFrame BuildSkinnedMeshFrame(const LoadedFbxModel& target, const BoneFrame& boneFrame);
 void DrawUiText(Font font, const char* text, float x, float y, float size, Color color);
 void DrawUiTextClipped(Font font, const char* text, float x, float y, float size, float maxWidth, Color color);
@@ -2661,6 +2678,116 @@ float GetBoneInfluenceWeight(const SkinnedVertex& vertex, const std::string& bon
     return weight;
 }
 
+Vector3 TransformPosePointInverse(const BonePose& pose, Vector3 point)
+{
+    const Vector3 delta = Vector3Subtract(point, pose.position);
+    return Vector3{
+        Vector3DotProduct(delta, pose.axisX) / std::max(0.000001f, std::fabs(pose.scale.x)),
+        Vector3DotProduct(delta, pose.axisY) / std::max(0.000001f, std::fabs(pose.scale.y)),
+        Vector3DotProduct(delta, pose.axisZ) / std::max(0.000001f, std::fabs(pose.scale.z))
+    };
+}
+
+Vector3 TransformPoseVectorInverse(const BonePose& pose, Vector3 vector)
+{
+    return NormalizeOrFallback(Vector3{
+        Vector3DotProduct(vector, pose.axisX) / std::max(0.000001f, std::fabs(pose.scale.x)),
+        Vector3DotProduct(vector, pose.axisY) / std::max(0.000001f, std::fabs(pose.scale.y)),
+        Vector3DotProduct(vector, pose.axisZ) / std::max(0.000001f, std::fabs(pose.scale.z))
+    }, vector);
+}
+
+SkinnedVertexInfluence* FindVertexInfluence(SkinnedVertex& vertex, const std::string& boneName)
+{
+    for (SkinnedVertexInfluence& influence : vertex.influences)
+    {
+        if (influence.boneName == boneName)
+        {
+            return &influence;
+        }
+    }
+    return nullptr;
+}
+
+float GetVertexWeightSum(const SkinnedVertex& vertex)
+{
+    float sum = 0.0f;
+    for (const SkinnedVertexInfluence& influence : vertex.influences)
+    {
+        sum += influence.weight;
+    }
+    return sum;
+}
+
+void NormalizeVertexWeights(SkinnedVertex& vertex)
+{
+    float sum = GetVertexWeightSum(vertex);
+    if (sum <= 0.000001f) return;
+    for (SkinnedVertexInfluence& influence : vertex.influences)
+    {
+        influence.weight = ClampFloat(influence.weight / sum, 0.0f, 1.0f);
+    }
+}
+
+bool AddBoneWeightToVertex(SkinnedVertex& vertex,
+                           const std::string& boneName,
+                           const BonePose& bonePose,
+                           float amount,
+                           bool autoNormalize)
+{
+    amount = ClampFloat(amount, 0.0f, 1.0f);
+    if (amount <= 0.000001f) return false;
+
+    SkinnedVertexInfluence* target = FindVertexInfluence(vertex, boneName);
+    if (!target)
+    {
+        vertex.influences.push_back(SkinnedVertexInfluence{
+            boneName,
+            0.0f,
+            TransformPosePointInverse(bonePose, vertex.bindPosition),
+            TransformPoseVectorInverse(bonePose, vertex.bindNormal)
+        });
+        target = &vertex.influences.back();
+    }
+
+    const float oldWeight = target->weight;
+    const float newWeight = ClampFloat(oldWeight + amount, 0.0f, 1.0f);
+    const float gainedWeight = newWeight - oldWeight;
+    if (gainedWeight <= 0.000001f) return false;
+
+    if (autoNormalize)
+    {
+        float otherWeight = 0.0f;
+        for (const SkinnedVertexInfluence& influence : vertex.influences)
+        {
+            if (&influence != target)
+            {
+                otherWeight += influence.weight;
+            }
+        }
+
+        if (otherWeight > 0.000001f)
+        {
+            const float targetOtherWeight = std::max(0.0f, 1.0f - newWeight);
+            const float scale = targetOtherWeight / otherWeight;
+            for (SkinnedVertexInfluence& influence : vertex.influences)
+            {
+                if (&influence != target)
+                {
+                    influence.weight = ClampFloat(influence.weight * scale, 0.0f, 1.0f);
+                }
+            }
+        }
+    }
+
+    target->weight = newWeight;
+    if (autoNormalize)
+    {
+        NormalizeVertexWeights(vertex);
+    }
+    return true;
+}
+
 Color LerpColor(Color a, Color b, float t)
 {
     t = ClampFloat(t, 0.0f, 1.0f);
@@ -3801,6 +3928,127 @@ bool SelectNodeFromViewport(ModelTab& tab, Vector2 mouse, const VisibilityState&
     return true;
 }
 
+bool PickMeshNodeFromViewport(const ModelTab& tab, Vector2 mouse, const VisibilityState& visibility, int& outNode)
+{
+    outNode = -1;
+    if (!tab.loaded.valid || !tab.loaded.hasMesh || tab.loaded.nodes.empty()) return false;
+    if (!visibility.geometry) return false;
+
+    const Ray ray = GetScreenToWorldRay(mouse, tab.orbit.camera);
+    float bestDistance = std::numeric_limits<float>::max();
+    for (int nodeIndex = 0; nodeIndex < static_cast<int>(tab.loaded.nodes.size()); ++nodeIndex)
+    {
+        const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(nodeIndex)];
+        if (node.type != SceneNodeType::Mesh || !IsViewportNodeVisible(tab, nodeIndex)) continue;
+
+        RayCollision hit{};
+        if (!GetRayCollisionMeshNodeTriangles(tab, node, ray, hit)) continue;
+        if (hit.hit && hit.distance < bestDistance)
+        {
+            bestDistance = hit.distance;
+            outNode = nodeIndex;
+        }
+    }
+    return outNode >= 0;
+}
+
+bool PaintSkinWeightsAtMouse(ModelTab& tab,
+                             Vector2 mouse,
+                             const VisibilityState& visibility,
+                             const WeightBrushSettings& brush,
+                             std::string& notice,
+                             std::string& error)
+{
+    if (!HasCpuSkinnedMesh(tab.loaded))
+    {
+        error = "No CPU skin weights available to paint.";
+        notice.clear();
+        return false;
+    }
+
+    if (tab.selectedNode < 0 ||
+        tab.selectedNode >= static_cast<int>(tab.loaded.nodes.size()) ||
+        tab.loaded.nodes[static_cast<size_t>(tab.selectedNode)].type != SceneNodeType::Bone ||
+        IsDeletedNode(tab, tab.selectedNode))
+    {
+        error = "Select a bone to paint weights.";
+        notice.clear();
+        return false;
+    }
+
+    int meshNodeIndex = -1;
+    if (!PickMeshNodeFromViewport(tab, mouse, visibility, meshNodeIndex))
+    {
+        return false;
+    }
+
+    const BonePose* bonePose = FindBonePoseByNode(tab.originalBindBonePoses, tab.selectedNode);
+    if (!bonePose)
+    {
+        bonePose = FindBonePoseByNode(tab.loaded.bonePoses, tab.selectedNode);
+    }
+    if (!bonePose)
+    {
+        error = "Selected bone has no bind pose.";
+        notice.clear();
+        return false;
+    }
+
+    const SceneNode& meshNode = tab.loaded.nodes[static_cast<size_t>(meshNodeIndex)];
+    const int start = std::max(0, meshNode.meshVertexStart);
+    const int end = std::min(meshNode.meshVertexStart + meshNode.meshVertexCount, static_cast<int>(tab.loaded.skinnedVertices.size()));
+    if (start >= end) return false;
+
+    const float* displayedVertices = GetCurrentMeshVertices(tab);
+    if (!displayedVertices) return false;
+
+    const std::string& boneName = tab.loaded.nodes[static_cast<size_t>(tab.selectedNode)].name;
+    const float radius = ClampFloat(brush.sizePixels, 4.0f, 220.0f);
+    const float radiusSqr = radius * radius;
+    const float amountScale = ClampFloat(brush.strength, 0.0f, 1.0f) * std::max(0.0f, GetFrameTime()) * 2.0f;
+    if (amountScale <= 0.000001f) return false;
+
+    int changedVertices = 0;
+    for (int vertexIndex = start; vertexIndex < end; ++vertexIndex)
+    {
+        const size_t base = static_cast<size_t>(vertexIndex) * 3;
+        if (base + 2 >= tab.loaded.bindVertices.size()) continue;
+
+        const Vector3 displayedPoint{
+            displayedVertices[base],
+            displayedVertices[base + 1],
+            displayedVertices[base + 2]
+        };
+        const Vector2 screen = GetWorldToScreen(displayedPoint, tab.orbit.camera);
+        const float distanceSqr = Vector2DistanceSqr(mouse, screen);
+        if (distanceSqr > radiusSqr) continue;
+
+        const Vector3 bindPoint{
+            tab.loaded.bindVertices[base],
+            tab.loaded.bindVertices[base + 1],
+            tab.loaded.bindVertices[base + 2]
+        };
+        const float falloff = 1.0f - std::sqrt(distanceSqr) / radius;
+        const float amount = amountScale * ClampFloat(falloff, 0.0f, 1.0f);
+        tab.loaded.skinnedVertices[static_cast<size_t>(vertexIndex)].bindPosition = bindPoint;
+        if (AddBoneWeightToVertex(tab.loaded.skinnedVertices[static_cast<size_t>(vertexIndex)], boneName, *bonePose, amount, brush.autoNormalize))
+        {
+            ++changedVertices;
+        }
+    }
+
+    if (changedVertices <= 0) return false;
+
+    RebuildSkinnedAnimationMeshFrames(tab);
+    if (tab.animation.clipIndex < 0 && !RebuildCurrentSkinnedMeshFromBones(tab))
+    {
+        RefreshDisplayedMesh(tab);
+    }
+    notice = "Painted weights: " + std::to_string(changedVertices) + " vertices.";
+    error.clear();
+    return true;
+}
+
 bool GetSelectedNodePosition(const ModelTab& tab, Vector3& outPosition)
 {
     if (tab.selectedNode < 0 || tab.selectedNode >= static_cast<int>(tab.loaded.nodes.size())) return false;
@@ -3891,6 +4139,7 @@ const char* GetTransformToolName(TransformTool tool)
     case TransformTool::Move: return "Move";
     case TransformTool::Rotate: return "Rotate";
     case TransformTool::Scale: return "Scale";
+    case TransformTool::WeightsBrush: return "Weights";
     }
     return "Select";
 }
@@ -3903,6 +4152,7 @@ const char* GetTransformToolHotkey(TransformTool tool)
     case TransformTool::Move: return "W";
     case TransformTool::Rotate: return "E";
     case TransformTool::Scale: return "R";
+    case TransformTool::WeightsBrush: return "A";
     }
     return "";
 }
@@ -4026,7 +4276,7 @@ float DistanceMouseToGizmoRing(ModelTab& tab, Vector2 mouse, Vector3 pivot, Tran
 TransformAxis PickTransformGizmoAxis(ModelTab& tab, TransformTool tool, GizmoOrientation orientation, Vector2 mouse)
 {
     Vector3 pivot{};
-    if (tool == TransformTool::Select || !GetGizmoPivot(tab, pivot)) return TransformAxis::None;
+    if (tool == TransformTool::Select || tool == TransformTool::WeightsBrush || !GetGizmoPivot(tab, pivot)) return TransformAxis::None;
 
     const Vector2 pivotScreen = GetWorldToScreen(pivot, tab.orbit.camera);
     if (Vector2Distance(mouse, pivotScreen) <= 15.0f)
@@ -4069,7 +4319,7 @@ bool UpdateTransformGizmoInput(ModelTab* active,
                                std::string& notice,
                                std::string& error)
 {
-    if (!active || !active->loaded.valid || tool == TransformTool::Select)
+    if (!active || !active->loaded.valid || tool == TransformTool::Select || tool == TransformTool::WeightsBrush)
     {
         state = TransformGizmoState{};
         return false;
@@ -4207,7 +4457,7 @@ void DrawMoveGizmoArrow(const ModelTab& tab, Vector3 start, Vector3 end, Vector3
 
 void DrawTransformGizmo(const ModelTab& tab, TransformTool tool, const TransformGizmoState& state, GizmoOrientation orientation)
 {
-    if (tool == TransformTool::Select) return;
+    if (tool == TransformTool::Select || tool == TransformTool::WeightsBrush) return;
 
     Vector3 pivot{};
     if (!GetGizmoPivot(tab, pivot)) return;
@@ -4264,20 +4514,62 @@ Rectangle GetTransformToolbarButtonRect(float hierarchyBlockW, int index)
 
 Rectangle GetGizmoOrientationButtonRect(float hierarchyBlockW, int index)
 {
-    return Rectangle{ hierarchyBlockW + 10.0f + static_cast<float>(index) * 57.0f, 266.0f, 55.0f, 28.0f };
+    return Rectangle{ hierarchyBlockW + 10.0f + static_cast<float>(index) * 57.0f, 304.0f, 55.0f, 28.0f };
 }
 
-bool UpdateTransformToolbarInput(TransformTool& tool, GizmoOrientation& orientation, float hierarchyBlockW)
+Rectangle GetWeightBrushSmallButtonRect(float hierarchyBlockW, int row, int column)
+{
+    return Rectangle{ hierarchyBlockW + 112.0f + static_cast<float>(column) * 31.0f, 366.0f + static_cast<float>(row) * 30.0f, 28.0f, 24.0f };
+}
+
+Rectangle GetWeightBrushAutoNormalizeRect(float hierarchyBlockW)
+{
+    return Rectangle{ hierarchyBlockW + 10.0f, 426.0f, 112.0f, 24.0f };
+}
+
+bool UpdateTransformToolbarInput(TransformTool& tool, GizmoOrientation& orientation, WeightBrushSettings& brush, float hierarchyBlockW)
 {
     const Vector2 mouse = GetMousePosition();
-    const TransformTool tools[] = { TransformTool::Select, TransformTool::Move, TransformTool::Rotate, TransformTool::Scale };
-    for (int i = 0; i < 4; ++i)
+    const TransformTool tools[] = { TransformTool::Select, TransformTool::Move, TransformTool::Rotate, TransformTool::Scale, TransformTool::WeightsBrush };
+    for (int i = 0; i < 5; ++i)
     {
         if (CheckCollisionPointRec(mouse, GetTransformToolbarButtonRect(hierarchyBlockW, i)))
         {
             if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
             {
                 tool = tools[i];
+            }
+            return true;
+        }
+    }
+
+    if (tool == TransformTool::WeightsBrush)
+    {
+        for (int row = 0; row < 2; ++row)
+        {
+            for (int column = 0; column < 2; ++column)
+            {
+                if (!CheckCollisionPointRec(mouse, GetWeightBrushSmallButtonRect(hierarchyBlockW, row, column))) continue;
+                if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+                {
+                    if (row == 0)
+                    {
+                        brush.sizePixels = ClampFloat(brush.sizePixels + (column == 0 ? -8.0f : 8.0f), 8.0f, 220.0f);
+                    }
+                    else
+                    {
+                        brush.strength = ClampFloat(brush.strength + (column == 0 ? -0.05f : 0.05f), 0.01f, 1.0f);
+                    }
+                }
+                return true;
+            }
+        }
+
+        if (CheckCollisionPointRec(mouse, GetWeightBrushAutoNormalizeRect(hierarchyBlockW)))
+        {
+            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+            {
+                brush.autoNormalize = !brush.autoNormalize;
             }
             return true;
         }
@@ -4298,10 +4590,30 @@ bool UpdateTransformToolbarInput(TransformTool& tool, GizmoOrientation& orientat
     return false;
 }
 
-void DrawTransformToolbar(Font font, TransformTool tool, GizmoOrientation orientation, float hierarchyBlockW)
+void DrawWeightBrushControls(Font font, const WeightBrushSettings& brush, float hierarchyBlockW)
 {
-    const TransformTool tools[] = { TransformTool::Select, TransformTool::Move, TransformTool::Rotate, TransformTool::Scale };
-    for (int i = 0; i < 4; ++i)
+    DrawUiText(font, "Brush", hierarchyBlockW + 12.0f, 342.0f, 13.0f, Color{ 154, 166, 178, 255 });
+
+    char value[64] = {};
+    DrawUiText(font, "Size", hierarchyBlockW + 12.0f, 370.0f, 13.0f, Color{ 190, 200, 210, 255 });
+    std::snprintf(value, sizeof(value), "%.0f", brush.sizePixels);
+    DrawUiText(font, value, hierarchyBlockW + 52.0f, 370.0f, 13.0f, Color{ 205, 224, 238, 255 });
+    DrawPanelButton(font, GetWeightBrushSmallButtonRect(hierarchyBlockW, 0, 0), "-");
+    DrawPanelButton(font, GetWeightBrushSmallButtonRect(hierarchyBlockW, 0, 1), "+");
+
+    DrawUiText(font, "Strength", hierarchyBlockW + 12.0f, 400.0f, 13.0f, Color{ 190, 200, 210, 255 });
+    std::snprintf(value, sizeof(value), "%.2f", brush.strength);
+    DrawUiText(font, value, hierarchyBlockW + 70.0f, 400.0f, 13.0f, Color{ 205, 224, 238, 255 });
+    DrawPanelButton(font, GetWeightBrushSmallButtonRect(hierarchyBlockW, 1, 0), "-");
+    DrawPanelButton(font, GetWeightBrushSmallButtonRect(hierarchyBlockW, 1, 1), "+");
+
+    DrawPanelButton(font, GetWeightBrushAutoNormalizeRect(hierarchyBlockW), brush.autoNormalize ? "[x] Normalize" : "[ ] Normalize");
+}
+
+void DrawTransformToolbar(Font font, TransformTool tool, GizmoOrientation orientation, const WeightBrushSettings& brush, float hierarchyBlockW)
+{
+    const TransformTool tools[] = { TransformTool::Select, TransformTool::Move, TransformTool::Rotate, TransformTool::Scale, TransformTool::WeightsBrush };
+    for (int i = 0; i < 5; ++i)
     {
         const Rectangle bounds = GetTransformToolbarButtonRect(hierarchyBlockW, i);
         const bool selected = tool == tools[i];
@@ -4312,7 +4624,7 @@ void DrawTransformToolbar(Font font, TransformTool tool, GizmoOrientation orient
         DrawUiText(font, GetTransformToolName(tools[i]), bounds.x + 48.0f, bounds.y + 7.0f, 13.0f, selected ? Color{ 205, 224, 238, 255 } : Color{ 154, 166, 178, 255 });
     }
 
-    DrawUiText(font, "Space", hierarchyBlockW + 12.0f, 242.0f, 13.0f, Color{ 154, 166, 178, 255 });
+    DrawUiText(font, "Space", hierarchyBlockW + 12.0f, 280.0f, 13.0f, Color{ 154, 166, 178, 255 });
     const GizmoOrientation orientations[] = { GizmoOrientation::Global, GizmoOrientation::Local };
     for (int i = 0; i < 2; ++i)
     {
@@ -4323,6 +4635,34 @@ void DrawTransformToolbar(Font font, TransformTool tool, GizmoOrientation orient
         DrawRectangleLinesEx(bounds, 1.0f, selected ? Color{ 128, 188, 235, 255 } : Color{ 78, 88, 98, 255 });
         DrawUiText(font, GetGizmoOrientationName(orientations[i]), bounds.x + 8.0f, bounds.y + 7.0f, 13.0f, selected ? Color{ 205, 224, 238, 255 } : Color{ 154, 166, 178, 255 });
     }
+
+    if (tool == TransformTool::WeightsBrush)
+    {
+        DrawWeightBrushControls(font, brush, hierarchyBlockW);
+    }
+}
+
+void DrawWeightBrushCursor(Font font, const ModelTab* active, TransformTool tool, const WeightBrushSettings& brush, bool mouseInViewport)
+{
+    if (!active || tool != TransformTool::WeightsBrush || !mouseInViewport) return;
+
+    const Vector2 mouse = GetMousePosition();
+    const float radius = ClampFloat(brush.sizePixels, 4.0f, 220.0f);
+    DrawCircleV(mouse, radius, Color{ 204, 154, 42, 28 });
+    DrawCircleLines(static_cast<int>(std::round(mouse.x)), static_cast<int>(std::round(mouse.y)), radius, Color{ 235, 190, 72, 230 });
+
+    const bool validBone = active->selectedNode >= 0 &&
+                           active->selectedNode < static_cast<int>(active->loaded.nodes.size()) &&
+                           active->loaded.nodes[static_cast<size_t>(active->selectedNode)].type == SceneNodeType::Bone &&
+                           !IsDeletedNode(*active, active->selectedNode);
+    const char* label = validBone ? active->loaded.nodes[static_cast<size_t>(active->selectedNode)].name.c_str() : "Select bone";
+    const Vector2 labelSize = MeasureTextEx(font, label, 13.0f, 1.0f);
+    Rectangle badge{ mouse.x + radius + 8.0f, mouse.y - 12.0f, std::min(labelSize.x + 12.0f, 260.0f), 22.0f };
+    badge.x = ClampFloat(badge.x, 4.0f, static_cast<float>(GetScreenWidth()) - badge.width - 4.0f);
+    badge.y = ClampFloat(badge.y, 4.0f, static_cast<float>(GetScreenHeight()) - badge.height - gBottomPanelReservedHeight - 4.0f);
+    DrawRectangleRec(badge, Color{ 24, 27, 31, 230 });
+    DrawRectangleLinesEx(badge, 1.0f, validBone ? Color{ 120, 190, 230, 255 } : Color{ 210, 110, 92, 255 });
+    DrawUiTextClipped(font, label, badge.x + 6.0f, badge.y + 4.0f, 13.0f, badge.width - 12.0f, validBone ? Color{ 205, 224, 238, 255 } : Color{ 255, 170, 150, 255 });
 }
 
 Font LoadTechnicalFont()
@@ -8507,6 +8847,8 @@ int main(int argc, char** argv)
     TransformTool transformTool = TransformTool::Select;
     GizmoOrientation gizmoOrientation = GizmoOrientation::Global;
     TransformGizmoState transformGizmo;
+    WeightBrushSettings weightBrush;
+    WeightBrushState weightBrushState;
 
     auto openPathInNewTab = [&](const std::string& path)
     {
@@ -8611,17 +8953,49 @@ int main(int argc, char** argv)
                                      !hierarchyPanel.resizing &&
                                      !mouseOverHierarchyContextMenu;
 
-        const bool toolbarConsumedMouse = !renameEditor.active && UpdateTransformToolbarInput(transformTool, gizmoOrientation, hierarchyBlockW);
+        const bool toolbarConsumedMouse = !renameEditor.active && UpdateTransformToolbarInput(transformTool, gizmoOrientation, weightBrush, hierarchyBlockW);
         if (!renameEditor.active && !controlDown && !altDown)
         {
             if (IsKeyPressed(KEY_Q)) transformTool = TransformTool::Select;
             if (IsKeyPressed(KEY_W)) transformTool = TransformTool::Move;
             if (IsKeyPressed(KEY_E)) transformTool = TransformTool::Rotate;
             if (IsKeyPressed(KEY_R)) transformTool = TransformTool::Scale;
+            if (IsKeyPressed(KEY_A)) transformTool = TransformTool::WeightsBrush;
         }
         const bool transformConsumedMouse = !toolbarConsumedMouse &&
                                             !renameEditor.active &&
                                             UpdateTransformGizmoInput(active, transformGizmo, transformTool, gizmoOrientation, mouseInViewport, notice, error);
+        bool weightBrushConsumedMouse = false;
+        if (!renameEditor.active &&
+            active &&
+            mouseInViewport &&
+            transformTool == TransformTool::WeightsBrush &&
+            IsMouseButtonDown(MOUSE_BUTTON_LEFT) &&
+            !IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
+        {
+            if (!weightBrushState.painting)
+            {
+                EditSnapshot before = CaptureEditSnapshot(*active);
+                if (PaintSkinWeightsAtMouse(*active, mouse, visibility, weightBrush, notice, error))
+                {
+                    PushUndoSnapshot(*active, std::move(before));
+                    weightBrushState.painting = true;
+                    visibility.skinWeights = true;
+                }
+            }
+            else
+            {
+                if (PaintSkinWeightsAtMouse(*active, mouse, visibility, weightBrush, notice, error))
+                {
+                    visibility.skinWeights = true;
+                }
+            }
+            weightBrushConsumedMouse = true;
+        }
+        if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT))
+        {
+            weightBrushState.painting = false;
+        }
 
         if (!renameEditor.active && active && altDown && IsKeyPressed(KEY_Q))
         {
@@ -8681,6 +9055,7 @@ int main(int argc, char** argv)
             mouseInViewport &&
             !toolbarConsumedMouse &&
             !transformConsumedMouse &&
+            !weightBrushConsumedMouse &&
             IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
             !IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) &&
             !IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
@@ -8702,6 +9077,7 @@ int main(int argc, char** argv)
             !altDown &&
             !toolbarConsumedMouse &&
             !transformConsumedMouse &&
+            !weightBrushConsumedMouse &&
             IsMouseButtonPressed(MOUSE_BUTTON_RIGHT))
         {
             std::vector<int> selectedContextNodes = GetValidContextActionNodes(*active, active->selectedNodes);
@@ -8755,7 +9131,7 @@ int main(int argc, char** argv)
 
         if (active)
         {
-            if (mouseInViewport && !toolbarConsumedMouse && !transformConsumedMouse)
+            if (mouseInViewport && !toolbarConsumedMouse && !transformConsumedMouse && !weightBrushConsumedMouse)
             {
                 UpdateNavigation(active->orbit, navigation);
             }
@@ -8850,6 +9226,8 @@ int main(int argc, char** argv)
         }
         EndMode3D();
 
+        DrawWeightBrushCursor(uiFont, active, transformTool, weightBrush, mouseInViewport);
+
         char statusText[256] = {};
         std::snprintf(statusText, sizeof(statusText), "VIEW: %s    MAT: %s    TOOL: %s    SPACE: %s    NAV: %s", GetViewModeName(viewMode), GetMaterialPreviewModeName(materialPreviewMode), GetTransformToolName(transformTool), GetGizmoOrientationName(gizmoOrientation), GetNavigationPresetName(navigation));
         DrawUiText(uiFont, statusText, static_cast<float>(GetScreenWidth() - 660), 8, 16, Color{ 165, 220, 255, 255 });
@@ -8904,7 +9282,7 @@ int main(int argc, char** argv)
         gBottomPanelReservedHeight = animationPanelCollapsed ? kTimelineCollapsedHeight : kTimelinePanelHeight;
 
         DrawHierarchyPanel(uiFont, active, hierarchyPanel, renameEditor, droppedPaths, droppedTextureHandled, textureClipboard, notice, error);
-        DrawTransformToolbar(uiFont, transformTool, gizmoOrientation, hierarchyBlockW);
+        DrawTransformToolbar(uiFont, transformTool, gizmoOrientation, weightBrush, hierarchyBlockW);
         DrawOrientationGizmo(uiFont, active ? active->orbit.camera : emptyOrbit.camera);
 
         DrawTabs(uiFont, tabs, activeTab);
