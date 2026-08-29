@@ -1167,6 +1167,7 @@ const PbrMaterialState& GetSelectedPbrMaterial(const ModelTab& tab)
 }
 
 bool IsDeletedNode(const ModelTab& tab, int nodeIndex);
+bool IsSceneRootNode(const LoadedFbxModel& loaded, int nodeIndex);
 bool IsSceneNodeVisible(const ModelTab& tab, const std::vector<bool>& collapsed, int nodeIndex);
 bool IsNodeSelected(const ModelTab& tab, int nodeIndex);
 void PruneSelectedNodes(ModelTab& tab);
@@ -1718,10 +1719,18 @@ bool IsDeletedNode(const ModelTab& tab, int nodeIndex)
            tab.deletedNodes[static_cast<size_t>(nodeIndex)];
 }
 
+bool IsSceneRootNode(const LoadedFbxModel& loaded, int nodeIndex)
+{
+    return nodeIndex >= 0 &&
+           nodeIndex < static_cast<int>(loaded.nodes.size()) &&
+           loaded.nodes[static_cast<size_t>(nodeIndex)].parent < 0;
+}
+
 bool IsValidSelectableNode(const ModelTab& tab, int nodeIndex)
 {
     return nodeIndex >= 0 &&
            nodeIndex < static_cast<int>(tab.loaded.nodes.size()) &&
+           !IsSceneRootNode(tab.loaded, nodeIndex) &&
            !IsDeletedNode(tab, nodeIndex);
 }
 
@@ -1857,6 +1866,7 @@ bool IsDescendantNode(const LoadedFbxModel& loaded, int possibleDescendant, int 
 int MarkNodeSubtreeDeleted(ModelTab& tab, int nodeIndex)
 {
     if (nodeIndex < 0 || nodeIndex >= static_cast<int>(tab.loaded.nodes.size())) return 0;
+    if (IsSceneRootNode(tab.loaded, nodeIndex)) return 0;
     if (tab.deletedNodes.size() != tab.loaded.nodes.size())
     {
         tab.deletedNodes.resize(tab.loaded.nodes.size(), false);
@@ -1912,6 +1922,16 @@ std::vector<int> GetValidContextActionNodes(const ModelTab& tab, const std::vect
         }
     }
     return nodes;
+}
+
+int GetContextAnchorNode(const ModelTab& tab, const std::vector<int>& contextNodeIndices)
+{
+    if (IsValidSelectableNode(tab, tab.selectedNode) &&
+        std::find(contextNodeIndices.begin(), contextNodeIndices.end(), tab.selectedNode) != contextNodeIndices.end())
+    {
+        return tab.selectedNode;
+    }
+    return contextNodeIndices.empty() ? -1 : contextNodeIndices.front();
 }
 
 std::vector<int> GetContextActionNodes(const ModelTab& tab, int contextNodeIndex, const std::vector<int>& contextNodeIndices)
@@ -2055,6 +2075,7 @@ bool ToggleSelectedNodeIsolation(ModelTab& tab, std::string& notice, std::string
 void RenameSceneNode(ModelTab& tab, int nodeIndex, const std::string& newName)
 {
     if (nodeIndex < 0 || nodeIndex >= static_cast<int>(tab.loaded.nodes.size()) || newName.empty()) return;
+    if (IsSceneRootNode(tab.loaded, nodeIndex)) return;
 
     SceneNode& node = tab.loaded.nodes[static_cast<size_t>(nodeIndex)];
     const std::string oldName = node.name;
@@ -2079,6 +2100,7 @@ void RenameSceneNode(ModelTab& tab, int nodeIndex, const std::string& newName)
 void StartRenameNode(RenameEditor& editor, const LoadedFbxModel& loaded, int nodeIndex)
 {
     if (nodeIndex < 0 || nodeIndex >= static_cast<int>(loaded.nodes.size())) return;
+    if (IsSceneRootNode(loaded, nodeIndex)) return;
     editor = RenameEditor{};
     editor.target = RenameTarget::SceneNode;
     editor.nodeIndex = nodeIndex;
@@ -3445,6 +3467,7 @@ bool ApplyScaleToNode(ModelTab& tab, int nodeIndex)
 {
     if (nodeIndex < 0 ||
         nodeIndex >= static_cast<int>(tab.loaded.nodes.size()) ||
+        IsSceneRootNode(tab.loaded, nodeIndex) ||
         IsDeletedNode(tab, nodeIndex))
     {
         return false;
@@ -3911,16 +3934,19 @@ int PickNodeFromViewport(const ModelTab& tab, Vector2 mouse, const VisibilitySta
                     const float segmentAlpha = ClosestAlphaOnScreenSegment(mouse, startScreen, endScreen);
                     const bool nearEndJoint = endDistance <= bonePickRadiusPixels && endDistance <= startDistance;
                     const bool nearStartJoint = startDistance <= bonePickRadiusPixels && startDistance < endDistance;
+                    const bool canPickStart = IsValidSelectableNode(tab, bone.startNode);
+                    const bool canPickEnd = IsValidSelectableNode(tab, bone.endNode);
+                    if (!canPickStart && !canPickEnd) continue;
 
                     bestBoneScreenDistance = pickDistance;
                     bestBoneDepth = depth;
-                    if ((nearEndJoint || (!nearStartJoint && segmentAlpha >= 0.5f)) && bone.endNode >= 0)
+                    if ((nearEndJoint || (!nearStartJoint && segmentAlpha >= 0.5f)) && canPickEnd)
                     {
                         bestBoneNode = bone.endNode;
                     }
                     else
                     {
-                        bestBoneNode = bone.startNode >= 0 ? bone.startNode : bone.endNode;
+                        bestBoneNode = canPickStart ? bone.startNode : canPickEnd ? bone.endNode : -1;
                     }
                 }
             }
@@ -3935,6 +3961,7 @@ int PickNodeFromViewport(const ModelTab& tab, Vector2 mouse, const VisibilitySta
     for (int i = 0; i < static_cast<int>(tab.loaded.nodes.size()); ++i)
     {
         const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(i)];
+        if (!IsValidSelectableNode(tab, i)) continue;
         if (!IsViewportNodeVisible(tab, i)) continue;
 
         if (node.type == SceneNodeType::Mesh)
@@ -4996,8 +5023,7 @@ std::vector<int> GetSelectedMeshNodeIndices(const ModelTab& tab)
     std::vector<int> meshNodes;
     for (int nodeIndex : tab.selectedNodes)
     {
-        if (nodeIndex < 0 || nodeIndex >= static_cast<int>(tab.loaded.nodes.size())) continue;
-        if (IsDeletedNode(tab, nodeIndex)) continue;
+        if (!IsValidSelectableNode(tab, nodeIndex)) continue;
 
         const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(nodeIndex)];
         if (node.type == SceneNodeType::Mesh)
@@ -5064,6 +5090,7 @@ std::string FormatMaterialSummary(const std::vector<std::string>& materialNames)
 void DrawSelectedInfoPanel(Font font, const ModelTab* active)
 {
     if (!active || active->selectedNode < 0 || active->selectedNode >= static_cast<int>(active->loaded.nodes.size())) return;
+    if (!IsValidSelectableNode(*active, active->selectedNode)) return;
 
     const std::vector<int> selectedMeshNodes = GetSelectedMeshNodeIndices(*active);
     if (selectedMeshNodes.size() > 1)
@@ -5191,10 +5218,15 @@ bool HasVisibleSceneNodeChildren(const ModelTab& tab, int nodeIndex)
 
 bool IsSceneNodeVisible(const LoadedFbxModel& loaded, const std::vector<bool>& collapsed, int nodeIndex)
 {
+    if (nodeIndex < 0 || nodeIndex >= static_cast<int>(loaded.nodes.size())) return false;
+    if (IsSceneRootNode(loaded, nodeIndex)) return false;
+
     int parent = loaded.nodes[static_cast<size_t>(nodeIndex)].parent;
     while (parent >= 0)
     {
-        if (parent < static_cast<int>(collapsed.size()) && collapsed[static_cast<size_t>(parent)])
+        if (!IsSceneRootNode(loaded, parent) &&
+            parent < static_cast<int>(collapsed.size()) &&
+            collapsed[static_cast<size_t>(parent)])
         {
             return false;
         }
@@ -5205,13 +5237,17 @@ bool IsSceneNodeVisible(const LoadedFbxModel& loaded, const std::vector<bool>& c
 
 bool IsSceneNodeVisible(const ModelTab& tab, const std::vector<bool>& collapsed, int nodeIndex)
 {
+    if (nodeIndex < 0 || nodeIndex >= static_cast<int>(tab.loaded.nodes.size())) return false;
+    if (IsSceneRootNode(tab.loaded, nodeIndex)) return false;
     if (IsDeletedNode(tab, nodeIndex)) return false;
 
     int parent = tab.loaded.nodes[static_cast<size_t>(nodeIndex)].parent;
     while (parent >= 0)
     {
-        if (IsDeletedNode(tab, parent)) return false;
-        if (parent < static_cast<int>(collapsed.size()) && collapsed[static_cast<size_t>(parent)])
+        if (!IsSceneRootNode(tab.loaded, parent) && IsDeletedNode(tab, parent)) return false;
+        if (!IsSceneRootNode(tab.loaded, parent) &&
+            parent < static_cast<int>(collapsed.size()) &&
+            collapsed[static_cast<size_t>(parent)])
         {
             return false;
         }
@@ -5248,6 +5284,21 @@ int CountVisibleSceneNodes(const ModelTab& tab, const std::vector<bool>& collaps
         if (IsSceneNodeVisible(tab, collapsed, i)) ++count;
     }
     return count;
+}
+
+int GetHierarchyDisplayDepth(const LoadedFbxModel& loaded, int nodeIndex)
+{
+    int depth = 0;
+    int parent = nodeIndex >= 0 && nodeIndex < static_cast<int>(loaded.nodes.size()) ? loaded.nodes[static_cast<size_t>(nodeIndex)].parent : -1;
+    while (parent >= 0 && parent < static_cast<int>(loaded.nodes.size()))
+    {
+        if (!IsSceneRootNode(loaded, parent))
+        {
+            ++depth;
+        }
+        parent = loaded.nodes[static_cast<size_t>(parent)].parent;
+    }
+    return depth;
 }
 
 int GetVisibleSceneNodeRow(const LoadedFbxModel& loaded, const std::vector<bool>& collapsed, int nodeIndex)
@@ -5384,10 +5435,13 @@ SceneStats CalculateSceneStats(const LoadedFbxModel& loaded)
 {
     SceneStats stats;
     std::vector<std::string> materialNames;
-    stats.nodes = static_cast<int>(loaded.nodes.size());
 
-    for (const SceneNode& node : loaded.nodes)
+    for (int nodeIndex = 0; nodeIndex < static_cast<int>(loaded.nodes.size()); ++nodeIndex)
     {
+        if (IsSceneRootNode(loaded, nodeIndex)) continue;
+
+        const SceneNode& node = loaded.nodes[static_cast<size_t>(nodeIndex)];
+        ++stats.nodes;
         switch (node.type)
         {
         case SceneNodeType::Mesh:
@@ -6510,6 +6564,8 @@ void ValidateDuplicateNames(const LoadedFbxModel& loaded, std::vector<ValidatorI
     std::unordered_map<std::string, int> nodeNames;
     for (int i = 0; i < static_cast<int>(loaded.nodes.size()); ++i)
     {
+        if (IsSceneRootNode(loaded, i)) continue;
+
         const std::string& name = loaded.nodes[static_cast<size_t>(i)].name;
         if (name.empty()) continue;
         const int count = ++nodeNames[name];
@@ -6542,6 +6598,8 @@ void ValidateTransforms(const LoadedFbxModel& loaded, std::vector<ValidatorIssue
 {
     for (int i = 0; i < static_cast<int>(loaded.nodes.size()); ++i)
     {
+        if (IsSceneRootNode(loaded, i)) continue;
+
         const SceneNode& node = loaded.nodes[static_cast<size_t>(i)];
         if (!IsFiniteVector(node.position) || !IsFiniteVector(node.rotation) || !IsFiniteVector(node.scale) ||
             !IsFiniteVector(node.axisX) || !IsFiniteVector(node.axisY) || !IsFiniteVector(node.axisZ))
@@ -7987,7 +8045,19 @@ void DrawUvPanel(Font font, ModelTab& tab, float panelX, float panelY, float pan
         y += 8.0f;
     }
 
-    const float editorSize = std::min(panelW - 24.0f, std::max(120.0f, GetHierarchyPanelHeight() - (y - panelY) - 24.0f));
+    const float panelBottom = 61.0f + GetHierarchyPanelHeight();
+    const float availableEditorSize = std::min(panelW - 24.0f, panelBottom - y - 12.0f);
+    if (availableEditorSize < 48.0f)
+    {
+        tab.uvIslandMarqueeSelecting = false;
+        if (y + 18.0f < panelBottom)
+        {
+            DrawUiTextClipped(font, "Not enough panel space for the UV editor.", contentX, y, 14.0f, panelW - 24.0f, Color{ 128, 140, 152, 255 });
+        }
+        return;
+    }
+
+    const float editorSize = availableEditorSize;
     const Rectangle editor{ contentX, y, editorSize, editorSize };
     DrawRectangleRec(editor, Color{ 14, 16, 19, 245 });
     DrawRectangleLinesEx(editor, 1.0f, Color{ 88, 98, 108, 255 });
@@ -8544,7 +8614,7 @@ void DrawHierarchyPanel(Font font,
         const bool hovered = CheckCollisionPointRec(mouse, row);
         const bool selected = IsNodeSelected(*active, i);
         const bool hasChildren = HasVisibleSceneNodeChildren(*active, i);
-        const float indent = static_cast<float>(node.depth) * 14.0f;
+        const float indent = static_cast<float>(GetHierarchyDisplayDepth(active->loaded, i)) * 14.0f;
         const float contextMenuH = panel.contextMenuOpen ? getContextMenuHeight() : kNodeContextMenuBaseH;
         const Rectangle contextMenuBounds{ panel.contextPosition.x, panel.contextPosition.y, kNodeContextMenuW, contextMenuH };
         const bool mouseOverContextMenu = panel.contextMenuOpen && CheckCollisionPointRec(mouse, contextMenuBounds);
@@ -8607,7 +8677,7 @@ void DrawHierarchyPanel(Font font,
             if (selectedContextNodes.size() > 1)
             {
                 panel.contextNodeIndices = std::move(selectedContextNodes);
-                panel.contextNodeIndex = active->selectedNode >= 0 ? active->selectedNode : panel.contextNodeIndices.front();
+                panel.contextNodeIndex = GetContextAnchorNode(*active, panel.contextNodeIndices);
             }
             else if (IsNodeSelected(*active, i))
             {
@@ -8633,7 +8703,7 @@ void DrawHierarchyPanel(Font font,
         rowY += rowH;
     }
 
-    const int visibleCount = CountVisibleSceneNodes(active->loaded, active->collapsedNodes);
+    const int visibleCount = CountVisibleSceneNodes(*active, active->collapsedNodes);
     const float visibleRows = std::max(1.0f, std::floor((panelH - 64.0f) / rowH));
     const float maxScroll = std::max(0.0f, static_cast<float>(visibleCount) - visibleRows);
     panel.scroll = ClampFloat(panel.scroll, 0.0f, maxScroll);
@@ -8655,7 +8725,7 @@ void DrawHierarchyPanel(Font font,
         DrawRectangleLinesEx(menu, 1.0f, Color{ 84, 94, 104, 255 });
         const bool validContextNode = panel.contextNodeIndex >= 0 &&
                                       panel.contextNodeIndex < static_cast<int>(active->loaded.nodes.size()) &&
-                                      !IsDeletedNode(*active, panel.contextNodeIndex);
+                                      IsValidSelectableNode(*active, panel.contextNodeIndex);
         const std::vector<int> contextNodes = GetContextActionNodes(*active, panel.contextNodeIndex, panel.contextNodeIndices);
         const std::vector<int> contextRoots = GetContextActionRoots(*active, contextNodes);
         const bool validContextBone = validContextNode && HasBoneNode(*active, contextNodes);
@@ -9393,7 +9463,15 @@ int main(int argc, char** argv)
         tab->visibleBonePoses = tab->loaded.bonePoses;
         tab->collapsedNodes.assign(tab->loaded.nodes.size(), false);
         tab->deletedNodes.assign(tab->loaded.nodes.size(), false);
-        tab->selectedNode = tab->loaded.nodes.empty() ? -1 : 0;
+        tab->selectedNode = -1;
+        for (int nodeIndex = 0; nodeIndex < static_cast<int>(tab->loaded.nodes.size()); ++nodeIndex)
+        {
+            if (IsValidSelectableNode(*tab, nodeIndex))
+            {
+                tab->selectedNode = nodeIndex;
+                break;
+            }
+        }
         if (tab->selectedNode >= 0)
         {
             tab->selectedNodes.assign(1, tab->selectedNode);
@@ -9601,7 +9679,7 @@ int main(int argc, char** argv)
             if (selectedContextNodes.size() > 1)
             {
                 hierarchyPanel.contextNodeIndices = std::move(selectedContextNodes);
-                hierarchyPanel.contextNodeIndex = active->selectedNode >= 0 ? active->selectedNode : hierarchyPanel.contextNodeIndices.front();
+                hierarchyPanel.contextNodeIndex = GetContextAnchorNode(*active, hierarchyPanel.contextNodeIndices);
                 const float nodeContextMenuH = HasBoneNode(*active, hierarchyPanel.contextNodeIndices) ? kNodeContextMenuBoneH : kNodeContextMenuBaseH;
                 RevealNodeInHierarchy(*active, hierarchyPanel, hierarchyPanel.contextNodeIndex);
                 hierarchyPanel.activeTab = LeftPanelTab::Hierarchy;
