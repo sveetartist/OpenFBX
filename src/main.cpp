@@ -355,10 +355,17 @@ struct ModelTab
     bool showUvTexelDensity = false;
     bool showUvSameMaterialMeshes = false;
     int uvDensityTileSize = 1024;
-    int selectedUvIsland = -1;
+    std::vector<int> selectedUvIslands;
     float uvViewZoom = 1.0f;
     Vector2 uvViewPan{};
     bool uvViewPanning = false;
+    bool uvIslandMarqueeSelecting = false;
+    bool uvIslandMarqueeAdditive = false;
+    Vector2 uvIslandMarqueeStart{};
+    Vector2 uvIslandMarqueeCurrent{};
+    int uvSelectionNodeIndex = -1;
+    int uvSelectionUvSet = -1;
+    bool uvSelectionSameMaterial = false;
     int appliedClipIndex = -2;
     int appliedMeshFrameIndex = -1;
     int appliedNextMeshFrameIndex = -1;
@@ -6650,6 +6657,7 @@ void ValidateSkinning(const LoadedFbxModel& loaded, std::vector<ValidatorIssue>&
 }
 
 void ValidateTexelDensityConsistency(const ModelTab& tab, std::vector<ValidatorIssue>& issues);
+void ValidateUvIslandOverlaps(const ModelTab& tab, std::vector<ValidatorIssue>& issues);
 
 std::vector<ValidatorIssue> BuildValidationIssues(const ModelTab& tab)
 {
@@ -6659,6 +6667,7 @@ std::vector<ValidatorIssue> BuildValidationIssues(const ModelTab& tab)
     ValidateTransforms(tab.loaded, issues);
     ValidateGeometry(tab.loaded, issues);
     ValidateTexelDensityConsistency(tab, issues);
+    ValidateUvIslandOverlaps(tab, issues);
     ValidateSkinning(tab.loaded, issues);
 
     std::stable_sort(issues.begin(), issues.end(), [](const ValidatorIssue& a, const ValidatorIssue& b)
@@ -7406,6 +7415,113 @@ float CrossVector2(Vector2 a, Vector2 b)
     return a.x * b.y - a.y * b.x;
 }
 
+float PolygonAreaUv(const std::vector<Vector2>& polygon)
+{
+    if (polygon.size() < 3) return 0.0f;
+
+    float area = 0.0f;
+    for (int i = 0; i < static_cast<int>(polygon.size()); ++i)
+    {
+        const Vector2 a = polygon[static_cast<size_t>(i)];
+        const Vector2 b = polygon[static_cast<size_t>((i + 1) % static_cast<int>(polygon.size()))];
+        area += a.x * b.y - b.x * a.y;
+    }
+    return std::fabs(area) * 0.5f;
+}
+
+bool IsInsideUvClipEdge(Vector2 point, Vector2 edgeStart, Vector2 edgeEnd, float clipSign)
+{
+    constexpr float epsilon = 0.0000001f;
+    const float cross = CrossVector2(Vector2Subtract(edgeEnd, edgeStart), Vector2Subtract(point, edgeStart));
+    return clipSign >= 0.0f ? cross >= -epsilon : cross <= epsilon;
+}
+
+Vector2 IntersectUvLines(Vector2 a0, Vector2 a1, Vector2 b0, Vector2 b1)
+{
+    const Vector2 aDirection = Vector2Subtract(a1, a0);
+    const Vector2 bDirection = Vector2Subtract(b1, b0);
+    const float denominator = CrossVector2(aDirection, bDirection);
+    if (std::fabs(denominator) <= 0.0000001f)
+    {
+        return a1;
+    }
+
+    const float t = CrossVector2(Vector2Subtract(b0, a0), bDirection) / denominator;
+    return Vector2Add(a0, Vector2Scale(aDirection, t));
+}
+
+std::vector<Vector2> ClipUvPolygonAgainstEdge(const std::vector<Vector2>& subject,
+                                              Vector2 edgeStart,
+                                              Vector2 edgeEnd,
+                                              float clipSign)
+{
+    std::vector<Vector2> output;
+    if (subject.empty()) return output;
+
+    Vector2 previous = subject.back();
+    bool previousInside = IsInsideUvClipEdge(previous, edgeStart, edgeEnd, clipSign);
+    for (Vector2 current : subject)
+    {
+        const bool currentInside = IsInsideUvClipEdge(current, edgeStart, edgeEnd, clipSign);
+        if (currentInside != previousInside)
+        {
+            output.push_back(IntersectUvLines(previous, current, edgeStart, edgeEnd));
+        }
+        if (currentInside)
+        {
+            output.push_back(current);
+        }
+        previous = current;
+        previousInside = currentInside;
+    }
+    return output;
+}
+
+float TriangleUvOverlapArea(const UvTriangleSample& a, const UvTriangleSample& b)
+{
+    const float clipArea = CrossVector2(Vector2Subtract(b.uv[1], b.uv[0]), Vector2Subtract(b.uv[2], b.uv[0]));
+    if (std::fabs(clipArea) <= 0.0000001f) return 0.0f;
+
+    std::vector<Vector2> clipped{ a.uv[0], a.uv[1], a.uv[2] };
+    const float clipSign = clipArea >= 0.0f ? 1.0f : -1.0f;
+    for (int i = 0; i < 3 && !clipped.empty(); ++i)
+    {
+        clipped = ClipUvPolygonAgainstEdge(clipped, b.uv[i], b.uv[(i + 1) % 3], clipSign);
+    }
+    return PolygonAreaUv(clipped);
+}
+
+bool UvIslandBoundsOverlap(const UvIslandStats& a, const UvIslandStats& b)
+{
+    constexpr float epsilon = 0.0000001f;
+    return std::min(a.maxU, b.maxU) - std::max(a.minU, b.minU) > epsilon &&
+           std::min(a.maxV, b.maxV) - std::max(a.minV, b.minV) > epsilon;
+}
+
+bool UvIslandsOverlap(const UvIslandStats& a,
+                      const UvIslandStats& b,
+                      const std::vector<UvTriangleSample>& triangles)
+{
+    if (!UvIslandBoundsOverlap(a, b)) return false;
+
+    constexpr float kOverlapAreaEpsilon = 0.0000001f;
+    for (int triangleAIndex : a.triangles)
+    {
+        if (triangleAIndex < 0 || triangleAIndex >= static_cast<int>(triangles.size())) continue;
+        const UvTriangleSample& triangleA = triangles[static_cast<size_t>(triangleAIndex)];
+        for (int triangleBIndex : b.triangles)
+        {
+            if (triangleBIndex < 0 || triangleBIndex >= static_cast<int>(triangles.size())) continue;
+            const UvTriangleSample& triangleB = triangles[static_cast<size_t>(triangleBIndex)];
+            if (TriangleUvOverlapArea(triangleA, triangleB) > kOverlapAreaEpsilon)
+            {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 bool IsPointInUvTriangle(Vector2 point, Vector2 a, Vector2 b, Vector2 c)
 {
     constexpr float epsilon = 0.000001f;
@@ -7446,6 +7562,96 @@ int FindUvIslandAtPoint(const std::vector<UvIslandStats>& islands,
     return -1;
 }
 
+bool IsUvIslandSelected(const std::vector<int>& selectedIslands, int islandIndex)
+{
+    return std::find(selectedIslands.begin(), selectedIslands.end(), islandIndex) != selectedIslands.end();
+}
+
+void AddSelectedUvIsland(std::vector<int>& selectedIslands, int islandIndex)
+{
+    if (islandIndex < 0 || IsUvIslandSelected(selectedIslands, islandIndex)) return;
+    selectedIslands.push_back(islandIndex);
+}
+
+void ToggleSelectedUvIsland(std::vector<int>& selectedIslands, int islandIndex)
+{
+    if (islandIndex < 0) return;
+
+    auto found = std::find(selectedIslands.begin(), selectedIslands.end(), islandIndex);
+    if (found == selectedIslands.end())
+    {
+        selectedIslands.push_back(islandIndex);
+    }
+    else
+    {
+        selectedIslands.erase(found);
+    }
+}
+
+void SetSingleSelectedUvIsland(std::vector<int>& selectedIslands, int islandIndex)
+{
+    selectedIslands.clear();
+    if (islandIndex >= 0)
+    {
+        selectedIslands.push_back(islandIndex);
+    }
+}
+
+void PruneSelectedUvIslands(std::vector<int>& selectedIslands, int islandCount)
+{
+    selectedIslands.erase(std::remove_if(selectedIslands.begin(),
+                                         selectedIslands.end(),
+                                         [islandCount](int islandIndex)
+                                         {
+                                             return islandIndex < 0 || islandIndex >= islandCount;
+                                         }),
+                          selectedIslands.end());
+}
+
+Rectangle RectangleFromPoints(Vector2 a, Vector2 b)
+{
+    const float minX = std::min(a.x, b.x);
+    const float minY = std::min(a.y, b.y);
+    return Rectangle{ minX, minY, std::fabs(a.x - b.x), std::fabs(a.y - b.y) };
+}
+
+struct UvSelectionSummary
+{
+    int count = 0;
+    float uvArea = 0.0f;
+    float density = 0.0f;
+    bool mixedDensity = false;
+};
+
+UvSelectionSummary CalculateUvSelectionSummary(const std::vector<UvIslandStats>& islands,
+                                               const std::vector<int>& selectedIslands)
+{
+    UvSelectionSummary summary;
+    bool hasFirstDensity = false;
+    float firstRoundedDensity = 0.0f;
+    for (int islandIndex : selectedIslands)
+    {
+        if (islandIndex < 0 || islandIndex >= static_cast<int>(islands.size())) continue;
+
+        const UvIslandStats& island = islands[static_cast<size_t>(islandIndex)];
+        ++summary.count;
+        summary.uvArea += island.uvArea;
+
+        const float roundedDensity = std::round(island.density * 10.0f) / 10.0f;
+        if (!hasFirstDensity)
+        {
+            summary.density = island.density;
+            firstRoundedDensity = roundedDensity;
+            hasFirstDensity = true;
+        }
+        else if (std::fabs(roundedDensity - firstRoundedDensity) > 0.0001f)
+        {
+            summary.mixedDensity = true;
+        }
+    }
+    return summary;
+}
+
 int NextUvDensityTileSize(int current)
 {
     if (current < 1024) return 1024;
@@ -7453,6 +7659,84 @@ int NextUvDensityTileSize(int current)
     if (current < 4096) return 4096;
     if (current < 8192) return 8192;
     return 512;
+}
+
+int GetFirstUvIslandNodeIndex(const UvIslandStats& island, const std::vector<UvTriangleSample>& triangles)
+{
+    if (island.nodeIndex >= 0) return island.nodeIndex;
+
+    for (int triangleIndex : island.triangles)
+    {
+        if (triangleIndex < 0 || triangleIndex >= static_cast<int>(triangles.size())) continue;
+
+        const int nodeIndex = triangles[static_cast<size_t>(triangleIndex)].nodeIndex;
+        if (nodeIndex >= 0) return nodeIndex;
+    }
+    return -1;
+}
+
+void ValidateUvIslandOverlaps(const ModelTab& tab, std::vector<ValidatorIssue>& issues)
+{
+    if (!tab.loaded.hasMesh || tab.loaded.uvSets.empty()) return;
+
+    for (int uvSetIndex = 0; uvSetIndex < static_cast<int>(tab.loaded.uvSets.size()); ++uvSetIndex)
+    {
+        const std::vector<float>& uvs = tab.loaded.uvSets[static_cast<size_t>(uvSetIndex)];
+        if (uvs.empty()) continue;
+
+        std::unordered_map<std::string, std::vector<int>> nodesByMaterial;
+        for (int nodeIndex = 0; nodeIndex < static_cast<int>(tab.loaded.nodes.size()); ++nodeIndex)
+        {
+            const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(nodeIndex)];
+            if (node.type != SceneNodeType::Mesh || node.meshVertexStart < 0 || node.meshVertexCount <= 0) continue;
+            if (uvs.size() < static_cast<size_t>(node.meshVertexStart + node.meshVertexCount) * 2) continue;
+
+            std::string materialName = GetPrimaryMaterialName(node);
+            if (materialName.empty())
+            {
+                materialName = "(unassigned)";
+            }
+            nodesByMaterial[materialName].push_back(nodeIndex);
+        }
+
+        const std::string uvSetName = uvSetIndex < static_cast<int>(tab.loaded.uvSetNames.size()) ?
+                                      tab.loaded.uvSetNames[static_cast<size_t>(uvSetIndex)] :
+                                      std::string("UV Set ") + std::to_string(uvSetIndex + 1);
+        for (const auto& entry : nodesByMaterial)
+        {
+            const std::vector<UvTriangleSample> materialTriangles = BuildUvScopeTriangles(tab, uvs, entry.second);
+            if (materialTriangles.empty()) continue;
+
+            const std::vector<UvIslandStats> islands = CalculateUvIslandStats(materialTriangles, 1, 1);
+            bool foundOverlap = false;
+            int issueNode = -1;
+            for (int islandA = 0; islandA < static_cast<int>(islands.size()) && !foundOverlap; ++islandA)
+            {
+                for (int islandB = islandA + 1; islandB < static_cast<int>(islands.size()); ++islandB)
+                {
+                    if (UvIslandsOverlap(islands[static_cast<size_t>(islandA)], islands[static_cast<size_t>(islandB)], materialTriangles))
+                    {
+                        issueNode = GetFirstUvIslandNodeIndex(islands[static_cast<size_t>(islandB)], materialTriangles);
+                        if (issueNode < 0)
+                        {
+                            issueNode = GetFirstUvIslandNodeIndex(islands[static_cast<size_t>(islandA)], materialTriangles);
+                        }
+                        foundOverlap = true;
+                        break;
+                    }
+                }
+            }
+
+            if (foundOverlap)
+            {
+                AddValidationIssue(issues,
+                                   ValidatorSeverity::Warning,
+                                   "Overlapping UVs",
+                                   entry.first + " " + uvSetName + " has overlapping UV islands in the same texture space.",
+                                   issueNode);
+            }
+        }
+    }
 }
 
 void ValidateTexelDensityConsistency(const ModelTab& tab, std::vector<ValidatorIssue>& issues)
@@ -7585,6 +7869,8 @@ void DrawUvPanel(Font font, ModelTab& tab, float panelX, float panelY, float pan
     if (tab.selectedNode < 0 || tab.selectedNode >= static_cast<int>(tab.loaded.nodes.size()) ||
         tab.loaded.nodes[static_cast<size_t>(tab.selectedNode)].type != SceneNodeType::Mesh)
     {
+        tab.selectedUvIslands.clear();
+        tab.uvIslandMarqueeSelecting = false;
         DrawUiTextClipped(font, "Select a mesh in the viewport or hierarchy to display its UVs.", contentX, y, 14.0f, panelW - 24.0f, Color{ 128, 140, 152, 255 });
         return;
     }
@@ -7594,6 +7880,8 @@ void DrawUvPanel(Font font, ModelTab& tab, float panelX, float panelY, float pan
     const std::vector<float>& uvs = tab.loaded.uvSets[static_cast<size_t>(tab.selectedUvSet)];
     if (node.meshVertexStart < 0 || node.meshVertexCount <= 0 || uvs.size() < static_cast<size_t>(node.meshVertexStart + node.meshVertexCount) * 2)
     {
+        tab.selectedUvIslands.clear();
+        tab.uvIslandMarqueeSelecting = false;
         DrawUiTextClipped(font, "Selected mesh has no UV data for this set.", contentX, y, 14.0f, panelW - 24.0f, Color{ 128, 140, 152, 255 });
         return;
     }
@@ -7611,7 +7899,17 @@ void DrawUvPanel(Font font, ModelTab& tab, float panelX, float panelY, float pan
     const std::vector<int> scopeNodeIndices = GetUvScopeNodeIndices(tab, node, selectedNodeIndex);
     const std::vector<UvTriangleSample> scopeTriangles = BuildUvScopeTriangles(tab, uvs, scopeNodeIndices);
     const std::vector<UvIslandStats> islands = CalculateUvIslandStats(scopeTriangles, densityTextureWidth, densityTextureHeight);
-    tab.selectedUvIsland = islands.empty() ? -1 : ClampInt(tab.selectedUvIsland, -1, static_cast<int>(islands.size()) - 1);
+    if (tab.uvSelectionNodeIndex != selectedNodeIndex ||
+        tab.uvSelectionUvSet != tab.selectedUvSet ||
+        tab.uvSelectionSameMaterial != tab.showUvSameMaterialMeshes)
+    {
+        tab.selectedUvIslands.clear();
+        tab.uvIslandMarqueeSelecting = false;
+        tab.uvSelectionNodeIndex = selectedNodeIndex;
+        tab.uvSelectionUvSet = tab.selectedUvSet;
+        tab.uvSelectionSameMaterial = tab.showUvSameMaterialMeshes;
+    }
+    PruneSelectedUvIslands(tab.selectedUvIslands, static_cast<int>(islands.size()));
 
     const float toggleW = (panelW - 30.0f) * 0.5f;
     const Rectangle densityToggle{ contentX, y, toggleW, 24.0f };
@@ -7644,16 +7942,38 @@ void DrawUvPanel(Font font, ModelTab& tab, float panelX, float panelY, float pan
         }
         y += 28.0f;
 
-        if (tab.selectedUvIsland >= 0 && tab.selectedUvIsland < static_cast<int>(islands.size()))
+        const UvSelectionSummary selectionSummary = CalculateUvSelectionSummary(islands, tab.selectedUvIslands);
+        if (selectionSummary.count > 0)
         {
-            const UvIslandStats& island = islands[static_cast<size_t>(tab.selectedUvIsland)];
-            char islandLine[192] = {};
-            std::snprintf(islandLine,
-                          sizeof(islandLine),
-                          "Selected island %d: %.1f px/m",
-                          tab.selectedUvIsland + 1,
-                          island.density);
-            DrawUiTextClipped(font, islandLine, contentX, y, 14.0f, panelW - 24.0f, island.density > 0.0f ? Color{ 150, 225, 170, 255 } : Color{ 255, 185, 125, 255 });
+            char selectionLine[192] = {};
+            if (selectionSummary.count == 1)
+            {
+                std::snprintf(selectionLine,
+                              sizeof(selectionLine),
+                              "Selected island: UV space %.2f%%",
+                              selectionSummary.uvArea * 100.0f);
+            }
+            else
+            {
+                std::snprintf(selectionLine,
+                              sizeof(selectionLine),
+                              "Selected islands %d: UV space %.2f%%",
+                              selectionSummary.count,
+                              selectionSummary.uvArea * 100.0f);
+            }
+            DrawUiTextClipped(font, selectionLine, contentX, y, 14.0f, panelW - 24.0f, Color{ 190, 200, 210, 255 });
+            y += 22.0f;
+
+            char densityLine[192] = {};
+            if (selectionSummary.mixedDensity)
+            {
+                std::snprintf(densityLine, sizeof(densityLine), "Texel density: multiple");
+            }
+            else
+            {
+                std::snprintf(densityLine, sizeof(densityLine), "Texel density: %.1f px/m", selectionSummary.density);
+            }
+            DrawUiTextClipped(font, densityLine, contentX, y, 14.0f, panelW - 24.0f, selectionSummary.density > 0.0f || selectionSummary.mixedDensity ? Color{ 150, 225, 170, 255 } : Color{ 255, 185, 125, 255 });
             y += 22.0f;
         }
         else
@@ -7697,6 +8017,7 @@ void DrawUvPanel(Font font, ModelTab& tab, float panelX, float panelY, float pan
     };
 
     const bool mouseOverEditor = CheckCollisionPointRec(mouse, editor);
+    const bool shiftDown = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
     if (mouseOverEditor)
     {
         const float wheel = GetMouseWheelMove();
@@ -7715,8 +8036,81 @@ void DrawUvPanel(Font font, ModelTab& tab, float panelX, float panelY, float pan
         }
         if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
         {
-            tab.selectedUvIsland = FindUvIslandAtPoint(islands, scopeTriangles, screenToUv(mouse));
+            tab.uvIslandMarqueeSelecting = true;
+            tab.uvIslandMarqueeAdditive = shiftDown;
+            tab.uvIslandMarqueeStart = mouse;
+            tab.uvIslandMarqueeCurrent = mouse;
         }
+    }
+    if (tab.uvIslandMarqueeSelecting && IsMouseButtonDown(MOUSE_BUTTON_LEFT))
+    {
+        tab.uvIslandMarqueeCurrent = mouse;
+    }
+    if (tab.uvIslandMarqueeSelecting && IsMouseButtonReleased(MOUSE_BUTTON_LEFT))
+    {
+        tab.uvIslandMarqueeCurrent = mouse;
+        constexpr float kUvMarqueeThreshold = 5.0f;
+        const bool dragged = Vector2Distance(tab.uvIslandMarqueeStart, tab.uvIslandMarqueeCurrent) >= kUvMarqueeThreshold;
+        if (dragged)
+        {
+            const Rectangle marquee = RectangleFromPoints(tab.uvIslandMarqueeStart, tab.uvIslandMarqueeCurrent);
+            std::vector<int> marqueeIslands;
+            for (int islandIndex = 0; islandIndex < static_cast<int>(islands.size()); ++islandIndex)
+            {
+                const UvIslandStats& island = islands[static_cast<size_t>(islandIndex)];
+                bool intersects = false;
+                for (int triangleIndex : island.triangles)
+                {
+                    if (triangleIndex < 0 || triangleIndex >= static_cast<int>(scopeTriangles.size())) continue;
+
+                    const UvTriangleSample& triangle = scopeTriangles[static_cast<size_t>(triangleIndex)];
+                    const Vector2 a = uvToScreen(triangle.uv[0]);
+                    const Vector2 b = uvToScreen(triangle.uv[1]);
+                    const Vector2 c = uvToScreen(triangle.uv[2]);
+                    const float minX = std::min(a.x, std::min(b.x, c.x));
+                    const float minY = std::min(a.y, std::min(b.y, c.y));
+                    const float maxX = std::max(a.x, std::max(b.x, c.x));
+                    const float maxY = std::max(a.y, std::max(b.y, c.y));
+                    if (CheckCollisionRecs(marquee, Rectangle{ minX, minY, maxX - minX, maxY - minY }))
+                    {
+                        intersects = true;
+                        break;
+                    }
+                }
+                if (intersects)
+                {
+                    marqueeIslands.push_back(islandIndex);
+                }
+            }
+
+            if (!tab.uvIslandMarqueeAdditive)
+            {
+                tab.selectedUvIslands.clear();
+            }
+            for (int islandIndex : marqueeIslands)
+            {
+                AddSelectedUvIsland(tab.selectedUvIslands, islandIndex);
+            }
+        }
+        else
+        {
+            const int pickedIsland = CheckCollisionPointRec(tab.uvIslandMarqueeCurrent, editor) ?
+                                     FindUvIslandAtPoint(islands, scopeTriangles, screenToUv(tab.uvIslandMarqueeCurrent)) :
+                                     -1;
+            if (tab.uvIslandMarqueeAdditive)
+            {
+                ToggleSelectedUvIsland(tab.selectedUvIslands, pickedIsland);
+            }
+            else
+            {
+                SetSingleSelectedUvIsland(tab.selectedUvIslands, pickedIsland);
+            }
+        }
+        tab.uvIslandMarqueeSelecting = false;
+    }
+    if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT) && !IsMouseButtonReleased(MOUSE_BUTTON_LEFT))
+    {
+        tab.uvIslandMarqueeSelecting = false;
     }
     if (IsMouseButtonReleased(MOUSE_BUTTON_RIGHT) || IsMouseButtonReleased(MOUSE_BUTTON_MIDDLE))
     {
@@ -7756,7 +8150,7 @@ void DrawUvPanel(Font font, ModelTab& tab, float panelX, float panelY, float pan
     for (int islandIndex = 0; islandIndex < static_cast<int>(islands.size()); ++islandIndex)
     {
         const UvIslandStats& island = islands[static_cast<size_t>(islandIndex)];
-        const bool selectedIsland = islandIndex == tab.selectedUvIsland;
+        const bool selectedIsland = IsUvIslandSelected(tab.selectedUvIslands, islandIndex);
         const Color baseColor = islandColors[islandIndex % islandColorCount];
         const Color lineColor = selectedIsland ? Color{ 255, 245, 180, 255 } : baseColor;
         const unsigned char fillAlpha = selectedIsland ? 86 : 34;
@@ -7783,6 +8177,12 @@ void DrawUvPanel(Font font, ModelTab& tab, float panelX, float panelY, float pan
                 DrawLineV(c, a, lineColor);
             }
         }
+    }
+    if (tab.uvIslandMarqueeSelecting && Vector2Distance(tab.uvIslandMarqueeStart, tab.uvIslandMarqueeCurrent) >= 5.0f)
+    {
+        const Rectangle marquee = RectangleFromPoints(tab.uvIslandMarqueeStart, tab.uvIslandMarqueeCurrent);
+        DrawRectangleRec(marquee, Color{ 255, 245, 180, 34 });
+        DrawRectangleLinesEx(marquee, 1.0f, Color{ 255, 245, 180, 220 });
     }
     EndScissorMode();
 
