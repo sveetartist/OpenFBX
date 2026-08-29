@@ -8,8 +8,35 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 set(OPENFBX_SOURCES
     src/main.cpp
+    src/editor/OpenFbxApp.cpp
+    src/editor/OpenFbxApp.h
+    src/editor/AppCore.inl
+    src/editor/RenderingMaterials.inl
+    src/editor/SelectionHierarchyOps.inl
+    src/editor/AnimationPlayback.inl
+    src/editor/ViewportDrawing.inl
+    src/editor/TransformSkinningOps.inl
+    src/editor/ViewportPicking.inl
+    src/editor/TransformGizmoUi.inl
+    src/editor/AppUiUtilities.inl
+    src/editor/HierarchyAndValidation.inl
+    src/editor/MaterialsPanel.inl
+    src/editor/UvPanel.inl
+    src/editor/SkinWeightsPanel.inl
+    src/editor/MenuTabsTimeline.inl
+    src/editor/OpenFbxAppMain.inl
+    src/core/MathUtils.cpp
+    src/core/MathUtils.h
     src/FbxLoader.cpp
     src/FbxLoader.h
+    src/geometry/MeshTangents.cpp
+    src/geometry/MeshTangents.h
+    src/platform/FileDialogs.cpp
+    src/platform/FileDialogs.h
+    src/ui/UiPrimitives.cpp
+    src/ui/UiPrimitives.h
+    src/viewport/OrbitCamera.cpp
+    src/viewport/OrbitCamera.h
 )
 
 if(WIN32)
@@ -93,7 +120,10 @@ find_fbxsdk_config_lib(FBXSDK_LIB_DEBUG debug libfbxsdk-md)
 find_fbxsdk_config_lib(FBXXML_LIB_DEBUG debug libxml2-md)
 find_fbxsdk_config_lib(FBXZLIB_LIB_DEBUG debug zlib-md)
 
-target_include_directories(openfbx PRIVATE "${FBXSDK_INCLUDE_DIR}")
+target_include_directories(openfbx PRIVATE
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${FBXSDK_INCLUDE_DIR}"
+)
 target_link_libraries(openfbx PRIVATE
     optimized "${FBXSDK_LIB_RELEASE}"
     optimized "${FBXXML_LIB_RELEASE}"
