@@ -5589,7 +5589,7 @@ Rectangle GetSelectedInfoPanelRect(const ModelTab* active)
     }
     const std::vector<int> selectedMeshNodes = GetSelectedMeshNodeIndices(*active);
     const float panelW = selectedMeshNodes.size() > 1 ? 360.0f : 330.0f;
-    const float panelH = selectedMeshNodes.size() > 1 ? 198.0f : 178.0f;
+    const float panelH = selectedMeshNodes.size() > 1 ? 176.0f : 154.0f;
     return Rectangle{
         static_cast<float>(GetScreenWidth()) - panelW - 12.0f,
         static_cast<float>(GetScreenHeight()) - gBottomPanelReservedHeight - panelH - 12.0f,
@@ -5963,7 +5963,6 @@ void DrawSelectedInfoPanel(Font font, const ModelTab* active, const TransformVal
         bool sameScaleX = true;
         bool sameScaleY = true;
         bool sameScaleZ = true;
-        bool anyNonUnitScale = !IsUnitScale(firstMesh.scale);
 
         for (int nodeIndex : selectedMeshNodes)
         {
@@ -5978,7 +5977,6 @@ void DrawSelectedInfoPanel(Font font, const ModelTab* active, const TransformVal
             if (!SameFloatValue(firstMesh.scale.x, meshNode.scale.x)) sameScaleX = false;
             if (!SameFloatValue(firstMesh.scale.y, meshNode.scale.y)) sameScaleY = false;
             if (!SameFloatValue(firstMesh.scale.z, meshNode.scale.z)) sameScaleZ = false;
-            if (!IsUnitScale(meshNode.scale)) anyNonUnitScale = true;
 
             const std::string materialName = meshNode.materialName.empty() ? "None" : meshNode.materialName;
             if (std::find(materialNames.begin(), materialNames.end(), materialName) == materialNames.end())
@@ -5988,7 +5986,7 @@ void DrawSelectedInfoPanel(Font font, const ModelTab* active, const TransformVal
         }
 
         constexpr float panelW = 360.0f;
-        constexpr float panelH = 198.0f;
+        constexpr float panelH = 176.0f;
         const float panelX = static_cast<float>(GetScreenWidth()) - panelW - 12.0f;
         const float panelY = static_cast<float>(GetScreenHeight()) - gBottomPanelReservedHeight - panelH - 12.0f;
 
@@ -6013,16 +6011,11 @@ void DrawSelectedInfoPanel(Font font, const ModelTab* active, const TransformVal
         const std::string scaleLine = std::string("Scale: ") + FormatMixedVector3Value(firstMesh.scale, sameScaleX, sameScaleY, sameScaleZ, 3);
         DrawUiText(font, scaleLine.c_str(), panelX + 12.0f, panelY + 102.0f, 14.0f, Color{ 205, 213, 220, 255 });
 
-        if (anyNonUnitScale)
-        {
-            DrawUiTextClipped(font, "Warning: scale is not 1, 1, 1.", panelX + 12.0f, panelY + 124.0f, 14.0f, panelW - 24.0f, Color{ 245, 190, 95, 255 });
-        }
-
         std::snprintf(line, sizeof(line), "Total polys: %d", totalPolys);
-        DrawUiText(font, line, panelX + 12.0f, panelY + 146.0f, 14.0f, Color{ 205, 213, 220, 255 });
+        DrawUiText(font, line, panelX + 12.0f, panelY + 124.0f, 14.0f, Color{ 205, 213, 220, 255 });
 
         const std::string materialsLine = std::string("Materials: ") + std::to_string(static_cast<int>(materialNames.size())) + " - " + FormatMaterialSummary(materialNames);
-        DrawUiTextClipped(font, materialsLine.c_str(), panelX + 12.0f, panelY + 168.0f, 14.0f, panelW - 24.0f, Color{ 205, 213, 220, 255 });
+        DrawUiTextClipped(font, materialsLine.c_str(), panelX + 12.0f, panelY + 146.0f, 14.0f, panelW - 24.0f, Color{ 205, 213, 220, 255 });
         return;
     }
 
@@ -6032,7 +6025,7 @@ void DrawSelectedInfoPanel(Font font, const ModelTab* active, const TransformVal
     const Vector3 rotation = currentBonePose ? currentBonePose->rotation : node.rotation;
     const Vector3 scale = currentBonePose ? currentBonePose->scale : node.scale;
     constexpr float panelW = 330.0f;
-    constexpr float panelH = 178.0f;
+    constexpr float panelH = 154.0f;
     const float panelX = static_cast<float>(GetScreenWidth()) - panelW - 12.0f;
     const float panelY = static_cast<float>(GetScreenHeight()) - gBottomPanelReservedHeight - panelH - 12.0f;
 
@@ -6050,14 +6043,9 @@ void DrawSelectedInfoPanel(Font font, const ModelTab* active, const TransformVal
     DrawTransformValueRow(font, transformValueEditor, "Rot:", TransformValueField::Rotation, rotation, panelX, panelY + 80.0f, 2);
     DrawTransformValueRow(font, transformValueEditor, "Scale:", TransformValueField::Scale, scale, panelX, panelY + 102.0f, 3);
 
-    if (!IsUnitScale(scale))
-    {
-        DrawUiTextClipped(font, "Warning: scale is not 1, 1, 1.", panelX + 12.0f, panelY + 124.0f, 14.0f, panelW - 24.0f, Color{ 245, 190, 95, 255 });
-    }
-
     std::snprintf(line, sizeof(line), "Polys: %d", node.meshTriangleCount);
-    DrawUiText(font, line, panelX + 12.0f, panelY + 148.0f, 14.0f, Color{ 205, 213, 220, 255 });
-    DrawUiTextClipped(font, node.materialName.empty() ? "Material: None" : (std::string("Material: ") + node.materialName).c_str(), panelX + 120.0f, panelY + 148.0f, 14.0f, panelW - 132.0f, Color{ 205, 213, 220, 255 });
+    DrawUiText(font, line, panelX + 12.0f, panelY + 124.0f, 14.0f, Color{ 205, 213, 220, 255 });
+    DrawUiTextClipped(font, node.materialName.empty() ? "Material: None" : (std::string("Material: ") + node.materialName).c_str(), panelX + 120.0f, panelY + 124.0f, 14.0f, panelW - 132.0f, Color{ 205, 213, 220, 255 });
 }
 
 bool HasSceneNodeChildren(const LoadedFbxModel& loaded, int nodeIndex)
@@ -7474,6 +7462,10 @@ void ValidateTransforms(const LoadedFbxModel& loaded, std::vector<ValidatorIssue
         if (std::fabs(node.scale.x) <= 0.000001f || std::fabs(node.scale.y) <= 0.000001f || std::fabs(node.scale.z) <= 0.000001f)
         {
             AddValidationIssue(issues, ValidatorSeverity::Error, "Invalid transform", "Zero or near-zero scale on " + node.name, i);
+        }
+        else if (!IsUnitScale(node.scale))
+        {
+            AddValidationIssue(issues, ValidatorSeverity::Warning, "Unapplied scale", node.name + " scale is not 1, 1, 1.", i);
         }
 
         const float axisXLength = Vector3Length(node.axisX);
