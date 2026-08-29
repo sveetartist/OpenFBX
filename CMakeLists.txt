@@ -26,7 +26,7 @@ if(WIN32)
 
     add_custom_command(TARGET openfbx POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
-                "${CMAKE_CURRENT_SOURCE_DIR}/open_fbx_icon.png"
+                "${CMAKE_CURRENT_SOURCE_DIR}/assets/open_fbx_icon.png"
                 "$<TARGET_FILE_DIR:openfbx>/open_fbx_icon.png"
         COMMENT "Copying openfbx window icon"
     )

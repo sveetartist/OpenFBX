@@ -1,6 +1,7 @@
 build/
 build-*/
 out/
+_trash/
 
 .vs/
 *.user
