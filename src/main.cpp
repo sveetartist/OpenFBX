@@ -281,10 +281,14 @@ struct EditSnapshot
 struct TransformGizmoState
 {
     bool dragging = false;
+    bool pivotMode = false;
+    TransformTool tool = TransformTool::Select;
     TransformAxis axis = TransformAxis::None;
     int nodeIndex = -1;
     Vector2 lastMouse{};
     float lastAngle = 0.0f;
+    float snapRadiansX = 0.0f;
+    float snapRadiansY = 0.0f;
 };
 
 struct WeightBrushSettings
@@ -2545,11 +2549,14 @@ void DrawJointCircle(Vector3 position, Vector3 axisA, Vector3 axisB, float radiu
     }
 }
 
-void DrawJointSphere(Vector3 position, float radius, Color color)
+void DrawJointSphere(Vector3 position, Vector3 axisX, Vector3 axisY, Vector3 axisZ, float radius, Color color)
 {
-    DrawJointCircle(position, Vector3{ 1.0f, 0.0f, 0.0f }, Vector3{ 0.0f, 1.0f, 0.0f }, radius, color);
-    DrawJointCircle(position, Vector3{ 1.0f, 0.0f, 0.0f }, Vector3{ 0.0f, 0.0f, 1.0f }, radius, color);
-    DrawJointCircle(position, Vector3{ 0.0f, 1.0f, 0.0f }, Vector3{ 0.0f, 0.0f, 1.0f }, radius, color);
+    axisX = NormalizeOrFallback(axisX, Vector3{ 1.0f, 0.0f, 0.0f });
+    axisY = NormalizeOrFallback(axisY, Vector3{ 0.0f, 1.0f, 0.0f });
+    axisZ = NormalizeOrFallback(axisZ, Vector3{ 0.0f, 0.0f, 1.0f });
+    DrawJointCircle(position, axisX, axisY, radius, color);
+    DrawJointCircle(position, axisX, axisZ, radius, color);
+    DrawJointCircle(position, axisY, axisZ, radius, color);
 }
 
 void DrawMayaBone(Vector3 start, Vector3 end, float radius, Color color)
@@ -2591,7 +2598,25 @@ bool IsNodeInSelectionList(const std::vector<int>& selectedNodes, int nodeIndex)
     return std::find(selectedNodes.begin(), selectedNodes.end(), nodeIndex) != selectedNodes.end();
 }
 
-void DrawBones(const std::vector<BoneSegment>& bones, int selectedNode, const std::vector<int>& selectedNodes)
+const BonePose* FindBonePoseByNodeLinear(const std::vector<BonePose>& poses, int nodeIndex)
+{
+    for (const BonePose& pose : poses)
+    {
+        if (pose.node == nodeIndex) return &pose;
+    }
+    return nullptr;
+}
+
+void DrawJointSphereForNode(const std::vector<BonePose>& poses, int nodeIndex, Vector3 position, float radius, Color color)
+{
+    const BonePose* pose = FindBonePoseByNodeLinear(poses, nodeIndex);
+    const Vector3 axisX = pose ? pose->axisX : Vector3{ 1.0f, 0.0f, 0.0f };
+    const Vector3 axisY = pose ? pose->axisY : Vector3{ 0.0f, 1.0f, 0.0f };
+    const Vector3 axisZ = pose ? pose->axisZ : Vector3{ 0.0f, 0.0f, 1.0f };
+    DrawJointSphere(position, axisX, axisY, axisZ, radius, color);
+}
+
+void DrawBones(const std::vector<BoneSegment>& bones, const std::vector<BonePose>& poses, int selectedNode, const std::vector<int>& selectedNodes)
 {
     float radius = 0.035f;
     if (!bones.empty())
@@ -2614,8 +2639,8 @@ void DrawBones(const std::vector<BoneSegment>& bones, int selectedNode, const st
     {
         const bool startSelected = bone.startNode == selectedNode || IsNodeInSelectionList(selectedNodes, bone.startNode);
         const bool endSelected = bone.endNode == selectedNode || IsNodeInSelectionList(selectedNodes, bone.endNode);
-        DrawJointSphere(bone.start, startSelected ? radius * 1.15f : radius * 0.85f, startSelected ? kSelectionColor : Color{ 142, 210, 255, 255 });
-        DrawJointSphere(bone.end, endSelected ? radius * 1.15f : radius * 0.85f, endSelected ? kSelectionColor : Color{ 142, 210, 255, 255 });
+        DrawJointSphereForNode(poses, bone.startNode, bone.start, startSelected ? radius * 1.15f : radius * 0.85f, startSelected ? kSelectionColor : Color{ 142, 210, 255, 255 });
+        DrawJointSphereForNode(poses, bone.endNode, bone.end, endSelected ? radius * 1.15f : radius * 0.85f, endSelected ? kSelectionColor : Color{ 142, 210, 255, 255 });
     }
 }
 
@@ -3766,6 +3791,145 @@ void MoveSelectedSubtree(ModelTab& tab, Vector3 delta)
     ApplyTransformToSelectedSubtree(tab, transformPoint, transformDirection, TransformTool::Move, TransformAxis::None, 0.0f);
 }
 
+bool IsValidJointPivotNode(const ModelTab& tab, int nodeIndex)
+{
+    return IsValidSelectableNode(tab, nodeIndex) &&
+           nodeIndex < static_cast<int>(tab.loaded.nodes.size()) &&
+           tab.loaded.nodes[static_cast<size_t>(nodeIndex)].type == SceneNodeType::Bone;
+}
+
+BonePose MakeBonePoseFromSceneNode(const SceneNode& node, int nodeIndex)
+{
+    BonePose pose;
+    pose.position = node.position;
+    pose.axisX = node.axisX;
+    pose.axisY = node.axisY;
+    pose.axisZ = node.axisZ;
+    pose.rotation = node.rotation;
+    pose.scale = node.scale;
+    pose.node = nodeIndex;
+    return pose;
+}
+
+void SetBonePosePosition(std::vector<BonePose>& poses, const SceneNode& node, int nodeIndex, Vector3 position, bool createIfMissing)
+{
+    for (BonePose& pose : poses)
+    {
+        if (pose.node != nodeIndex) continue;
+        pose.position = position;
+        return;
+    }
+
+    if (createIfMissing)
+    {
+        BonePose pose = MakeBonePoseFromSceneNode(node, nodeIndex);
+        pose.position = position;
+        poses.push_back(pose);
+    }
+}
+
+void OffsetBoneFrameJointPosition(BoneFrame& frame, int nodeIndex, Vector3 delta)
+{
+    for (BoneSegment& bone : frame.bones)
+    {
+        if (bone.startNode == nodeIndex)
+        {
+            bone.start = Vector3Add(bone.start, delta);
+        }
+        if (bone.endNode == nodeIndex)
+        {
+            bone.end = Vector3Add(bone.end, delta);
+        }
+    }
+    for (BonePose& pose : frame.poses)
+    {
+        if (pose.node == nodeIndex)
+        {
+            pose.position = Vector3Add(pose.position, delta);
+        }
+    }
+}
+
+void RotateBonePoseAxes(BonePose& pose, Vector3 axisVector, float radians)
+{
+    pose.axisX = NormalizeOrFallback(Vector3RotateByAxisAngle(pose.axisX, axisVector, radians), pose.axisX);
+    pose.axisY = NormalizeOrFallback(Vector3RotateByAxisAngle(pose.axisY, axisVector, radians), pose.axisY);
+    pose.axisZ = NormalizeOrFallback(Vector3RotateByAxisAngle(pose.axisZ, axisVector, radians), pose.axisZ);
+    pose.rotation = EulerDegreesFromAxes(pose.axisX, pose.axisY, pose.axisZ);
+}
+
+void RotateBoneFrameJointAxes(BoneFrame& frame, int nodeIndex, Vector3 axisVector, float radians)
+{
+    for (BonePose& pose : frame.poses)
+    {
+        if (pose.node == nodeIndex)
+        {
+            RotateBonePoseAxes(pose, axisVector, radians);
+        }
+    }
+}
+
+void MoveSelectedJointPivot(ModelTab& tab, Vector3 delta)
+{
+    if (Vector3Length(delta) <= 0.000001f || !IsValidJointPivotNode(tab, tab.selectedNode)) return;
+
+    const int nodeIndex = tab.selectedNode;
+    SceneNode& joint = tab.loaded.nodes[static_cast<size_t>(nodeIndex)];
+    joint.position = Vector3Add(joint.position, delta);
+
+    // Editor node transforms are global; unchanged child globals become compensated child locals when saving.
+    SetBonePosePosition(tab.loaded.bonePoses, joint, nodeIndex, joint.position, true);
+    SetBonePosePosition(tab.visibleBonePoses, joint, nodeIndex, joint.position, false);
+    UpdateBoneSegmentsForNode(tab.loaded.bones, nodeIndex, joint.position);
+    UpdateBoneSegmentsForNode(tab.visibleBones, nodeIndex, joint.position);
+
+    for (AnimationClip& clip : tab.loaded.animations)
+    {
+        for (BoneFrame& frame : clip.frames)
+        {
+            OffsetBoneFrameJointPosition(frame, nodeIndex, delta);
+        }
+    }
+}
+
+void RotateSelectedJointPivot(ModelTab& tab, Vector3 axisVector, float radians)
+{
+    if (std::fabs(radians) <= 0.000001f || !IsValidJointPivotNode(tab, tab.selectedNode)) return;
+
+    const int nodeIndex = tab.selectedNode;
+    SceneNode& joint = tab.loaded.nodes[static_cast<size_t>(nodeIndex)];
+    axisVector = NormalizeOrFallback(axisVector, Vector3{ 0.0f, 1.0f, 0.0f });
+    joint.axisX = NormalizeOrFallback(Vector3RotateByAxisAngle(joint.axisX, axisVector, radians), joint.axisX);
+    joint.axisY = NormalizeOrFallback(Vector3RotateByAxisAngle(joint.axisY, axisVector, radians), joint.axisY);
+    joint.axisZ = NormalizeOrFallback(Vector3RotateByAxisAngle(joint.axisZ, axisVector, radians), joint.axisZ);
+    joint.rotation = EulerDegreesFromAxes(joint.axisX, joint.axisY, joint.axisZ);
+
+    for (BonePose& pose : tab.loaded.bonePoses)
+    {
+        if (pose.node == nodeIndex)
+        {
+            pose.axisX = joint.axisX;
+            pose.axisY = joint.axisY;
+            pose.axisZ = joint.axisZ;
+            pose.rotation = joint.rotation;
+        }
+    }
+    for (BonePose& pose : tab.visibleBonePoses)
+    {
+        if (pose.node == nodeIndex)
+        {
+            RotateBonePoseAxes(pose, axisVector, radians);
+        }
+    }
+    for (AnimationClip& clip : tab.loaded.animations)
+    {
+        for (BoneFrame& frame : clip.frames)
+        {
+            RotateBoneFrameJointAxes(frame, nodeIndex, axisVector, radians);
+        }
+    }
+}
+
 void RotateSelectedSubtree(ModelTab& tab, Vector3 pivot, TransformAxis axis, Vector3 axisVector, float radians)
 {
     axisVector = NormalizeOrFallback(axisVector, GetTransformAxisVector(axis));
@@ -4373,6 +4537,21 @@ float WrapAngleDelta(float radians)
     return radians;
 }
 
+float ConsumeRotationSnapRadians(float radians, float& accumulator, bool snap)
+{
+    constexpr float kRotationSnapRadians = 15.0f * DEG2RAD;
+    if (!snap)
+    {
+        accumulator = 0.0f;
+        return radians;
+    }
+
+    accumulator += radians;
+    const float snapped = std::round(accumulator / kRotationSnapRadians) * kRotationSnapRadians;
+    accumulator -= snapped;
+    return snapped;
+}
+
 Vector2 GetAxisScreenDirection(const ModelTab& tab, Vector3 pivot, TransformAxis axis, GizmoOrientation orientation)
 {
     const Vector3 axisVector = GetTransformAxisVector(tab, axis, orientation);
@@ -4453,19 +4632,31 @@ bool UpdateTransformGizmoInput(ModelTab* active,
                                TransformGizmoState& state,
                                TransformTool tool,
                                GizmoOrientation orientation,
+                               bool editPivotMode,
                                bool mouseInViewport,
                                std::string& notice,
                                std::string& error)
 {
-    if (!active || !active->loaded.valid || tool == TransformTool::Select || tool == TransformTool::WeightsBrush)
+    const bool pivotDragInProgress = state.dragging && state.pivotMode;
+    const TransformTool requestedTool = editPivotMode && tool != TransformTool::Move && tool != TransformTool::Rotate ? TransformTool::Select : tool;
+    const TransformTool activeTool = state.dragging ? state.tool : requestedTool;
+    if (!active || !active->loaded.valid || activeTool == TransformTool::Select || activeTool == TransformTool::WeightsBrush)
+    {
+        state = TransformGizmoState{};
+        return false;
+    }
+
+    if ((editPivotMode || pivotDragInProgress) && !IsValidJointPivotNode(*active, active->selectedNode))
     {
         state = TransformGizmoState{};
         return false;
     }
 
     const Vector2 mouse = GetMousePosition();
+    const bool snapRotation = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
     if (state.dragging)
     {
+        const bool draggingPivotMode = state.pivotMode;
         if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT))
         {
             state = TransformGizmoState{};
@@ -4483,7 +4674,7 @@ bool UpdateTransformGizmoInput(ModelTab* active,
         state.lastMouse = mouse;
         if (state.axis == TransformAxis::Center)
         {
-            if (tool == TransformTool::Move)
+            if (activeTool == TransformTool::Move)
             {
                 const float worldPerPixel = GetViewPlaneWorldPerPixel(*active, pivot);
                 const Vector3 right = GetCameraRight(active->orbit.camera);
@@ -4492,21 +4683,36 @@ bool UpdateTransformGizmoInput(ModelTab* active,
                 moveDelta = Vector3Add(moveDelta, Vector3Scale(up, -delta.y * worldPerPixel));
                 if (Vector3Length(moveDelta) > 0.000001f)
                 {
-                    MoveSelectedSubtree(*active, moveDelta);
+                    if (draggingPivotMode)
+                    {
+                        MoveSelectedJointPivot(*active, moveDelta);
+                    }
+                    else
+                    {
+                        MoveSelectedSubtree(*active, moveDelta);
+                    }
                 }
             }
-            else if (tool == TransformTool::Rotate)
+            else if (activeTool == TransformTool::Rotate)
             {
                 const Vector3 right = GetCameraRight(active->orbit.camera);
                 const Vector3 up = GetCameraUpVector(active->orbit.camera);
-                const float rightRadians = delta.y * 0.006f;
-                const float upRadians = delta.x * 0.006f;
+                const float rightRadians = ConsumeRotationSnapRadians(delta.y * 0.006f, state.snapRadiansX, snapRotation);
+                const float upRadians = ConsumeRotationSnapRadians(delta.x * 0.006f, state.snapRadiansY, snapRotation);
                 if (std::fabs(rightRadians) > 0.000001f || std::fabs(upRadians) > 0.000001f)
                 {
-                    RotateSelectedSubtreeArcball(*active, pivot, right, rightRadians, up, upRadians);
+                    if (draggingPivotMode)
+                    {
+                        RotateSelectedJointPivot(*active, right, rightRadians);
+                        RotateSelectedJointPivot(*active, up, upRadians);
+                    }
+                    else
+                    {
+                        RotateSelectedSubtreeArcball(*active, pivot, right, rightRadians, up, upRadians);
+                    }
                 }
             }
-            else if (tool == TransformTool::Scale)
+            else if (activeTool == TransformTool::Scale)
             {
                 const float scalarPixels = delta.x - delta.y;
                 if (std::fabs(scalarPixels) > 0.001f)
@@ -4518,7 +4724,7 @@ bool UpdateTransformGizmoInput(ModelTab* active,
         else
         {
             const Vector3 axisVector = GetTransformAxisVector(*active, state.axis, orientation);
-            if (tool == TransformTool::Rotate)
+            if (activeTool == TransformTool::Rotate)
             {
                 const Vector2 pivotScreen = GetWorldToScreen(pivot, active->orbit.camera);
                 const float currentAngle = GetScreenAngleAroundPivot(mouse, pivotScreen);
@@ -4526,9 +4732,17 @@ bool UpdateTransformGizmoInput(ModelTab* active,
                 state.lastAngle = currentAngle;
                 const float facing = Vector3DotProduct(axisVector, GetCameraForward(active->orbit.camera));
                 radians *= facing < 0.0f ? -1.0f : 1.0f;
+                radians = ConsumeRotationSnapRadians(radians, state.snapRadiansX, snapRotation);
                 if (std::fabs(radians) > 0.000001f)
                 {
-                    RotateSelectedSubtree(*active, pivot, state.axis, axisVector, radians);
+                    if (draggingPivotMode)
+                    {
+                        RotateSelectedJointPivot(*active, axisVector, radians);
+                    }
+                    else
+                    {
+                        RotateSelectedSubtree(*active, pivot, state.axis, axisVector, radians);
+                    }
                 }
             }
             else
@@ -4537,11 +4751,19 @@ bool UpdateTransformGizmoInput(ModelTab* active,
                 const float scalarPixels = Vector2DotProduct(delta, axisDirection);
                 if (std::fabs(scalarPixels) > 0.001f)
                 {
-                    if (tool == TransformTool::Move)
+                    if (activeTool == TransformTool::Move)
                     {
-                        MoveSelectedSubtree(*active, Vector3Scale(axisVector, scalarPixels * GetAxisWorldPerPixel(*active, pivot, axisVector)));
+                        const Vector3 moveDelta = Vector3Scale(axisVector, scalarPixels * GetAxisWorldPerPixel(*active, pivot, axisVector));
+                        if (draggingPivotMode)
+                        {
+                            MoveSelectedJointPivot(*active, moveDelta);
+                        }
+                        else
+                        {
+                            MoveSelectedSubtree(*active, moveDelta);
+                        }
                     }
-                    else if (tool == TransformTool::Scale)
+                    else if (activeTool == TransformTool::Scale)
                     {
                         ScaleSelectedSubtree(*active, pivot, state.axis, axisVector, std::exp(scalarPixels * 0.006f));
                     }
@@ -4552,11 +4774,13 @@ bool UpdateTransformGizmoInput(ModelTab* active,
     }
 
     if (!mouseInViewport || !IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) return false;
-    const TransformAxis axis = PickTransformGizmoAxis(*active, tool, orientation, mouse);
+    const TransformAxis axis = PickTransformGizmoAxis(*active, activeTool, orientation, mouse);
     if (axis == TransformAxis::None) return false;
 
     PushUndoSnapshot(*active);
     state.dragging = true;
+    state.pivotMode = editPivotMode;
+    state.tool = activeTool;
     state.axis = axis;
     state.nodeIndex = active->selectedNode;
     state.lastMouse = mouse;
@@ -4565,7 +4789,7 @@ bool UpdateTransformGizmoInput(ModelTab* active,
     {
         state.lastAngle = GetScreenAngleAroundPivot(mouse, GetWorldToScreen(pivot, active->orbit.camera));
     }
-    notice = std::string(GetTransformToolName(tool)) + " gizmo.";
+    notice = editPivotMode ? "Edit joint pivot." : std::string(GetTransformToolName(activeTool)) + " gizmo.";
     error.clear();
     return true;
 }
@@ -4593,9 +4817,13 @@ void DrawMoveGizmoArrow(const ModelTab& tab, Vector3 start, Vector3 end, Vector3
     DrawLine3D(end, Vector3Subtract(base, Vector3Scale(upWing, headWidth)), color);
 }
 
-void DrawTransformGizmo(const ModelTab& tab, TransformTool tool, const TransformGizmoState& state, GizmoOrientation orientation)
+void DrawTransformGizmo(const ModelTab& tab, TransformTool tool, const TransformGizmoState& state, GizmoOrientation orientation, bool editPivotMode)
 {
-    if (tool == TransformTool::Select || tool == TransformTool::WeightsBrush) return;
+    const bool pivotDragInProgress = state.dragging && state.pivotMode;
+    const TransformTool requestedTool = editPivotMode && tool != TransformTool::Move && tool != TransformTool::Rotate ? TransformTool::Select : tool;
+    const TransformTool activeTool = state.dragging ? state.tool : requestedTool;
+    if (activeTool == TransformTool::Select || activeTool == TransformTool::WeightsBrush) return;
+    if ((editPivotMode || pivotDragInProgress) && !IsValidJointPivotNode(tab, tab.selectedNode)) return;
 
     Vector3 pivot{};
     if (!GetGizmoPivot(tab, pivot)) return;
@@ -4608,14 +4836,15 @@ void DrawTransformGizmo(const ModelTab& tab, TransformTool tool, const Transform
     rlSetLineWidth(4.5f);
 
     const bool centerActive = state.dragging && state.axis == TransformAxis::Center;
-    DrawSphere(pivot, handleRadius * 0.9f, centerActive ? Color{ 255, 235, 128, 255 } : Color{ 225, 232, 238, 235 });
+    const Color centerColor = (editPivotMode || pivotDragInProgress) ? Color{ 255, 214, 84, 245 } : Color{ 225, 232, 238, 235 };
+    DrawSphere(pivot, handleRadius * 0.9f, centerActive ? Color{ 255, 235, 128, 255 } : centerColor);
 
     for (TransformAxis axis : { TransformAxis::X, TransformAxis::Y, TransformAxis::Z })
     {
         const bool active = state.dragging && state.axis == axis;
         const Color color = GetTransformAxisColor(axis, active);
         const Vector3 axisVector = GetTransformAxisVector(tab, axis, orientation);
-        if (tool == TransformTool::Rotate)
+        if (activeTool == TransformTool::Rotate)
         {
             const float radius = length * 0.82f;
             Vector3 axisA{};
@@ -4628,11 +4857,11 @@ void DrawTransformGizmo(const ModelTab& tab, TransformTool tool, const Transform
         else
         {
             const Vector3 end = Vector3Add(pivot, Vector3Scale(axisVector, length));
-            if (tool == TransformTool::Move)
+            if (activeTool == TransformTool::Move)
             {
                 DrawMoveGizmoArrow(tab, pivot, end, axisVector, length, color);
             }
-            else if (tool == TransformTool::Scale)
+            else if (activeTool == TransformTool::Scale)
             {
                 DrawLine3D(pivot, end, color);
                 DrawCubeV(end, Vector3{ handleRadius * 2.0f, handleRadius * 2.0f, handleRadius * 2.0f }, color);
@@ -4655,17 +4884,22 @@ Rectangle GetGizmoOrientationButtonRect(float hierarchyBlockW, int index)
     return Rectangle{ hierarchyBlockW + 10.0f + static_cast<float>(index) * 57.0f, 304.0f, 55.0f, 28.0f };
 }
 
+Rectangle GetPivotModeButtonRect(float hierarchyBlockW)
+{
+    return Rectangle{ hierarchyBlockW + 10.0f, 338.0f, 112.0f, 28.0f };
+}
+
 Rectangle GetWeightBrushSmallButtonRect(float hierarchyBlockW, int row, int column)
 {
-    return Rectangle{ hierarchyBlockW + 112.0f + static_cast<float>(column) * 31.0f, 366.0f + static_cast<float>(row) * 30.0f, 28.0f, 24.0f };
+    return Rectangle{ hierarchyBlockW + 112.0f + static_cast<float>(column) * 31.0f, 404.0f + static_cast<float>(row) * 30.0f, 28.0f, 24.0f };
 }
 
 Rectangle GetWeightBrushAutoNormalizeRect(float hierarchyBlockW)
 {
-    return Rectangle{ hierarchyBlockW + 10.0f, 426.0f, 112.0f, 24.0f };
+    return Rectangle{ hierarchyBlockW + 10.0f, 464.0f, 112.0f, 24.0f };
 }
 
-bool UpdateTransformToolbarInput(TransformTool& tool, GizmoOrientation& orientation, WeightBrushSettings& brush, float hierarchyBlockW)
+bool UpdateTransformToolbarInput(TransformTool& tool, GizmoOrientation& orientation, bool& editPivotMode, WeightBrushSettings& brush, float hierarchyBlockW)
 {
     const Vector2 mouse = GetMousePosition();
     const TransformTool tools[] = { TransformTool::Select, TransformTool::Move, TransformTool::Rotate, TransformTool::Scale, TransformTool::WeightsBrush };
@@ -4676,9 +4910,26 @@ bool UpdateTransformToolbarInput(TransformTool& tool, GizmoOrientation& orientat
             if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
             {
                 tool = tools[i];
+                if (tool != TransformTool::Move && tool != TransformTool::Rotate)
+                {
+                    editPivotMode = false;
+                }
             }
             return true;
         }
+    }
+
+    if (CheckCollisionPointRec(mouse, GetPivotModeButtonRect(hierarchyBlockW)))
+    {
+        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+        {
+            editPivotMode = !editPivotMode;
+            if (editPivotMode && tool != TransformTool::Move && tool != TransformTool::Rotate)
+            {
+                tool = TransformTool::Move;
+            }
+        }
+        return true;
     }
 
     if (tool == TransformTool::WeightsBrush)
@@ -4730,18 +4981,18 @@ bool UpdateTransformToolbarInput(TransformTool& tool, GizmoOrientation& orientat
 
 void DrawWeightBrushControls(Font font, const WeightBrushSettings& brush, float hierarchyBlockW)
 {
-    DrawUiText(font, "Brush", hierarchyBlockW + 12.0f, 342.0f, 13.0f, Color{ 154, 166, 178, 255 });
+    DrawUiText(font, "Brush", hierarchyBlockW + 12.0f, 380.0f, 13.0f, Color{ 154, 166, 178, 255 });
 
     char value[64] = {};
-    DrawUiText(font, "Size", hierarchyBlockW + 12.0f, 370.0f, 13.0f, Color{ 190, 200, 210, 255 });
+    DrawUiText(font, "Size", hierarchyBlockW + 12.0f, 408.0f, 13.0f, Color{ 190, 200, 210, 255 });
     std::snprintf(value, sizeof(value), "%.0f", brush.sizePixels);
-    DrawUiText(font, value, hierarchyBlockW + 52.0f, 370.0f, 13.0f, Color{ 205, 224, 238, 255 });
+    DrawUiText(font, value, hierarchyBlockW + 52.0f, 408.0f, 13.0f, Color{ 205, 224, 238, 255 });
     DrawPanelButton(font, GetWeightBrushSmallButtonRect(hierarchyBlockW, 0, 0), "-");
     DrawPanelButton(font, GetWeightBrushSmallButtonRect(hierarchyBlockW, 0, 1), "+");
 
-    DrawUiText(font, "Strength", hierarchyBlockW + 12.0f, 400.0f, 13.0f, Color{ 190, 200, 210, 255 });
+    DrawUiText(font, "Strength", hierarchyBlockW + 12.0f, 438.0f, 13.0f, Color{ 190, 200, 210, 255 });
     std::snprintf(value, sizeof(value), "%.2f", brush.strength);
-    DrawUiText(font, value, hierarchyBlockW + 70.0f, 400.0f, 13.0f, Color{ 205, 224, 238, 255 });
+    DrawUiText(font, value, hierarchyBlockW + 70.0f, 438.0f, 13.0f, Color{ 205, 224, 238, 255 });
     DrawPanelButton(font, GetWeightBrushSmallButtonRect(hierarchyBlockW, 1, 0), "-");
     DrawPanelButton(font, GetWeightBrushSmallButtonRect(hierarchyBlockW, 1, 1), "+");
 
@@ -4759,7 +5010,7 @@ const char* GetWeightBrushModeName(WeightBrushMode mode)
     return "Add";
 }
 
-void DrawTransformToolbar(Font font, TransformTool tool, GizmoOrientation orientation, const WeightBrushSettings& brush, float hierarchyBlockW)
+void DrawTransformToolbar(Font font, TransformTool tool, GizmoOrientation orientation, bool editPivotMode, const WeightBrushSettings& brush, float hierarchyBlockW)
 {
     const TransformTool tools[] = { TransformTool::Select, TransformTool::Move, TransformTool::Rotate, TransformTool::Scale, TransformTool::WeightsBrush };
     for (int i = 0; i < 5; ++i)
@@ -4784,6 +5035,12 @@ void DrawTransformToolbar(Font font, TransformTool tool, GizmoOrientation orient
         DrawRectangleLinesEx(bounds, 1.0f, selected ? Color{ 128, 188, 235, 255 } : Color{ 78, 88, 98, 255 });
         DrawUiText(font, GetGizmoOrientationName(orientations[i]), bounds.x + 8.0f, bounds.y + 7.0f, 13.0f, selected ? Color{ 205, 224, 238, 255 } : Color{ 154, 166, 178, 255 });
     }
+
+    const Rectangle pivotBounds = GetPivotModeButtonRect(hierarchyBlockW);
+    const bool pivotHovered = CheckCollisionPointRec(GetMousePosition(), pivotBounds);
+    DrawRectangleRec(pivotBounds, editPivotMode ? Color{ 74, 86, 50, 245 } : pivotHovered ? Color{ 42, 48, 55, 245 } : Color{ 24, 27, 31, 232 });
+    DrawRectangleLinesEx(pivotBounds, 1.0f, editPivotMode ? Color{ 214, 190, 90, 255 } : Color{ 78, 88, 98, 255 });
+    DrawUiText(font, editPivotMode ? "Pivot On" : "Pivot Off", pivotBounds.x + 8.0f, pivotBounds.y + 7.0f, 13.0f, editPivotMode ? Color{ 255, 236, 160, 255 } : Color{ 154, 166, 178, 255 });
 
     if (tool == TransformTool::WeightsBrush)
     {
@@ -9432,6 +9689,7 @@ int main(int argc, char** argv)
     RenameEditor renameEditor;
     TransformTool transformTool = TransformTool::Select;
     GizmoOrientation gizmoOrientation = GizmoOrientation::Global;
+    bool editPivotMode = false;
     TransformGizmoState transformGizmo;
     WeightBrushSettings weightBrush;
     WeightBrushState weightBrushState;
@@ -9547,19 +9805,37 @@ int main(int argc, char** argv)
                                      !hierarchyPanel.resizing &&
                                      !mouseOverHierarchyContextMenu;
 
-        const bool toolbarConsumedMouse = !renameEditor.active && UpdateTransformToolbarInput(transformTool, gizmoOrientation, weightBrush, hierarchyBlockW);
+        const bool toolbarConsumedMouse = !renameEditor.active && UpdateTransformToolbarInput(transformTool, gizmoOrientation, editPivotMode, weightBrush, hierarchyBlockW);
         const WeightBrushMode weightBrushMode = shiftDown ? WeightBrushMode::Smooth : controlDown ? WeightBrushMode::Subtract : WeightBrushMode::Add;
         if (!renameEditor.active && !controlDown && !altDown)
         {
-            if (IsKeyPressed(KEY_Q)) transformTool = TransformTool::Select;
-            if (IsKeyPressed(KEY_W)) transformTool = TransformTool::Move;
-            if (IsKeyPressed(KEY_E)) transformTool = TransformTool::Rotate;
-            if (IsKeyPressed(KEY_R)) transformTool = TransformTool::Scale;
-            if (IsKeyPressed(KEY_A)) transformTool = TransformTool::WeightsBrush;
+            if (IsKeyPressed(KEY_Q))
+            {
+                transformTool = TransformTool::Select;
+                editPivotMode = false;
+            }
+            if (IsKeyPressed(KEY_W))
+            {
+                transformTool = TransformTool::Move;
+            }
+            if (IsKeyPressed(KEY_E))
+            {
+                transformTool = TransformTool::Rotate;
+            }
+            if (IsKeyPressed(KEY_R))
+            {
+                transformTool = TransformTool::Scale;
+                editPivotMode = false;
+            }
+            if (IsKeyPressed(KEY_A))
+            {
+                transformTool = TransformTool::WeightsBrush;
+                editPivotMode = false;
+            }
         }
         const bool transformConsumedMouse = !toolbarConsumedMouse &&
                                             !renameEditor.active &&
-                                            UpdateTransformGizmoInput(active, transformGizmo, transformTool, gizmoOrientation, mouseInViewport, notice, error);
+                                            UpdateTransformGizmoInput(active, transformGizmo, transformTool, gizmoOrientation, editPivotMode, mouseInViewport, notice, error);
         bool weightBrushConsumedMouse = false;
         if (!renameEditor.active &&
             active &&
@@ -9808,14 +10084,14 @@ int main(int argc, char** argv)
             }
             if (visibility.bones)
             {
-                DrawBones(GetVisibleBones(*active), active->selectedNode, active->selectedNodes);
+                DrawBones(GetVisibleBones(*active), GetVisibleBonePoses(*active), active->selectedNode, active->selectedNodes);
                 if (visibility.boneRotations)
                 {
                     DrawBoneRotations(GetVisibleBonePoses(*active), GetBoundsDiagonal(active->loaded.bounds), active->selectedNode);
                 }
             }
             DrawSelectedNodeOverlay(*active, visibility);
-            DrawTransformGizmo(*active, transformTool, transformGizmo, gizmoOrientation);
+            DrawTransformGizmo(*active, transformTool, transformGizmo, gizmoOrientation, editPivotMode);
             rlDrawRenderBatchActive();
             rlEnableDepthTest();
         }
@@ -9825,7 +10101,8 @@ int main(int argc, char** argv)
         DrawWeightBrushCursor(uiFont, active, transformTool, weightBrush, drawWeightBrushMode, mouseInViewport);
 
         char statusText[256] = {};
-        std::snprintf(statusText, sizeof(statusText), "VIEW: %s    MAT: %s    TOOL: %s    SPACE: %s    NAV: %s", GetViewModeName(viewMode), GetMaterialPreviewModeName(materialPreviewMode), GetTransformToolName(transformTool), GetGizmoOrientationName(gizmoOrientation), GetNavigationPresetName(navigation));
+        const char* activeToolName = editPivotMode ? (transformTool == TransformTool::Rotate ? "Edit Pivot Rotate" : "Edit Pivot Move") : GetTransformToolName(transformTool);
+        std::snprintf(statusText, sizeof(statusText), "VIEW: %s    MAT: %s    TOOL: %s    SPACE: %s    PIVOT: %s    NAV: %s", GetViewModeName(viewMode), GetMaterialPreviewModeName(materialPreviewMode), activeToolName, GetGizmoOrientationName(gizmoOrientation), editPivotMode ? "ON" : "OFF", GetNavigationPresetName(navigation));
         DrawUiText(uiFont, statusText, static_cast<float>(GetScreenWidth() - 660), 8, 16, Color{ 165, 220, 255, 255 });
 
         if (active)
@@ -9878,7 +10155,7 @@ int main(int argc, char** argv)
         gBottomPanelReservedHeight = animationPanelCollapsed ? kTimelineCollapsedHeight : kTimelinePanelHeight;
 
         DrawHierarchyPanel(uiFont, active, hierarchyPanel, renameEditor, droppedPaths, droppedTextureHandled, textureClipboard, notice, error);
-        DrawTransformToolbar(uiFont, transformTool, gizmoOrientation, weightBrush, hierarchyBlockW);
+        DrawTransformToolbar(uiFont, transformTool, gizmoOrientation, editPivotMode, weightBrush, hierarchyBlockW);
         DrawOrientationGizmo(uiFont, active ? active->orbit.camera : emptyOrbit.camera);
 
         DrawTabs(uiFont, tabs, activeTab);
