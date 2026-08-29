@@ -294,6 +294,13 @@ struct WeightBrushSettings
     bool autoNormalize = true;
 };
 
+enum class WeightBrushMode
+{
+    Add,
+    Subtract,
+    Smooth
+};
+
 struct WeightBrushState
 {
     bool painting = false;
@@ -2709,6 +2716,24 @@ SkinnedVertexInfluence* FindVertexInfluence(SkinnedVertex& vertex, const std::st
     return nullptr;
 }
 
+const SkinnedVertexInfluence* FindVertexInfluence(const SkinnedVertex& vertex, const std::string& boneName)
+{
+    for (const SkinnedVertexInfluence& influence : vertex.influences)
+    {
+        if (influence.boneName == boneName)
+        {
+            return &influence;
+        }
+    }
+    return nullptr;
+}
+
+float GetBoneWeightOnVertex(const SkinnedVertex& vertex, const std::string& boneName)
+{
+    const SkinnedVertexInfluence* influence = FindVertexInfluence(vertex, boneName);
+    return influence ? influence->weight : 0.0f;
+}
+
 float GetVertexWeightSum(const SkinnedVertex& vertex)
 {
     float sum = 0.0f;
@@ -2729,18 +2754,19 @@ void NormalizeVertexWeights(SkinnedVertex& vertex)
     }
 }
 
-bool AddBoneWeightToVertex(SkinnedVertex& vertex,
+bool SetBoneWeightOnVertex(SkinnedVertex& vertex,
                            const std::string& boneName,
                            const BonePose& bonePose,
-                           float amount,
-                           bool autoNormalize)
+                           float targetWeight,
+                           bool autoNormalize,
+                           bool allowCreate)
 {
-    amount = ClampFloat(amount, 0.0f, 1.0f);
-    if (amount <= 0.000001f) return false;
+    targetWeight = ClampFloat(targetWeight, 0.0f, 1.0f);
 
     SkinnedVertexInfluence* target = FindVertexInfluence(vertex, boneName);
     if (!target)
     {
+        if (!allowCreate || targetWeight <= 0.000001f) return false;
         vertex.influences.push_back(SkinnedVertexInfluence{
             boneName,
             0.0f,
@@ -2751,9 +2777,7 @@ bool AddBoneWeightToVertex(SkinnedVertex& vertex,
     }
 
     const float oldWeight = target->weight;
-    const float newWeight = ClampFloat(oldWeight + amount, 0.0f, 1.0f);
-    const float gainedWeight = newWeight - oldWeight;
-    if (gainedWeight <= 0.000001f) return false;
+    if (std::fabs(oldWeight - targetWeight) <= 0.000001f) return false;
 
     if (autoNormalize)
     {
@@ -2768,7 +2792,7 @@ bool AddBoneWeightToVertex(SkinnedVertex& vertex,
 
         if (otherWeight > 0.000001f)
         {
-            const float targetOtherWeight = std::max(0.0f, 1.0f - newWeight);
+            const float targetOtherWeight = std::max(0.0f, 1.0f - targetWeight);
             const float scale = targetOtherWeight / otherWeight;
             for (SkinnedVertexInfluence& influence : vertex.influences)
             {
@@ -2778,14 +2802,41 @@ bool AddBoneWeightToVertex(SkinnedVertex& vertex,
                 }
             }
         }
+        else if (targetWeight > oldWeight)
+        {
+            targetWeight = 1.0f;
+        }
     }
 
-    target->weight = newWeight;
-    if (autoNormalize)
-    {
-        NormalizeVertexWeights(vertex);
-    }
+    target->weight = targetWeight;
     return true;
+}
+
+bool AddBoneWeightToVertex(SkinnedVertex& vertex,
+                           const std::string& boneName,
+                           const BonePose& bonePose,
+                           float amount,
+                           bool autoNormalize)
+{
+    amount = ClampFloat(amount, 0.0f, 1.0f);
+    if (amount <= 0.000001f) return false;
+
+    const float oldWeight = GetBoneWeightOnVertex(vertex, boneName);
+    return SetBoneWeightOnVertex(vertex, boneName, bonePose, oldWeight + amount, autoNormalize, true);
+}
+
+bool SubtractBoneWeightFromVertex(SkinnedVertex& vertex,
+                                  const std::string& boneName,
+                                  const BonePose& bonePose,
+                                  float amount,
+                                  bool autoNormalize)
+{
+    amount = ClampFloat(amount, 0.0f, 1.0f);
+    if (amount <= 0.000001f) return false;
+
+    const float oldWeight = GetBoneWeightOnVertex(vertex, boneName);
+    if (oldWeight <= 0.000001f) return false;
+    return SetBoneWeightOnVertex(vertex, boneName, bonePose, oldWeight - amount, autoNormalize, false);
 }
 
 Color LerpColor(Color a, Color b, float t)
@@ -3956,6 +4007,7 @@ bool PaintSkinWeightsAtMouse(ModelTab& tab,
                              Vector2 mouse,
                              const VisibilityState& visibility,
                              const WeightBrushSettings& brush,
+                             WeightBrushMode mode,
                              std::string& notice,
                              std::string& error)
 {
@@ -4008,6 +4060,18 @@ bool PaintSkinWeightsAtMouse(ModelTab& tab,
     const float amountScale = ClampFloat(brush.strength, 0.0f, 1.0f) * std::max(0.0f, GetFrameTime()) * 2.0f;
     if (amountScale <= 0.000001f) return false;
 
+    struct BrushVertex
+    {
+        int index = -1;
+        float falloff = 0.0f;
+        float oldWeight = 0.0f;
+        Vector3 bindPoint{};
+    };
+
+    std::vector<BrushVertex> brushVertices;
+    brushVertices.reserve(static_cast<size_t>(end - start));
+    float smoothWeightSum = 0.0f;
+    float smoothFalloffSum = 0.0f;
     int changedVertices = 0;
     for (int vertexIndex = start; vertexIndex < end; ++vertexIndex)
     {
@@ -4029,9 +4093,38 @@ bool PaintSkinWeightsAtMouse(ModelTab& tab,
             tab.loaded.bindVertices[base + 2]
         };
         const float falloff = 1.0f - std::sqrt(distanceSqr) / radius;
-        const float amount = amountScale * ClampFloat(falloff, 0.0f, 1.0f);
-        tab.loaded.skinnedVertices[static_cast<size_t>(vertexIndex)].bindPosition = bindPoint;
-        if (AddBoneWeightToVertex(tab.loaded.skinnedVertices[static_cast<size_t>(vertexIndex)], boneName, *bonePose, amount, brush.autoNormalize))
+        const float clampedFalloff = ClampFloat(falloff, 0.0f, 1.0f);
+        const float oldWeight = GetBoneWeightOnVertex(tab.loaded.skinnedVertices[static_cast<size_t>(vertexIndex)], boneName);
+        brushVertices.push_back(BrushVertex{ vertexIndex, clampedFalloff, oldWeight, bindPoint });
+        smoothWeightSum += oldWeight * clampedFalloff;
+        smoothFalloffSum += clampedFalloff;
+    }
+
+    if (brushVertices.empty()) return false;
+
+    const float smoothTargetWeight = smoothFalloffSum > 0.000001f ? smoothWeightSum / smoothFalloffSum : 0.0f;
+    for (const BrushVertex& brushVertex : brushVertices)
+    {
+        const float amount = amountScale * brushVertex.falloff;
+        SkinnedVertex& vertex = tab.loaded.skinnedVertices[static_cast<size_t>(brushVertex.index)];
+        vertex.bindPosition = brushVertex.bindPoint;
+
+        bool changed = false;
+        if (mode == WeightBrushMode::Subtract)
+        {
+            changed = SubtractBoneWeightFromVertex(vertex, boneName, *bonePose, amount, brush.autoNormalize);
+        }
+        else if (mode == WeightBrushMode::Smooth)
+        {
+            const float targetWeight = brushVertex.oldWeight + (smoothTargetWeight - brushVertex.oldWeight) * ClampFloat(amount, 0.0f, 1.0f);
+            changed = SetBoneWeightOnVertex(vertex, boneName, *bonePose, targetWeight, brush.autoNormalize, true);
+        }
+        else
+        {
+            changed = AddBoneWeightToVertex(vertex, boneName, *bonePose, amount, brush.autoNormalize);
+        }
+
+        if (changed)
         {
             ++changedVertices;
         }
@@ -4044,7 +4137,18 @@ bool PaintSkinWeightsAtMouse(ModelTab& tab,
     {
         RefreshDisplayedMesh(tab);
     }
-    notice = "Painted weights: " + std::to_string(changedVertices) + " vertices.";
+    if (mode == WeightBrushMode::Subtract)
+    {
+        notice = "Subtracted weights: " + std::to_string(changedVertices) + " vertices.";
+    }
+    else if (mode == WeightBrushMode::Smooth)
+    {
+        notice = "Smoothed weights: " + std::to_string(changedVertices) + " vertices.";
+    }
+    else
+    {
+        notice = "Painted weights: " + std::to_string(changedVertices) + " vertices.";
+    }
     error.clear();
     return true;
 }
@@ -4610,6 +4714,17 @@ void DrawWeightBrushControls(Font font, const WeightBrushSettings& brush, float 
     DrawPanelButton(font, GetWeightBrushAutoNormalizeRect(hierarchyBlockW), brush.autoNormalize ? "[x] Normalize" : "[ ] Normalize");
 }
 
+const char* GetWeightBrushModeName(WeightBrushMode mode)
+{
+    switch (mode)
+    {
+    case WeightBrushMode::Subtract: return "Subtract";
+    case WeightBrushMode::Smooth: return "Smooth";
+    case WeightBrushMode::Add: return "Add";
+    }
+    return "Add";
+}
+
 void DrawTransformToolbar(Font font, TransformTool tool, GizmoOrientation orientation, const WeightBrushSettings& brush, float hierarchyBlockW)
 {
     const TransformTool tools[] = { TransformTool::Select, TransformTool::Move, TransformTool::Rotate, TransformTool::Scale, TransformTool::WeightsBrush };
@@ -4642,7 +4757,7 @@ void DrawTransformToolbar(Font font, TransformTool tool, GizmoOrientation orient
     }
 }
 
-void DrawWeightBrushCursor(Font font, const ModelTab* active, TransformTool tool, const WeightBrushSettings& brush, bool mouseInViewport)
+void DrawWeightBrushCursor(Font font, const ModelTab* active, TransformTool tool, const WeightBrushSettings& brush, WeightBrushMode mode, bool mouseInViewport)
 {
     if (!active || tool != TransformTool::WeightsBrush || !mouseInViewport) return;
 
@@ -4655,14 +4770,15 @@ void DrawWeightBrushCursor(Font font, const ModelTab* active, TransformTool tool
                            active->selectedNode < static_cast<int>(active->loaded.nodes.size()) &&
                            active->loaded.nodes[static_cast<size_t>(active->selectedNode)].type == SceneNodeType::Bone &&
                            !IsDeletedNode(*active, active->selectedNode);
-    const char* label = validBone ? active->loaded.nodes[static_cast<size_t>(active->selectedNode)].name.c_str() : "Select bone";
-    const Vector2 labelSize = MeasureTextEx(font, label, 13.0f, 1.0f);
+    const std::string label = std::string(GetWeightBrushModeName(mode)) + ": " +
+                              (validBone ? active->loaded.nodes[static_cast<size_t>(active->selectedNode)].name : "Select bone");
+    const Vector2 labelSize = MeasureTextEx(font, label.c_str(), 13.0f, 1.0f);
     Rectangle badge{ mouse.x + radius + 8.0f, mouse.y - 12.0f, std::min(labelSize.x + 12.0f, 260.0f), 22.0f };
     badge.x = ClampFloat(badge.x, 4.0f, static_cast<float>(GetScreenWidth()) - badge.width - 4.0f);
     badge.y = ClampFloat(badge.y, 4.0f, static_cast<float>(GetScreenHeight()) - badge.height - gBottomPanelReservedHeight - 4.0f);
     DrawRectangleRec(badge, Color{ 24, 27, 31, 230 });
     DrawRectangleLinesEx(badge, 1.0f, validBone ? Color{ 120, 190, 230, 255 } : Color{ 210, 110, 92, 255 });
-    DrawUiTextClipped(font, label, badge.x + 6.0f, badge.y + 4.0f, 13.0f, badge.width - 12.0f, validBone ? Color{ 205, 224, 238, 255 } : Color{ 255, 170, 150, 255 });
+    DrawUiTextClipped(font, label.c_str(), badge.x + 6.0f, badge.y + 4.0f, 13.0f, badge.width - 12.0f, validBone ? Color{ 205, 224, 238, 255 } : Color{ 255, 170, 150, 255 });
 }
 
 Font LoadTechnicalFont()
@@ -8954,6 +9070,7 @@ int main(int argc, char** argv)
                                      !mouseOverHierarchyContextMenu;
 
         const bool toolbarConsumedMouse = !renameEditor.active && UpdateTransformToolbarInput(transformTool, gizmoOrientation, weightBrush, hierarchyBlockW);
+        const WeightBrushMode weightBrushMode = shiftDown ? WeightBrushMode::Smooth : controlDown ? WeightBrushMode::Subtract : WeightBrushMode::Add;
         if (!renameEditor.active && !controlDown && !altDown)
         {
             if (IsKeyPressed(KEY_Q)) transformTool = TransformTool::Select;
@@ -8976,7 +9093,7 @@ int main(int argc, char** argv)
             if (!weightBrushState.painting)
             {
                 EditSnapshot before = CaptureEditSnapshot(*active);
-                if (PaintSkinWeightsAtMouse(*active, mouse, visibility, weightBrush, notice, error))
+                if (PaintSkinWeightsAtMouse(*active, mouse, visibility, weightBrush, weightBrushMode, notice, error))
                 {
                     PushUndoSnapshot(*active, std::move(before));
                     weightBrushState.painting = true;
@@ -8985,7 +9102,7 @@ int main(int argc, char** argv)
             }
             else
             {
-                if (PaintSkinWeightsAtMouse(*active, mouse, visibility, weightBrush, notice, error))
+                if (PaintSkinWeightsAtMouse(*active, mouse, visibility, weightBrush, weightBrushMode, notice, error))
                 {
                     visibility.skinWeights = true;
                 }
@@ -9226,7 +9343,8 @@ int main(int argc, char** argv)
         }
         EndMode3D();
 
-        DrawWeightBrushCursor(uiFont, active, transformTool, weightBrush, mouseInViewport);
+        const WeightBrushMode drawWeightBrushMode = shiftDown ? WeightBrushMode::Smooth : controlDown ? WeightBrushMode::Subtract : WeightBrushMode::Add;
+        DrawWeightBrushCursor(uiFont, active, transformTool, weightBrush, drawWeightBrushMode, mouseInViewport);
 
         char statusText[256] = {};
         std::snprintf(statusText, sizeof(statusText), "VIEW: %s    MAT: %s    TOOL: %s    SPACE: %s    NAV: %s", GetViewModeName(viewMode), GetMaterialPreviewModeName(materialPreviewMode), GetTransformToolName(transformTool), GetGizmoOrientationName(gizmoOrientation), GetNavigationPresetName(navigation));
