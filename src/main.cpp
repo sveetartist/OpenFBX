@@ -3,6 +3,7 @@
 #include <array>
 #include <cctype>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <fstream>
 #include <iostream>
@@ -124,6 +125,24 @@ struct RenameEditor
     bool textSelected = false;
     bool active = false;
     bool justOpened = false;
+};
+
+enum class TransformValueField
+{
+    None,
+    Position,
+    Rotation,
+    Scale
+};
+
+struct TransformValueEditor
+{
+    bool active = false;
+    int nodeIndex = -1;
+    TransformValueField field = TransformValueField::None;
+    int component = 0;
+    char text[3][64]{};
+    bool textSelected[3]{};
 };
 
 enum class ViewMode
@@ -2639,8 +2658,8 @@ void DrawBones(const std::vector<BoneSegment>& bones, const std::vector<BonePose
     {
         const bool startSelected = bone.startNode == selectedNode || IsNodeInSelectionList(selectedNodes, bone.startNode);
         const bool endSelected = bone.endNode == selectedNode || IsNodeInSelectionList(selectedNodes, bone.endNode);
-        DrawJointSphereForNode(poses, bone.startNode, bone.start, startSelected ? radius * 1.15f : radius * 0.85f, startSelected ? kSelectionColor : Color{ 142, 210, 255, 255 });
-        DrawJointSphereForNode(poses, bone.endNode, bone.end, endSelected ? radius * 1.15f : radius * 0.85f, endSelected ? kSelectionColor : Color{ 142, 210, 255, 255 });
+        DrawJointSphereForNode(poses, bone.startNode, bone.start, startSelected ? radius : radius * 0.85f, startSelected ? kSelectionColor : Color{ 142, 210, 255, 255 });
+        DrawJointSphereForNode(poses, bone.endNode, bone.end, endSelected ? radius : radius * 0.85f, endSelected ? kSelectionColor : Color{ 142, 210, 255, 255 });
     }
 }
 
@@ -3158,6 +3177,14 @@ Vector3 EulerDegreesFromAxes(Vector3 axisX, Vector3 axisY, Vector3 axisZ)
     rotationMatrix.m9 = axisZ.y;
     rotationMatrix.m10 = axisZ.z;
     return Vector3Scale(QuaternionToEuler(QuaternionFromMatrix(rotationMatrix)), RAD2DEG);
+}
+
+void AxesFromEulerDegrees(Vector3 rotation, Vector3& axisX, Vector3& axisY, Vector3& axisZ)
+{
+    const Matrix matrix = MatrixRotateXYZ(Vector3Scale(rotation, DEG2RAD));
+    axisX = NormalizeOrFallback(Vector3{ matrix.m0, matrix.m1, matrix.m2 }, Vector3{ 1.0f, 0.0f, 0.0f });
+    axisY = NormalizeOrFallback(Vector3{ matrix.m4, matrix.m5, matrix.m6 }, Vector3{ 0.0f, 1.0f, 0.0f });
+    axisZ = NormalizeOrFallback(Vector3{ matrix.m8, matrix.m9, matrix.m10 }, Vector3{ 0.0f, 0.0f, 1.0f });
 }
 
 void ApplyTransformValueUpdates(SceneNode& node, TransformTool tool, TransformAxis axis, float amount)
@@ -3828,6 +3855,43 @@ void SetBonePosePosition(std::vector<BonePose>& poses, const SceneNode& node, in
     }
 }
 
+void SetBonePoseRotation(std::vector<BonePose>& poses, const SceneNode& node, int nodeIndex, Vector3 rotation, bool createIfMissing)
+{
+    for (BonePose& pose : poses)
+    {
+        if (pose.node != nodeIndex) continue;
+        pose.axisX = node.axisX;
+        pose.axisY = node.axisY;
+        pose.axisZ = node.axisZ;
+        pose.rotation = rotation;
+        return;
+    }
+
+    if (createIfMissing)
+    {
+        BonePose pose = MakeBonePoseFromSceneNode(node, nodeIndex);
+        pose.rotation = rotation;
+        poses.push_back(pose);
+    }
+}
+
+void SetBonePoseScale(std::vector<BonePose>& poses, const SceneNode& node, int nodeIndex, Vector3 scale, bool createIfMissing)
+{
+    for (BonePose& pose : poses)
+    {
+        if (pose.node != nodeIndex) continue;
+        pose.scale = scale;
+        return;
+    }
+
+    if (createIfMissing)
+    {
+        BonePose pose = MakeBonePoseFromSceneNode(node, nodeIndex);
+        pose.scale = scale;
+        poses.push_back(pose);
+    }
+}
+
 void OffsetBoneFrameJointPosition(BoneFrame& frame, int nodeIndex, Vector3 delta)
 {
     for (BoneSegment& bone : frame.bones)
@@ -3971,6 +4035,167 @@ void ScaleSelectedSubtreeUniform(ModelTab& tab, Vector3 pivot, float factor)
     auto transformPoint = [&](Vector3 point) { return ScalePointUniform(point, pivot, factor); };
     auto transformDirection = [](Vector3 direction) { return direction; };
     ApplyTransformToSelectedSubtree(tab, transformPoint, transformDirection, TransformTool::Scale, TransformAxis::Center, factor);
+}
+
+template <typename TransformFn>
+void ApplyTransformToSingleSelectedNode(ModelTab& tab, int nodeIndex, TransformFn transform)
+{
+    const int previousSelectedNode = tab.selectedNode;
+    const std::vector<int> previousSelectedNodes = tab.selectedNodes;
+    SetSingleSelectedNode(tab, nodeIndex);
+    transform();
+    tab.selectedNode = previousSelectedNode;
+    tab.selectedNodes = previousSelectedNodes;
+    PruneSelectedNodes(tab);
+}
+
+Vector3 TransformDirectionBetweenAxes(Vector3 direction,
+                                      Vector3 oldAxisX,
+                                      Vector3 oldAxisY,
+                                      Vector3 oldAxisZ,
+                                      Vector3 newAxisX,
+                                      Vector3 newAxisY,
+                                      Vector3 newAxisZ)
+{
+    oldAxisX = NormalizeOrFallback(oldAxisX, Vector3{ 1.0f, 0.0f, 0.0f });
+    oldAxisY = NormalizeOrFallback(oldAxisY, Vector3{ 0.0f, 1.0f, 0.0f });
+    oldAxisZ = NormalizeOrFallback(oldAxisZ, Vector3{ 0.0f, 0.0f, 1.0f });
+    newAxisX = NormalizeOrFallback(newAxisX, oldAxisX);
+    newAxisY = NormalizeOrFallback(newAxisY, oldAxisY);
+    newAxisZ = NormalizeOrFallback(newAxisZ, oldAxisZ);
+
+    return Vector3Add(Vector3Scale(newAxisX, Vector3DotProduct(direction, oldAxisX)),
+                      Vector3Add(Vector3Scale(newAxisY, Vector3DotProduct(direction, oldAxisY)),
+                                 Vector3Scale(newAxisZ, Vector3DotProduct(direction, oldAxisZ))));
+}
+
+void SetSelectedJointPivotRotation(ModelTab& tab, Vector3 rotation)
+{
+    if (!IsValidJointPivotNode(tab, tab.selectedNode)) return;
+
+    const int nodeIndex = tab.selectedNode;
+    SceneNode& joint = tab.loaded.nodes[static_cast<size_t>(nodeIndex)];
+    AxesFromEulerDegrees(rotation, joint.axisX, joint.axisY, joint.axisZ);
+    joint.rotation = rotation;
+
+    auto setPose = [&](BonePose& pose)
+    {
+        if (pose.node != nodeIndex) return;
+        pose.axisX = joint.axisX;
+        pose.axisY = joint.axisY;
+        pose.axisZ = joint.axisZ;
+        pose.rotation = rotation;
+    };
+
+    bool foundLoadedPose = false;
+    for (BonePose& pose : tab.loaded.bonePoses)
+    {
+        if (pose.node == nodeIndex)
+        {
+            setPose(pose);
+            foundLoadedPose = true;
+        }
+    }
+    if (!foundLoadedPose)
+    {
+        tab.loaded.bonePoses.push_back(MakeBonePoseFromSceneNode(joint, nodeIndex));
+    }
+    for (BonePose& pose : tab.visibleBonePoses) setPose(pose);
+    for (AnimationClip& clip : tab.loaded.animations)
+    {
+        for (BoneFrame& frame : clip.frames)
+        {
+            for (BonePose& pose : frame.poses) setPose(pose);
+        }
+    }
+}
+
+void SetSelectedNodeRotation(ModelTab& tab, int nodeIndex, Vector3 rotation)
+{
+    if (!IsValidSelectableNode(tab, nodeIndex)) return;
+
+    SceneNode& node = tab.loaded.nodes[static_cast<size_t>(nodeIndex)];
+    Vector3 newAxisX{};
+    Vector3 newAxisY{};
+    Vector3 newAxisZ{};
+    AxesFromEulerDegrees(rotation, newAxisX, newAxisY, newAxisZ);
+
+    const Vector3 pivot = node.position;
+    const Vector3 oldAxisX = node.axisX;
+    const Vector3 oldAxisY = node.axisY;
+    const Vector3 oldAxisZ = node.axisZ;
+    auto transformDirection = [&](Vector3 direction)
+    {
+        return TransformDirectionBetweenAxes(direction, oldAxisX, oldAxisY, oldAxisZ, newAxisX, newAxisY, newAxisZ);
+    };
+    auto transformPoint = [&](Vector3 point)
+    {
+        return Vector3Add(pivot, transformDirection(Vector3Subtract(point, pivot)));
+    };
+
+    ApplyTransformToSingleSelectedNode(tab, nodeIndex, [&]()
+    {
+        ApplyTransformToSelectedSubtree(tab, transformPoint, transformDirection, TransformTool::Rotate, TransformAxis::Center, 0.0f);
+    });
+
+    if (IsValidSelectableNode(tab, nodeIndex))
+    {
+        SceneNode& updatedNode = tab.loaded.nodes[static_cast<size_t>(nodeIndex)];
+        updatedNode.axisX = newAxisX;
+        updatedNode.axisY = newAxisY;
+        updatedNode.axisZ = newAxisZ;
+        updatedNode.rotation = rotation;
+        if (updatedNode.type == SceneNodeType::Bone)
+        {
+            SetBonePoseRotation(tab.loaded.bonePoses, updatedNode, nodeIndex, rotation, true);
+            SetBonePoseRotation(tab.visibleBonePoses, updatedNode, nodeIndex, rotation, false);
+        }
+    }
+}
+
+void SetSelectedNodeScale(ModelTab& tab, int nodeIndex, Vector3 scale)
+{
+    if (!IsValidSelectableNode(tab, nodeIndex)) return;
+
+    const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(nodeIndex)];
+    const Vector3 current = node.scale;
+    const Vector3 pivot = node.position;
+    const Vector3 axes[] = {
+        NormalizeOrFallback(node.axisX, Vector3{ 1.0f, 0.0f, 0.0f }),
+        NormalizeOrFallback(node.axisY, Vector3{ 0.0f, 1.0f, 0.0f }),
+        NormalizeOrFallback(node.axisZ, Vector3{ 0.0f, 0.0f, 1.0f })
+    };
+    const float factors[] = {
+        scale.x / std::max(0.000001f, std::fabs(current.x)),
+        scale.y / std::max(0.000001f, std::fabs(current.y)),
+        scale.z / std::max(0.000001f, std::fabs(current.z))
+    };
+    const TransformAxis transformAxes[] = { TransformAxis::X, TransformAxis::Y, TransformAxis::Z };
+
+    ApplyTransformToSingleSelectedNode(tab, nodeIndex, [&]()
+    {
+        for (int i = 0; i < 3; ++i)
+        {
+            if (std::fabs(factors[i] - 1.0f) <= 0.000001f) continue;
+            ApplyTransformToSelectedSubtree(tab,
+                                           [&](Vector3 point) { return ScalePointAlongAxis(point, pivot, axes[i], factors[i]); },
+                                           [&](Vector3 direction) { return ScaleNormalAlongAxis(direction, axes[i], factors[i]); },
+                                           TransformTool::Scale,
+                                           transformAxes[i],
+                                           factors[i]);
+        }
+    });
+
+    if (IsValidSelectableNode(tab, nodeIndex))
+    {
+        SceneNode& updatedNode = tab.loaded.nodes[static_cast<size_t>(nodeIndex)];
+        updatedNode.scale = scale;
+        if (updatedNode.type == SceneNodeType::Bone)
+        {
+            SetBonePoseScale(tab.loaded.bonePoses, updatedNode, nodeIndex, scale, true);
+            SetBonePoseScale(tab.visibleBonePoses, updatedNode, nodeIndex, scale, false);
+        }
+    }
 }
 
 void DrawMeshNodeWireframe(const ModelTab& tab, const SceneNode& node, Color color)
@@ -5344,7 +5569,369 @@ std::string FormatMaterialSummary(const std::vector<std::string>& materialNames)
     return summary;
 }
 
-void DrawSelectedInfoPanel(Font font, const ModelTab* active)
+Rectangle GetSelectedInfoPanelRect(const ModelTab* active)
+{
+    if (!active || active->selectedNode < 0 || active->selectedNode >= static_cast<int>(active->loaded.nodes.size()))
+    {
+        return Rectangle{};
+    }
+    const std::vector<int> selectedMeshNodes = GetSelectedMeshNodeIndices(*active);
+    const float panelW = selectedMeshNodes.size() > 1 ? 360.0f : 330.0f;
+    const float panelH = selectedMeshNodes.size() > 1 ? 176.0f : 154.0f;
+    return Rectangle{
+        static_cast<float>(GetScreenWidth()) - panelW - 12.0f,
+        static_cast<float>(GetScreenHeight()) - gBottomPanelReservedHeight - panelH - 12.0f,
+        panelW,
+        panelH
+    };
+}
+
+float GetTransformValueComponent(Vector3 value, int component)
+{
+    if (component == 0) return value.x;
+    if (component == 1) return value.y;
+    return value.z;
+}
+
+void SetTransformValueComponent(Vector3& value, int component, float componentValue)
+{
+    if (component == 0) value.x = componentValue;
+    else if (component == 1) value.y = componentValue;
+    else value.z = componentValue;
+}
+
+Rectangle GetTransformValueCellRect(float panelX, float rowY, int component)
+{
+    return Rectangle{ panelX + 58.0f + static_cast<float>(component) * 78.0f, rowY - 2.0f, 72.0f, 20.0f };
+}
+
+Vector3 GetNodeDisplayedTransformValue(const ModelTab& tab, int nodeIndex, TransformValueField field)
+{
+    const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(nodeIndex)];
+    const BonePose* currentBonePose = node.type == SceneNodeType::Bone ? FindCurrentBonePose(tab, nodeIndex) : nullptr;
+    if (field == TransformValueField::Position) return currentBonePose ? currentBonePose->position : node.position;
+    if (field == TransformValueField::Rotation) return currentBonePose ? currentBonePose->rotation : node.rotation;
+    return currentBonePose ? currentBonePose->scale : node.scale;
+}
+
+void InsertTransformValueText(TransformValueEditor& editor, const char* text)
+{
+    if (!text) return;
+    char* activeText = editor.text[editor.component];
+    bool& activeSelected = editor.textSelected[editor.component];
+    if (activeSelected)
+    {
+        activeText[0] = '\0';
+        activeSelected = false;
+    }
+
+    const size_t currentLength = std::strlen(activeText);
+    const size_t incomingLength = std::strlen(text);
+    if (currentLength + incomingLength >= sizeof(editor.text[editor.component])) return;
+    std::memcpy(activeText + currentLength, text, incomingLength + 1);
+}
+
+bool TryParseTransformValue(const char* text, float& outValue)
+{
+    if (!text || text[0] == '\0') return false;
+    char* end = nullptr;
+    const float value = std::strtof(text, &end);
+    if (end == text) return false;
+    while (end && *end)
+    {
+        if (!std::isspace(static_cast<unsigned char>(*end))) return false;
+        ++end;
+    }
+    if (!std::isfinite(value)) return false;
+    outValue = value;
+    return true;
+}
+
+void BeginTransformValueEdit(TransformValueEditor& editor, const ModelTab& tab, TransformValueField field, int component)
+{
+    if (!IsValidSelectableNode(tab, tab.selectedNode)) return;
+    editor.active = true;
+    editor.nodeIndex = tab.selectedNode;
+    editor.field = field;
+    editor.component = std::clamp(component, 0, 2);
+    const Vector3 value = GetNodeDisplayedTransformValue(tab, tab.selectedNode, field);
+    for (int i = 0; i < 3; ++i)
+    {
+        std::snprintf(editor.text[i], sizeof(editor.text[i]), field == TransformValueField::Rotation ? "%.2f" : "%.3f", GetTransformValueComponent(value, i));
+        editor.textSelected[i] = i == editor.component;
+    }
+}
+
+void CancelTransformValueEdit(TransformValueEditor& editor)
+{
+    editor = TransformValueEditor{};
+}
+
+bool CommitTransformValueEdit(ModelTab& tab, TransformValueEditor& editor, bool editPivotMode, std::string& notice, std::string& error)
+{
+    if (!editor.active || !IsValidSelectableNode(tab, editor.nodeIndex))
+    {
+        CancelTransformValueEdit(editor);
+        return false;
+    }
+
+    Vector3 updated{};
+    for (int i = 0; i < 3; ++i)
+    {
+        float parsed = 0.0f;
+        if (!TryParseTransformValue(editor.text[i], parsed))
+        {
+            error = "Invalid transform value.";
+            notice.clear();
+            return false;
+        }
+        SetTransformValueComponent(updated, i, parsed);
+    }
+
+    const Vector3 current = GetNodeDisplayedTransformValue(tab, editor.nodeIndex, editor.field);
+    if (Vector3Distance(current, updated) <= 0.000001f)
+    {
+        CancelTransformValueEdit(editor);
+        error.clear();
+        return true;
+    }
+
+    PushUndoSnapshot(tab);
+    if (editor.field == TransformValueField::Position)
+    {
+        if (editPivotMode && IsValidJointPivotNode(tab, editor.nodeIndex))
+        {
+            const int previousSelectedNode = tab.selectedNode;
+            const std::vector<int> previousSelectedNodes = tab.selectedNodes;
+            SetSingleSelectedNode(tab, editor.nodeIndex);
+            MoveSelectedJointPivot(tab, Vector3Subtract(updated, current));
+            tab.selectedNode = previousSelectedNode;
+            tab.selectedNodes = previousSelectedNodes;
+            PruneSelectedNodes(tab);
+        }
+        else
+        {
+            ApplyTransformToSingleSelectedNode(tab, editor.nodeIndex, [&]()
+            {
+                MoveSelectedSubtree(tab, Vector3Subtract(updated, current));
+            });
+            if (IsValidSelectableNode(tab, editor.nodeIndex))
+            {
+                SceneNode& updatedNode = tab.loaded.nodes[static_cast<size_t>(editor.nodeIndex)];
+                updatedNode.position = updated;
+                if (updatedNode.type == SceneNodeType::Bone)
+                {
+                    SetBonePosePosition(tab.loaded.bonePoses, updatedNode, editor.nodeIndex, updated, true);
+                    SetBonePosePosition(tab.visibleBonePoses, updatedNode, editor.nodeIndex, updated, false);
+                    UpdateBoneSegmentsForNode(tab.loaded.bones, editor.nodeIndex, updated);
+                    UpdateBoneSegmentsForNode(tab.visibleBones, editor.nodeIndex, updated);
+                }
+            }
+        }
+    }
+    else if (editor.field == TransformValueField::Rotation)
+    {
+        if (editPivotMode && IsValidJointPivotNode(tab, editor.nodeIndex))
+        {
+            const int previousSelectedNode = tab.selectedNode;
+            const std::vector<int> previousSelectedNodes = tab.selectedNodes;
+            SetSingleSelectedNode(tab, editor.nodeIndex);
+            SetSelectedJointPivotRotation(tab, updated);
+            tab.selectedNode = previousSelectedNode;
+            tab.selectedNodes = previousSelectedNodes;
+            PruneSelectedNodes(tab);
+        }
+        else
+        {
+            SetSelectedNodeRotation(tab, editor.nodeIndex, updated);
+        }
+    }
+    else if (editor.field == TransformValueField::Scale)
+    {
+        SetSelectedNodeScale(tab, editor.nodeIndex, updated);
+    }
+
+    CancelTransformValueEdit(editor);
+    notice = "Transform value updated.";
+    error.clear();
+    return true;
+}
+
+TransformValueField GetNextTransformValueField(TransformValueField field, bool editPivotMode)
+{
+    if (field == TransformValueField::Position) return TransformValueField::Rotation;
+    if (field == TransformValueField::Rotation) return editPivotMode ? TransformValueField::Position : TransformValueField::Scale;
+    return TransformValueField::Position;
+}
+
+void UpdateTransformValueTextInput(TransformValueEditor& editor)
+{
+    if (!editor.active) return;
+
+    int key = GetCharPressed();
+    while (key > 0)
+    {
+        if ((key >= '0' && key <= '9') || key == '-' || key == '+' || key == '.' || key == 'e' || key == 'E')
+        {
+            char value[2] = { static_cast<char>(key), '\0' };
+            InsertTransformValueText(editor, value);
+        }
+        key = GetCharPressed();
+    }
+
+    if (IsKeyPressed(KEY_BACKSPACE))
+    {
+        char* activeText = editor.text[editor.component];
+        bool& activeSelected = editor.textSelected[editor.component];
+        if (activeSelected)
+        {
+            activeText[0] = '\0';
+            activeSelected = false;
+        }
+        else
+        {
+            const size_t length = std::strlen(activeText);
+            if (length > 0) activeText[length - 1] = '\0';
+        }
+    }
+    if (IsKeyPressed(KEY_DELETE))
+    {
+        editor.text[editor.component][0] = '\0';
+        editor.textSelected[editor.component] = false;
+    }
+}
+
+bool UpdateSelectedInfoPanelInput(ModelTab* active, TransformValueEditor& editor, bool editPivotMode, std::string& notice, std::string& error)
+{
+    if (!active || active->selectedNode < 0 || active->selectedNode >= static_cast<int>(active->loaded.nodes.size()))
+    {
+        CancelTransformValueEdit(editor);
+        return false;
+    }
+
+    const Rectangle panel = GetSelectedInfoPanelRect(active);
+    const bool mouseOverPanel = CheckCollisionPointRec(GetMousePosition(), panel);
+    if (editor.active)
+    {
+        UpdateTransformValueTextInput(editor);
+        if (IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER))
+        {
+            CommitTransformValueEdit(*active, editor, editPivotMode, notice, error);
+        }
+        else if (IsKeyPressed(KEY_TAB))
+        {
+            const int nodeIndex = editor.nodeIndex;
+            const TransformValueField field = editor.field;
+            const int component = editor.component;
+            if (CommitTransformValueEdit(*active, editor, editPivotMode, notice, error) &&
+                IsValidSelectableNode(*active, nodeIndex))
+            {
+                active->selectedNode = nodeIndex;
+                if (!IsNodeSelected(*active, nodeIndex))
+                {
+                    active->selectedNodes.assign(1, nodeIndex);
+                }
+                if (component < 2)
+                {
+                    BeginTransformValueEdit(editor, *active, field, component + 1);
+                }
+                else
+                {
+                    BeginTransformValueEdit(editor, *active, GetNextTransformValueField(field, editPivotMode), 0);
+                }
+            }
+        }
+        else if (IsKeyPressed(KEY_ESCAPE))
+        {
+            CancelTransformValueEdit(editor);
+        }
+        else if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !mouseOverPanel)
+        {
+            CommitTransformValueEdit(*active, editor, editPivotMode, notice, error);
+        }
+    }
+
+    const std::vector<int> selectedMeshNodes = GetSelectedMeshNodeIndices(*active);
+    if (selectedMeshNodes.size() > 1) return mouseOverPanel;
+
+    if (mouseOverPanel && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+    {
+        const struct Row
+        {
+            TransformValueField field;
+            float y;
+        } rows[] = {
+            { TransformValueField::Position, panel.y + 58.0f },
+            { TransformValueField::Rotation, panel.y + 80.0f },
+            { TransformValueField::Scale, panel.y + 102.0f }
+        };
+
+        for (const Row& row : rows)
+        {
+            if (editPivotMode && row.field == TransformValueField::Scale) continue;
+            const Rectangle rowRect{ panel.x + 12.0f, row.y - 2.0f, 280.0f, 20.0f };
+            if (!CheckCollisionPointRec(GetMousePosition(), rowRect)) continue;
+
+            for (int component = 0; component < 3; ++component)
+            {
+                if (CheckCollisionPointRec(GetMousePosition(), GetTransformValueCellRect(panel.x, row.y, component)))
+                {
+                    if (editor.active &&
+                        (editor.field != row.field || editor.component != component) &&
+                        !CommitTransformValueEdit(*active, editor, editPivotMode, notice, error))
+                    {
+                        return true;
+                    }
+                    BeginTransformValueEdit(editor, *active, row.field, component);
+                    return true;
+                }
+            }
+            if (editor.active &&
+                editor.field != row.field &&
+                !CommitTransformValueEdit(*active, editor, editPivotMode, notice, error))
+            {
+                return true;
+            }
+            BeginTransformValueEdit(editor, *active, row.field, 0);
+            return true;
+        }
+    }
+
+    return mouseOverPanel;
+}
+
+void DrawTransformValueCell(Font font,
+                            const TransformValueEditor& editor,
+                            TransformValueField field,
+                            int component,
+                            float value,
+                            float panelX,
+                            float rowY,
+                            int decimals)
+{
+    const Rectangle cell = GetTransformValueCellRect(panelX, rowY, component);
+    const bool activeRow = editor.active && editor.field == field;
+    const bool active = activeRow && editor.component == component;
+    const bool hovered = CheckCollisionPointRec(GetMousePosition(), cell);
+    if (activeRow || hovered)
+    {
+        DrawRectangleRec(cell, active ? Color{ 42, 54, 66, 245 } : activeRow ? Color{ 30, 36, 42, 230 } : Color{ 35, 40, 46, 215 });
+        DrawRectangleLinesEx(cell, 1.0f, active ? Color{ 128, 188, 235, 255 } : Color{ 78, 88, 98, 255 });
+    }
+
+    const std::string text = activeRow ? editor.text[component] : FormatFloatValue(value, decimals);
+    DrawUiTextClipped(font, text.c_str(), cell.x + 5.0f, rowY, 14.0f, cell.width - 10.0f, activeRow ? RAYWHITE : Color{ 205, 213, 220, 255 });
+}
+
+void DrawTransformValueRow(Font font, const TransformValueEditor& editor, const char* label, TransformValueField field, Vector3 value, float panelX, float rowY, int decimals)
+{
+    DrawUiText(font, label, panelX + 12.0f, rowY, 14.0f, Color{ 205, 213, 220, 255 });
+    DrawTransformValueCell(font, editor, field, 0, value.x, panelX, rowY, decimals);
+    DrawTransformValueCell(font, editor, field, 1, value.y, panelX, rowY, decimals);
+    DrawTransformValueCell(font, editor, field, 2, value.z, panelX, rowY, decimals);
+}
+
+void DrawSelectedInfoPanel(Font font, const ModelTab* active, const TransformValueEditor& transformValueEditor)
 {
     if (!active || active->selectedNode < 0 || active->selectedNode >= static_cast<int>(active->loaded.nodes.size())) return;
     if (!IsValidSelectableNode(*active, active->selectedNode)) return;
@@ -5440,14 +6027,9 @@ void DrawSelectedInfoPanel(Font font, const ModelTab* active)
     std::snprintf(line, sizeof(line), "Type: %s", GetSceneNodeTypeName(node.type));
     DrawUiText(font, line, panelX + 12.0f, panelY + 36.0f, 14.0f, Color{ 205, 213, 220, 255 });
 
-    std::snprintf(line, sizeof(line), "Pos:  %.3f  %.3f  %.3f", position.x, position.y, position.z);
-    DrawUiText(font, line, panelX + 12.0f, panelY + 58.0f, 14.0f, Color{ 205, 213, 220, 255 });
-
-    std::snprintf(line, sizeof(line), "Rot:  %.2f  %.2f  %.2f", rotation.x, rotation.y, rotation.z);
-    DrawUiText(font, line, panelX + 12.0f, panelY + 80.0f, 14.0f, Color{ 205, 213, 220, 255 });
-
-    std::snprintf(line, sizeof(line), "Scale: %.3f  %.3f  %.3f", scale.x, scale.y, scale.z);
-    DrawUiText(font, line, panelX + 12.0f, panelY + 102.0f, 14.0f, Color{ 205, 213, 220, 255 });
+    DrawTransformValueRow(font, transformValueEditor, "Pos:", TransformValueField::Position, position, panelX, panelY + 58.0f, 3);
+    DrawTransformValueRow(font, transformValueEditor, "Rot:", TransformValueField::Rotation, rotation, panelX, panelY + 80.0f, 2);
+    DrawTransformValueRow(font, transformValueEditor, "Scale:", TransformValueField::Scale, scale, panelX, panelY + 102.0f, 3);
 
     std::snprintf(line, sizeof(line), "Polys: %d", node.meshTriangleCount);
     DrawUiText(font, line, panelX + 12.0f, panelY + 124.0f, 14.0f, Color{ 205, 213, 220, 255 });
@@ -9085,6 +9667,7 @@ bool DrawMenuItem(Font font, Rectangle bounds, const char* text, bool selected =
 void DrawMenuBar(Font font,
                  OpenMenu& openMenu,
                  bool& openRequested,
+                 bool& closeTabRequested,
                  bool& undoRequested,
                  bool& redoRequested,
                  bool& saveFbxRequested,
@@ -9134,7 +9717,7 @@ void DrawMenuBar(Font font,
     switch (openMenu)
     {
     case OpenMenu::File:
-        openMenuBounds = Rectangle{ 8.0f, 29.0f, 270.0f, 218.0f };
+        openMenuBounds = Rectangle{ 8.0f, 29.0f, 270.0f, 248.0f };
         break;
     case OpenMenu::Edit:
         openMenuBounds = Rectangle{ 66.0f, 29.0f, 230.0f, 68.0f };
@@ -9159,38 +9742,43 @@ void DrawMenuBar(Font font,
 
     if (openMenu == OpenMenu::File)
     {
-        DrawRectangle(8, 29, 270, 218, Color{ 28, 31, 35, 245 });
+        DrawRectangle(8, 29, 270, 248, Color{ 28, 31, 35, 245 });
         if (DrawMenuItem(font, Rectangle{ 8.0f, 29.0f, 270.0f, 30.0f }, "Open FBX...        Ctrl+O"))
         {
             openRequested = true;
             openMenu = OpenMenu::None;
         }
-        if (DrawMenuItem(font, Rectangle{ 8.0f, 59.0f, 270.0f, 30.0f }, "Save FBX        Ctrl+S"))
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 59.0f, 270.0f, 30.0f }, "Close Tab        Ctrl+W"))
+        {
+            closeTabRequested = true;
+            openMenu = OpenMenu::None;
+        }
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 89.0f, 270.0f, 30.0f }, "Save FBX        Ctrl+S"))
         {
             saveFbxRequested = true;
             openMenu = OpenMenu::None;
         }
-        if (DrawMenuItem(font, Rectangle{ 8.0f, 89.0f, 270.0f, 30.0f }, "Save As...        Ctrl+Shift+S"))
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 119.0f, 270.0f, 30.0f }, "Save As...        Ctrl+Shift+S"))
         {
             saveAsFbxRequested = true;
             openMenu = OpenMenu::None;
         }
-        if (DrawMenuItem(font, Rectangle{ 8.0f, 119.0f, 270.0f, 30.0f }, "Import Animations..."))
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 149.0f, 270.0f, 30.0f }, "Import Animations..."))
         {
             importAnimationsRequested = true;
             openMenu = OpenMenu::None;
         }
-        if (DrawMenuItem(font, Rectangle{ 8.0f, 149.0f, 270.0f, 30.0f }, "Export JSON"))
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 179.0f, 270.0f, 30.0f }, "Export JSON"))
         {
             exportJsonRequested = true;
             openMenu = OpenMenu::None;
         }
-        if (DrawMenuItem(font, Rectangle{ 8.0f, 179.0f, 270.0f, 30.0f }, "Compare FBX..."))
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 209.0f, 270.0f, 30.0f }, "Compare FBX..."))
         {
             compareFbxRequested = true;
             openMenu = OpenMenu::None;
         }
-        if (DrawMenuItem(font, Rectangle{ 8.0f, 209.0f, 270.0f, 30.0f }, "Exit        Ctrl+Q"))
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 239.0f, 270.0f, 30.0f }, "Exit        Ctrl+Q"))
         {
             quitRequested = true;
             openMenu = OpenMenu::None;
@@ -9299,7 +9887,7 @@ void DrawMenuBar(Font font,
         DrawUiText(font, "Ctrl+Z undo    Ctrl+Y redo    T textures    C channels", 198.0f, 236.0f, 15.0f, Color{ 205, 213, 220, 255 });
         DrawUiText(font, "Blender: MMB orbit, Alt snap, Shift+MMB pan, Wheel zoom", 198.0f, 262.0f, 15.0f, Color{ 205, 213, 220, 255 });
         DrawUiText(font, "Maya: Alt+LMB orbit, Shift snap, Alt+MMB pan, Alt+RMB/Wheel zoom", 198.0f, 288.0f, 15.0f, Color{ 205, 213, 220, 255 });
-        DrawUiText(font, "Esc deselects    Ctrl+Q quits    Tabs: X/middle closes", 198.0f, 314.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        DrawUiText(font, "Esc deselects    Ctrl+W closes tab    Ctrl+Q quits", 198.0f, 314.0f, 15.0f, Color{ 205, 213, 220, 255 });
     }
 }
 
@@ -9687,6 +10275,7 @@ int main(int argc, char** argv)
     std::string compareResultText;
     TextureClipboard textureClipboard;
     RenameEditor renameEditor;
+    TransformValueEditor transformValueEditor;
     TransformTool transformTool = TransformTool::Select;
     GizmoOrientation gizmoOrientation = GizmoOrientation::Global;
     bool editPivotMode = false;
@@ -9744,6 +10333,17 @@ int main(int argc, char** argv)
         notice.clear();
     };
 
+    auto closeActiveTab = [&]()
+    {
+        if (activeTab < 0 || activeTab >= static_cast<int>(tabs.size())) return false;
+
+        CloseTab(tabs, activeTab, activeTab);
+        openMenu = OpenMenu::None;
+        renameEditor = RenameEditor{};
+        CancelTransformValueEdit(transformValueEditor);
+        return true;
+    };
+
     for (int i = 1; i < argc; ++i)
     {
         openPathInNewTab(argv[i]);
@@ -9770,11 +10370,21 @@ int main(int argc, char** argv)
         }
 
         ModelTab* active = activeTab >= 0 && activeTab < static_cast<int>(tabs.size()) ? tabs[static_cast<size_t>(activeTab)].get() : nullptr;
-        if (!renameEditor.active && active && controlDown && !shiftDown && IsKeyPressed(KEY_Z))
+        if (active && controlDown && !shiftDown && !altDown && IsKeyPressed(KEY_W))
+        {
+            closeActiveTab();
+        }
+
+        active = activeTab >= 0 && activeTab < static_cast<int>(tabs.size()) ? tabs[static_cast<size_t>(activeTab)].get() : nullptr;
+        if (!active)
+        {
+            CancelTransformValueEdit(transformValueEditor);
+        }
+        if (!renameEditor.active && !transformValueEditor.active && active && controlDown && !shiftDown && IsKeyPressed(KEY_Z))
         {
             undoRequested = true;
         }
-        if (!renameEditor.active && active &&
+        if (!renameEditor.active && !transformValueEditor.active && active &&
             ((controlDown && IsKeyPressed(KEY_Y)) || (controlDown && shiftDown && IsKeyPressed(KEY_Z))))
         {
             redoRequested = true;
@@ -9805,9 +10415,10 @@ int main(int argc, char** argv)
                                      !hierarchyPanel.resizing &&
                                      !mouseOverHierarchyContextMenu;
 
-        const bool toolbarConsumedMouse = !renameEditor.active && UpdateTransformToolbarInput(transformTool, gizmoOrientation, editPivotMode, weightBrush, hierarchyBlockW);
+        const bool transformInfoConsumedMouse = !renameEditor.active && UpdateSelectedInfoPanelInput(active, transformValueEditor, editPivotMode, notice, error);
+        const bool toolbarConsumedMouse = !renameEditor.active && !transformValueEditor.active && UpdateTransformToolbarInput(transformTool, gizmoOrientation, editPivotMode, weightBrush, hierarchyBlockW);
         const WeightBrushMode weightBrushMode = shiftDown ? WeightBrushMode::Smooth : controlDown ? WeightBrushMode::Subtract : WeightBrushMode::Add;
-        if (!renameEditor.active && !controlDown && !altDown)
+        if (!renameEditor.active && !transformValueEditor.active && !controlDown && !altDown)
         {
             if (IsKeyPressed(KEY_Q))
             {
@@ -9835,11 +10446,15 @@ int main(int argc, char** argv)
         }
         const bool transformConsumedMouse = !toolbarConsumedMouse &&
                                             !renameEditor.active &&
+                                            !transformValueEditor.active &&
+                                            !transformInfoConsumedMouse &&
                                             UpdateTransformGizmoInput(active, transformGizmo, transformTool, gizmoOrientation, editPivotMode, mouseInViewport, notice, error);
         bool weightBrushConsumedMouse = false;
         if (!renameEditor.active &&
+            !transformValueEditor.active &&
             active &&
             mouseInViewport &&
+            !transformInfoConsumedMouse &&
             transformTool == TransformTool::WeightsBrush &&
             IsMouseButtonDown(MOUSE_BUTTON_LEFT) &&
             !IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
@@ -9868,16 +10483,16 @@ int main(int argc, char** argv)
             weightBrushState.painting = false;
         }
 
-        if (!renameEditor.active && active && altDown && IsKeyPressed(KEY_Q))
+        if (!renameEditor.active && !transformValueEditor.active && active && altDown && IsKeyPressed(KEY_Q))
         {
             ToggleSelectedNodeIsolation(*active, notice, error);
         }
-        if (!renameEditor.active && controlDown && !altDown && IsKeyPressed(KEY_Q))
+        if (!renameEditor.active && !transformValueEditor.active && controlDown && !altDown && IsKeyPressed(KEY_Q))
         {
             quitRequested = true;
             continue;
         }
-        if (!renameEditor.active && IsKeyPressed(KEY_ESCAPE))
+        if (!renameEditor.active && !transformValueEditor.active && IsKeyPressed(KEY_ESCAPE))
         {
             openMenu = OpenMenu::None;
             if (active)
@@ -9886,7 +10501,7 @@ int main(int argc, char** argv)
             }
         }
 
-        if (!renameEditor.active && active && IsKeyPressed(KEY_F) && active->loaded.valid)
+        if (!renameEditor.active && !transformValueEditor.active && active && IsKeyPressed(KEY_F) && active->loaded.valid)
         {
             if (!FocusCameraOnSelection(*active))
             {
@@ -9894,37 +10509,38 @@ int main(int argc, char** argv)
             }
         }
 
-        if (!renameEditor.active && IsKeyPressed(KEY_V))
+        if (!renameEditor.active && !transformValueEditor.active && IsKeyPressed(KEY_V))
         {
             viewMode = NextViewMode(viewMode);
         }
-        if (!renameEditor.active && IsKeyPressed(KEY_C))
+        if (!renameEditor.active && !transformValueEditor.active && IsKeyPressed(KEY_C))
         {
             materialPreviewMode = NextMaterialPreviewMode(materialPreviewMode);
         }
-        if (!renameEditor.active && IsKeyPressed(KEY_M))
+        if (!renameEditor.active && !transformValueEditor.active && IsKeyPressed(KEY_M))
         {
             materialPreviewMode = MaterialPreviewMode::Shaded;
         }
-        if (!renameEditor.active && IsKeyPressed(KEY_T))
+        if (!renameEditor.active && !transformValueEditor.active && IsKeyPressed(KEY_T))
         {
             visibility.textures = !visibility.textures;
         }
-        if (!renameEditor.active && IsKeyPressed(KEY_G))
+        if (!renameEditor.active && !transformValueEditor.active && IsKeyPressed(KEY_G))
         {
             visibility.geometry = !visibility.geometry;
         }
-        if (!renameEditor.active && IsKeyPressed(KEY_B))
+        if (!renameEditor.active && !transformValueEditor.active && IsKeyPressed(KEY_B))
         {
             visibility.bones = !visibility.bones;
         }
-        if (!renameEditor.active && !controlDown && IsKeyPressed(KEY_O))
+        if (!renameEditor.active && !transformValueEditor.active && !controlDown && IsKeyPressed(KEY_O))
         {
             visibility.boneRotations = !visibility.boneRotations;
         }
         if (active &&
             mouseInViewport &&
             !toolbarConsumedMouse &&
+            !transformInfoConsumedMouse &&
             !transformConsumedMouse &&
             !weightBrushConsumedMouse &&
             IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
@@ -9947,6 +10563,7 @@ int main(int argc, char** argv)
             mouseInViewport &&
             !altDown &&
             !toolbarConsumedMouse &&
+            !transformInfoConsumedMouse &&
             !transformConsumedMouse &&
             !weightBrushConsumedMouse &&
             IsMouseButtonPressed(MOUSE_BUTTON_RIGHT))
@@ -10002,7 +10619,7 @@ int main(int argc, char** argv)
 
         if (active)
         {
-            if (mouseInViewport && !toolbarConsumedMouse && !transformConsumedMouse && !weightBrushConsumedMouse)
+            if (mouseInViewport && !toolbarConsumedMouse && !transformInfoConsumedMouse && !transformConsumedMouse && !weightBrushConsumedMouse)
             {
                 UpdateNavigation(active->orbit, navigation);
             }
@@ -10011,7 +10628,7 @@ int main(int argc, char** argv)
                 UpdateOrbitCameraTransform(active->orbit);
             }
 
-            if (!renameEditor.active)
+            if (!renameEditor.active && !transformValueEditor.active)
             {
                 UpdateAnimation(active->animation, active->loaded);
             }
@@ -10129,7 +10746,7 @@ int main(int argc, char** argv)
             DrawUiText(uiFont, notice.c_str(), 12, static_cast<float>(GetScreenHeight() - 154), 18, Color{ 150, 225, 170, 255 });
         }
 
-        DrawSelectedInfoPanel(uiFont, active);
+        DrawSelectedInfoPanel(uiFont, active, transformValueEditor);
 
         if (active)
         {
@@ -10162,6 +10779,7 @@ int main(int argc, char** argv)
         active = activeTab >= 0 && activeTab < static_cast<int>(tabs.size()) ? tabs[static_cast<size_t>(activeTab)].get() : nullptr;
 
         bool menuOpenRequested = false;
+        bool menuCloseTabRequested = false;
         bool menuUndoRequested = false;
         bool menuRedoRequested = false;
         bool menuSaveFbxRequested = false;
@@ -10172,6 +10790,7 @@ int main(int argc, char** argv)
         DrawMenuBar(uiFont,
                     openMenu,
                     menuOpenRequested,
+                    menuCloseTabRequested,
                     menuUndoRequested,
                     menuRedoRequested,
                     menuSaveFbxRequested,
@@ -10207,6 +10826,19 @@ int main(int argc, char** argv)
             {
                 notice = "Redo.";
                 error.clear();
+            }
+        }
+
+        if (menuCloseTabRequested)
+        {
+            if (closeActiveTab())
+            {
+                active = activeTab >= 0 && activeTab < static_cast<int>(tabs.size()) ? tabs[static_cast<size_t>(activeTab)].get() : nullptr;
+            }
+            else
+            {
+                error = "No active tab to close.";
+                notice.clear();
             }
         }
 
