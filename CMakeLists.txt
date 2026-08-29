@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(openfbx LANGUAGES CXX RC)
+project(openfbx VERSION 0.1.0 LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -17,6 +17,7 @@ if(WIN32)
 endif()
 
 add_executable(openfbx ${OPENFBX_SOURCES})
+target_compile_definitions(openfbx PRIVATE OPENFBX_VERSION="${PROJECT_VERSION}")
 
 if(WIN32)
     set_target_properties(openfbx PROPERTIES WIN32_EXECUTABLE TRUE)

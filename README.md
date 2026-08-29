@@ -2,6 +2,8 @@
 
 A small FBX viewer/editor built with CMake, raylib, and the Autodesk FBX SDK.
 
+Current version: `0.1.0`.
+
 ## Build
 
 Install the Autodesk FBX SDK, then configure and build with CMake:

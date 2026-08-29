@@ -67,6 +67,12 @@ constexpr WindowsDword kOfnOverwritePrompt = 0x00000002;
 
 namespace
 {
+#ifndef OPENFBX_VERSION
+#define OPENFBX_VERSION "0.1.0"
+#endif
+
+constexpr const char* kAppName = "openfbx";
+constexpr const char* kAppVersion = OPENFBX_VERSION;
 constexpr float kTimelinePanelHeight = 124.0f;
 constexpr float kTimelineCollapsedHeight = 28.0f;
 constexpr float kMetersPerGridCell = 1.0f;
@@ -164,7 +170,8 @@ enum class OpenMenu
     File,
     Edit,
     View,
-    Preferences
+    Preferences,
+    Help
 };
 
 enum class LeftPanelTab
@@ -5521,6 +5528,11 @@ bool SameFloatValue(float a, float b)
     return std::fabs(a - b) <= 0.000001f;
 }
 
+bool IsUnitScale(Vector3 scale)
+{
+    return SameFloatValue(scale.x, 1.0f) && SameFloatValue(scale.y, 1.0f) && SameFloatValue(scale.z, 1.0f);
+}
+
 std::string FormatFloatValue(float value, int decimals)
 {
     char text[32] = {};
@@ -5577,7 +5589,7 @@ Rectangle GetSelectedInfoPanelRect(const ModelTab* active)
     }
     const std::vector<int> selectedMeshNodes = GetSelectedMeshNodeIndices(*active);
     const float panelW = selectedMeshNodes.size() > 1 ? 360.0f : 330.0f;
-    const float panelH = selectedMeshNodes.size() > 1 ? 176.0f : 154.0f;
+    const float panelH = selectedMeshNodes.size() > 1 ? 198.0f : 178.0f;
     return Rectangle{
         static_cast<float>(GetScreenWidth()) - panelW - 12.0f,
         static_cast<float>(GetScreenHeight()) - gBottomPanelReservedHeight - panelH - 12.0f,
@@ -5951,6 +5963,7 @@ void DrawSelectedInfoPanel(Font font, const ModelTab* active, const TransformVal
         bool sameScaleX = true;
         bool sameScaleY = true;
         bool sameScaleZ = true;
+        bool anyNonUnitScale = !IsUnitScale(firstMesh.scale);
 
         for (int nodeIndex : selectedMeshNodes)
         {
@@ -5965,6 +5978,7 @@ void DrawSelectedInfoPanel(Font font, const ModelTab* active, const TransformVal
             if (!SameFloatValue(firstMesh.scale.x, meshNode.scale.x)) sameScaleX = false;
             if (!SameFloatValue(firstMesh.scale.y, meshNode.scale.y)) sameScaleY = false;
             if (!SameFloatValue(firstMesh.scale.z, meshNode.scale.z)) sameScaleZ = false;
+            if (!IsUnitScale(meshNode.scale)) anyNonUnitScale = true;
 
             const std::string materialName = meshNode.materialName.empty() ? "None" : meshNode.materialName;
             if (std::find(materialNames.begin(), materialNames.end(), materialName) == materialNames.end())
@@ -5974,7 +5988,7 @@ void DrawSelectedInfoPanel(Font font, const ModelTab* active, const TransformVal
         }
 
         constexpr float panelW = 360.0f;
-        constexpr float panelH = 176.0f;
+        constexpr float panelH = 198.0f;
         const float panelX = static_cast<float>(GetScreenWidth()) - panelW - 12.0f;
         const float panelY = static_cast<float>(GetScreenHeight()) - gBottomPanelReservedHeight - panelH - 12.0f;
 
@@ -5999,11 +6013,16 @@ void DrawSelectedInfoPanel(Font font, const ModelTab* active, const TransformVal
         const std::string scaleLine = std::string("Scale: ") + FormatMixedVector3Value(firstMesh.scale, sameScaleX, sameScaleY, sameScaleZ, 3);
         DrawUiText(font, scaleLine.c_str(), panelX + 12.0f, panelY + 102.0f, 14.0f, Color{ 205, 213, 220, 255 });
 
+        if (anyNonUnitScale)
+        {
+            DrawUiTextClipped(font, "Warning: scale is not 1, 1, 1.", panelX + 12.0f, panelY + 124.0f, 14.0f, panelW - 24.0f, Color{ 245, 190, 95, 255 });
+        }
+
         std::snprintf(line, sizeof(line), "Total polys: %d", totalPolys);
-        DrawUiText(font, line, panelX + 12.0f, panelY + 124.0f, 14.0f, Color{ 205, 213, 220, 255 });
+        DrawUiText(font, line, panelX + 12.0f, panelY + 146.0f, 14.0f, Color{ 205, 213, 220, 255 });
 
         const std::string materialsLine = std::string("Materials: ") + std::to_string(static_cast<int>(materialNames.size())) + " - " + FormatMaterialSummary(materialNames);
-        DrawUiTextClipped(font, materialsLine.c_str(), panelX + 12.0f, panelY + 146.0f, 14.0f, panelW - 24.0f, Color{ 205, 213, 220, 255 });
+        DrawUiTextClipped(font, materialsLine.c_str(), panelX + 12.0f, panelY + 168.0f, 14.0f, panelW - 24.0f, Color{ 205, 213, 220, 255 });
         return;
     }
 
@@ -6013,7 +6032,7 @@ void DrawSelectedInfoPanel(Font font, const ModelTab* active, const TransformVal
     const Vector3 rotation = currentBonePose ? currentBonePose->rotation : node.rotation;
     const Vector3 scale = currentBonePose ? currentBonePose->scale : node.scale;
     constexpr float panelW = 330.0f;
-    constexpr float panelH = 154.0f;
+    constexpr float panelH = 178.0f;
     const float panelX = static_cast<float>(GetScreenWidth()) - panelW - 12.0f;
     const float panelY = static_cast<float>(GetScreenHeight()) - gBottomPanelReservedHeight - panelH - 12.0f;
 
@@ -6031,9 +6050,14 @@ void DrawSelectedInfoPanel(Font font, const ModelTab* active, const TransformVal
     DrawTransformValueRow(font, transformValueEditor, "Rot:", TransformValueField::Rotation, rotation, panelX, panelY + 80.0f, 2);
     DrawTransformValueRow(font, transformValueEditor, "Scale:", TransformValueField::Scale, scale, panelX, panelY + 102.0f, 3);
 
+    if (!IsUnitScale(scale))
+    {
+        DrawUiTextClipped(font, "Warning: scale is not 1, 1, 1.", panelX + 12.0f, panelY + 124.0f, 14.0f, panelW - 24.0f, Color{ 245, 190, 95, 255 });
+    }
+
     std::snprintf(line, sizeof(line), "Polys: %d", node.meshTriangleCount);
-    DrawUiText(font, line, panelX + 12.0f, panelY + 124.0f, 14.0f, Color{ 205, 213, 220, 255 });
-    DrawUiTextClipped(font, node.materialName.empty() ? "Material: None" : (std::string("Material: ") + node.materialName).c_str(), panelX + 120.0f, panelY + 124.0f, 14.0f, panelW - 132.0f, Color{ 205, 213, 220, 255 });
+    DrawUiText(font, line, panelX + 12.0f, panelY + 148.0f, 14.0f, Color{ 205, 213, 220, 255 });
+    DrawUiTextClipped(font, node.materialName.empty() ? "Material: None" : (std::string("Material: ") + node.materialName).c_str(), panelX + 120.0f, panelY + 148.0f, 14.0f, panelW - 132.0f, Color{ 205, 213, 220, 255 });
 }
 
 bool HasSceneNodeChildren(const LoadedFbxModel& loaded, int nodeIndex)
@@ -9675,6 +9699,7 @@ void DrawMenuBar(Font font,
                  bool& importAnimationsRequested,
                  bool& exportJsonRequested,
                  bool& compareFbxRequested,
+                 bool& aboutRequested,
                  bool& quitRequested,
                  ViewMode& viewMode,
                  NavigationPreset& navigation,
@@ -9697,7 +9722,8 @@ void DrawMenuBar(Font font,
         { "File", OpenMenu::File, Rectangle{ 8.0f, 3.0f, 54.0f, 22.0f } },
         { "Edit", OpenMenu::Edit, Rectangle{ 66.0f, 3.0f, 58.0f, 22.0f } },
         { "View", OpenMenu::View, Rectangle{ 124.0f, 3.0f, 58.0f, 22.0f } },
-        { "Preferences", OpenMenu::Preferences, Rectangle{ 186.0f, 3.0f, 118.0f, 22.0f } }
+        { "Preferences", OpenMenu::Preferences, Rectangle{ 186.0f, 3.0f, 118.0f, 22.0f } },
+        { "Help", OpenMenu::Help, Rectangle{ 308.0f, 3.0f, 58.0f, 22.0f } }
     };
 
     const Vector2 mouse = GetMousePosition();
@@ -9727,6 +9753,9 @@ void DrawMenuBar(Font font,
         break;
     case OpenMenu::Preferences:
         openMenuBounds = Rectangle{ 186.0f, 29.0f, 420.0f, 318.0f };
+        break;
+    case OpenMenu::Help:
+        openMenuBounds = Rectangle{ 308.0f, 29.0f, 230.0f, 38.0f };
         break;
     case OpenMenu::None:
         break;
@@ -9889,6 +9918,49 @@ void DrawMenuBar(Font font,
         DrawUiText(font, "Maya: Alt+LMB orbit, Shift snap, Alt+MMB pan, Alt+RMB/Wheel zoom", 198.0f, 288.0f, 15.0f, Color{ 205, 213, 220, 255 });
         DrawUiText(font, "Esc deselects    Ctrl+W closes tab    Ctrl+Q quits", 198.0f, 314.0f, 15.0f, Color{ 205, 213, 220, 255 });
     }
+    else if (openMenu == OpenMenu::Help)
+    {
+        DrawRectangle(308, 29, 230, 38, Color{ 28, 31, 35, 245 });
+        if (DrawMenuItem(font, Rectangle{ 308.0f, 29.0f, 230.0f, 30.0f }, "About openfbx"))
+        {
+            aboutRequested = true;
+            openMenu = OpenMenu::None;
+        }
+    }
+}
+
+void DrawAboutWindow(Font font, bool& visible)
+{
+    if (!visible) return;
+
+    const float w = 500.0f;
+    const float h = 280.0f;
+    const Rectangle bounds{ (static_cast<float>(GetScreenWidth()) - w) * 0.5f, (static_cast<float>(GetScreenHeight()) - h) * 0.5f, w, h };
+    DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Color{ 0, 0, 0, 90 });
+    DrawRectangleRec(bounds, Color{ 22, 25, 29, 248 });
+    DrawRectangleLinesEx(bounds, 1.0f, Color{ 86, 96, 108, 255 });
+
+    const Rectangle closeButton{ bounds.x + bounds.width - 38.0f, bounds.y + 10.0f, 26.0f, 24.0f };
+    if (DrawPanelButton(font, closeButton, "x") || IsKeyPressed(KEY_ESCAPE))
+    {
+        visible = false;
+        return;
+    }
+
+    DrawUiText(font, "ABOUT", bounds.x + 16.0f, bounds.y + 14.0f, 17.0f, Color{ 165, 182, 196, 255 });
+    DrawUiText(font, kAppName, bounds.x + 16.0f, bounds.y + 52.0f, 26.0f, RAYWHITE);
+
+    char versionText[96] = {};
+    std::snprintf(versionText, sizeof(versionText), "Version %s", kAppVersion);
+    DrawUiText(font, versionText, bounds.x + 16.0f, bounds.y + 84.0f, 16.0f, Color{ 160, 205, 230, 255 });
+
+    DrawUiText(font, "A focused FBX viewer and editor for inspecting, validating,", bounds.x + 16.0f, bounds.y + 122.0f, 16.0f, Color{ 205, 213, 220, 255 });
+    DrawUiText(font, "adjusting, and exporting Autodesk FBX model data.", bounds.x + 16.0f, bounds.y + 146.0f, 16.0f, Color{ 205, 213, 220, 255 });
+
+    DrawUiText(font, "Includes tools for hierarchy editing, materials, animation", bounds.x + 16.0f, bounds.y + 184.0f, 15.0f, Color{ 185, 195, 205, 255 });
+    DrawUiText(font, "review, UV checks, skin weights, skeleton comparison, and", bounds.x + 16.0f, bounds.y + 207.0f, 15.0f, Color{ 185, 195, 205, 255 });
+    DrawUiText(font, "transform editing.", bounds.x + 16.0f, bounds.y + 230.0f, 15.0f, Color{ 185, 195, 205, 255 });
+    DrawUiText(font, "Built with raylib and the Autodesk FBX SDK.", bounds.x + 16.0f, bounds.y + 254.0f, 14.0f, Color{ 128, 136, 144, 255 });
 }
 
 void DrawSkeletonCompareResultWindow(Font font, bool& visible, bool compatible, const std::string& path, const std::string& result)
@@ -10248,7 +10320,9 @@ void DrawTimeline(Font font, ModelTab& tab, RenameEditor& renameEditor, bool& co
 int main(int argc, char** argv)
 {
     SetConfigFlags(FLAG_WINDOW_RESIZABLE | FLAG_MSAA_4X_HINT);
-    InitWindow(1280, 800, "openfbx");
+    char windowTitle[128] = {};
+    std::snprintf(windowTitle, sizeof(windowTitle), "%s %s", kAppName, kAppVersion);
+    InitWindow(1280, 800, windowTitle);
     rlSetClipPlanes(kNearClipPlane, kFarClipPlane);
     SetExitKey(KEY_NULL);
     ApplyWindowIcon();
@@ -10270,6 +10344,7 @@ int main(int argc, char** argv)
     bool quitRequested = false;
     bool animationPanelCollapsed = false;
     bool compareResultVisible = false;
+    bool aboutVisible = false;
     bool compareResultCompatible = false;
     std::string compareResultPath;
     std::string compareResultText;
@@ -10354,9 +10429,10 @@ int main(int argc, char** argv)
         const bool controlDown = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
         const bool shiftDown = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
         const bool altDown = IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT);
-        bool openRequested = !renameEditor.active && controlDown && IsKeyPressed(KEY_O);
-        bool saveFbxRequested = !renameEditor.active && controlDown && !shiftDown && IsKeyPressed(KEY_S);
-        bool saveAsFbxRequested = !renameEditor.active && controlDown && shiftDown && IsKeyPressed(KEY_S);
+        const bool modalOpen = aboutVisible;
+        bool openRequested = !modalOpen && !renameEditor.active && controlDown && IsKeyPressed(KEY_O);
+        bool saveFbxRequested = !modalOpen && !renameEditor.active && controlDown && !shiftDown && IsKeyPressed(KEY_S);
+        bool saveAsFbxRequested = !modalOpen && !renameEditor.active && controlDown && shiftDown && IsKeyPressed(KEY_S);
         bool undoRequested = false;
         bool redoRequested = false;
 
@@ -10370,7 +10446,7 @@ int main(int argc, char** argv)
         }
 
         ModelTab* active = activeTab >= 0 && activeTab < static_cast<int>(tabs.size()) ? tabs[static_cast<size_t>(activeTab)].get() : nullptr;
-        if (active && controlDown && !shiftDown && !altDown && IsKeyPressed(KEY_W))
+        if (!modalOpen && active && controlDown && !shiftDown && !altDown && IsKeyPressed(KEY_W))
         {
             closeActiveTab();
         }
@@ -10380,11 +10456,11 @@ int main(int argc, char** argv)
         {
             CancelTransformValueEdit(transformValueEditor);
         }
-        if (!renameEditor.active && !transformValueEditor.active && active && controlDown && !shiftDown && IsKeyPressed(KEY_Z))
+        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && active && controlDown && !shiftDown && IsKeyPressed(KEY_Z))
         {
             undoRequested = true;
         }
-        if (!renameEditor.active && !transformValueEditor.active && active &&
+        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && active &&
             ((controlDown && IsKeyPressed(KEY_Y)) || (controlDown && shiftDown && IsKeyPressed(KEY_Z))))
         {
             redoRequested = true;
@@ -10412,13 +10488,14 @@ int main(int argc, char** argv)
                                      mouse.y >= 61.0f &&
                                      mouse.y < static_cast<float>(GetScreenHeight()) - gBottomPanelReservedHeight &&
                                      openMenu == OpenMenu::None &&
+                                     !modalOpen &&
                                      !hierarchyPanel.resizing &&
                                      !mouseOverHierarchyContextMenu;
 
-        const bool transformInfoConsumedMouse = !renameEditor.active && UpdateSelectedInfoPanelInput(active, transformValueEditor, editPivotMode, notice, error);
-        const bool toolbarConsumedMouse = !renameEditor.active && !transformValueEditor.active && UpdateTransformToolbarInput(transformTool, gizmoOrientation, editPivotMode, weightBrush, hierarchyBlockW);
+        const bool transformInfoConsumedMouse = !modalOpen && !renameEditor.active && UpdateSelectedInfoPanelInput(active, transformValueEditor, editPivotMode, notice, error);
+        const bool toolbarConsumedMouse = !modalOpen && !renameEditor.active && !transformValueEditor.active && UpdateTransformToolbarInput(transformTool, gizmoOrientation, editPivotMode, weightBrush, hierarchyBlockW);
         const WeightBrushMode weightBrushMode = shiftDown ? WeightBrushMode::Smooth : controlDown ? WeightBrushMode::Subtract : WeightBrushMode::Add;
-        if (!renameEditor.active && !transformValueEditor.active && !controlDown && !altDown)
+        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && !controlDown && !altDown)
         {
             if (IsKeyPressed(KEY_Q))
             {
@@ -10483,16 +10560,16 @@ int main(int argc, char** argv)
             weightBrushState.painting = false;
         }
 
-        if (!renameEditor.active && !transformValueEditor.active && active && altDown && IsKeyPressed(KEY_Q))
+        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && active && altDown && IsKeyPressed(KEY_Q))
         {
             ToggleSelectedNodeIsolation(*active, notice, error);
         }
-        if (!renameEditor.active && !transformValueEditor.active && controlDown && !altDown && IsKeyPressed(KEY_Q))
+        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && controlDown && !altDown && IsKeyPressed(KEY_Q))
         {
             quitRequested = true;
             continue;
         }
-        if (!renameEditor.active && !transformValueEditor.active && IsKeyPressed(KEY_ESCAPE))
+        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && IsKeyPressed(KEY_ESCAPE))
         {
             openMenu = OpenMenu::None;
             if (active)
@@ -10501,7 +10578,7 @@ int main(int argc, char** argv)
             }
         }
 
-        if (!renameEditor.active && !transformValueEditor.active && active && IsKeyPressed(KEY_F) && active->loaded.valid)
+        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && active && IsKeyPressed(KEY_F) && active->loaded.valid)
         {
             if (!FocusCameraOnSelection(*active))
             {
@@ -10509,31 +10586,31 @@ int main(int argc, char** argv)
             }
         }
 
-        if (!renameEditor.active && !transformValueEditor.active && IsKeyPressed(KEY_V))
+        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && IsKeyPressed(KEY_V))
         {
             viewMode = NextViewMode(viewMode);
         }
-        if (!renameEditor.active && !transformValueEditor.active && IsKeyPressed(KEY_C))
+        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && IsKeyPressed(KEY_C))
         {
             materialPreviewMode = NextMaterialPreviewMode(materialPreviewMode);
         }
-        if (!renameEditor.active && !transformValueEditor.active && IsKeyPressed(KEY_M))
+        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && IsKeyPressed(KEY_M))
         {
             materialPreviewMode = MaterialPreviewMode::Shaded;
         }
-        if (!renameEditor.active && !transformValueEditor.active && IsKeyPressed(KEY_T))
+        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && IsKeyPressed(KEY_T))
         {
             visibility.textures = !visibility.textures;
         }
-        if (!renameEditor.active && !transformValueEditor.active && IsKeyPressed(KEY_G))
+        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && IsKeyPressed(KEY_G))
         {
             visibility.geometry = !visibility.geometry;
         }
-        if (!renameEditor.active && !transformValueEditor.active && IsKeyPressed(KEY_B))
+        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && IsKeyPressed(KEY_B))
         {
             visibility.bones = !visibility.bones;
         }
-        if (!renameEditor.active && !transformValueEditor.active && !controlDown && IsKeyPressed(KEY_O))
+        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && !controlDown && IsKeyPressed(KEY_O))
         {
             visibility.boneRotations = !visibility.boneRotations;
         }
@@ -10787,29 +10864,35 @@ int main(int argc, char** argv)
         bool importAnimationsRequested = false;
         bool exportJsonRequested = false;
         bool compareFbxRequested = false;
-        DrawMenuBar(uiFont,
-                    openMenu,
-                    menuOpenRequested,
-                    menuCloseTabRequested,
-                    menuUndoRequested,
-                    menuRedoRequested,
-                    menuSaveFbxRequested,
-                    menuSaveAsFbxRequested,
-                    importAnimationsRequested,
-                    exportJsonRequested,
-                    compareFbxRequested,
-                    quitRequested,
-                    viewMode,
-                    navigation,
-                    visibility,
-                    active && !active->undoStack.empty(),
-                    active && !active->redoStack.empty());
+        bool aboutRequested = false;
+        if (!aboutVisible)
+        {
+            DrawMenuBar(uiFont,
+                        openMenu,
+                        menuOpenRequested,
+                        menuCloseTabRequested,
+                        menuUndoRequested,
+                        menuRedoRequested,
+                        menuSaveFbxRequested,
+                        menuSaveAsFbxRequested,
+                        importAnimationsRequested,
+                        exportJsonRequested,
+                        compareFbxRequested,
+                        aboutRequested,
+                        quitRequested,
+                        viewMode,
+                        navigation,
+                        visibility,
+                        active && !active->undoStack.empty(),
+                        active && !active->redoStack.empty());
+        }
         undoRequested = undoRequested || menuUndoRequested;
         redoRequested = redoRequested || menuRedoRequested;
         saveFbxRequested = saveFbxRequested || menuSaveFbxRequested;
         saveAsFbxRequested = saveAsFbxRequested || menuSaveAsFbxRequested;
         DrawSkeletonCompareResultWindow(uiFont, compareResultVisible, compareResultCompatible, compareResultPath, compareResultText);
         DrawRenameEditor(uiFont, active, renameEditor, notice, error);
+        DrawAboutWindow(uiFont, aboutVisible);
         EndDrawing();
 
         if (undoRequested && active)
@@ -10840,6 +10923,12 @@ int main(int argc, char** argv)
                 error = "No active tab to close.";
                 notice.clear();
             }
+        }
+
+        if (aboutRequested)
+        {
+            aboutVisible = true;
+            openMenu = OpenMenu::None;
         }
 
         if (!droppedPaths.empty() && !droppedTextureHandled)
