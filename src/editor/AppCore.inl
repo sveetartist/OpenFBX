@@ -65,11 +65,14 @@ constexpr double kFarClipPlane = 10000.0;
 constexpr Color kSelectionColor{ 204, 154, 42, 255 };
 constexpr float kMinTransformGizmoScale = 0.5f;
 constexpr float kMaxTransformGizmoScale = 2.0f;
+constexpr float kMinTransformGizmoLineWidth = 2.0f;
+constexpr float kMaxTransformGizmoLineWidth = 10.0f;
 constexpr float kNodeContextMenuW = 152.0f;
 constexpr float kNodeContextMenuBaseH = 92.0f;
 constexpr float kNodeContextMenuBoneH = 122.0f;
 float gBottomPanelReservedHeight = kTimelinePanelHeight;
 float gTransformGizmoScale = 1.0f;
+float gTransformGizmoLineWidth = 6.0f;
 
 struct AnimationState
 {
@@ -411,6 +414,12 @@ struct HierarchyPanelState
     bool shiftDragSelecting = false;
     int shiftDragAnchorNode = -1;
     int shiftDragLastNode = -1;
+    bool reparentDragArmed = false;
+    bool reparentDragging = false;
+    int reparentDragNode = -1;
+    int reparentDropTarget = -1;
+    Vector2 reparentDragStart{};
+    std::vector<int> reparentDragNodes;
     LeftPanelTab activeTab = LeftPanelTab::Hierarchy;
 };
 
@@ -802,6 +811,7 @@ const PbrMaterialState& GetSelectedPbrMaterial(const ModelTab& tab)
 bool IsDeletedNode(const ModelTab& tab, int nodeIndex);
 bool IsSceneRootNode(const LoadedFbxModel& loaded, int nodeIndex);
 bool IsSceneNodeVisible(const ModelTab& tab, const std::vector<bool>& collapsed, int nodeIndex);
+std::vector<int> BuildVisibleHierarchyOrder(const ModelTab& tab, const std::vector<bool>& collapsed);
 bool IsNodeSelected(const ModelTab& tab, int nodeIndex);
 void PruneSelectedNodes(ModelTab& tab);
 void ClearNodeSelection(ModelTab& tab);

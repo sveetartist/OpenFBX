@@ -1345,6 +1345,34 @@ void ApplyEditedNodeTransforms(const LoadedFbxModel& model,
     }
 }
 
+void ApplyEditedNodeParents(FbxScene* scene,
+                            const LoadedFbxModel& model,
+                            const std::vector<bool>& deletedNodes,
+                            const std::vector<FbxNode*>& sceneNodes)
+{
+    if (!scene) return;
+
+    const int count = std::min(static_cast<int>(model.nodes.size()), static_cast<int>(sceneNodes.size()));
+    for (int nodeIndex = 0; nodeIndex < count; ++nodeIndex)
+    {
+        if (IsDeletedModelNode(deletedNodes, nodeIndex)) continue;
+
+        FbxNode* targetNode = sceneNodes[static_cast<size_t>(nodeIndex)];
+        if (!targetNode || targetNode == scene->GetRootNode()) continue;
+
+        const int parentIndex = model.nodes[static_cast<size_t>(nodeIndex)].parent;
+        FbxNode* targetParent = parentIndex >= 0 && parentIndex < count ? sceneNodes[static_cast<size_t>(parentIndex)] : scene->GetRootNode();
+        if (!targetParent || targetParent == targetNode || IsDeletedModelNode(deletedNodes, parentIndex)) continue;
+        if (targetNode->GetParent() == targetParent) continue;
+
+        if (FbxNode* currentParent = targetNode->GetParent())
+        {
+            currentParent->RemoveChild(targetNode);
+        }
+        targetParent->AddChild(targetNode);
+    }
+}
+
 std::unordered_map<FbxNode*, int> BuildFbxNodeToModelIndex(const LoadedFbxModel& model,
                                                            const std::vector<FbxNode*>& sceneNodes)
 {
@@ -1658,6 +1686,7 @@ bool ApplyEditedModelToScene(FbxScene* scene,
     }
 
     const std::vector<FbxNode*> mappedSceneNodes = BuildMappedSceneNodes(model, sceneNodes);
+    ApplyEditedNodeParents(scene, model, deletedNodes, mappedSceneNodes);
     ApplyEditedNodeTransforms(model, deletedNodes, mappedSceneNodes);
     ApplyEditedSkinBindMatrices(model, deletedNodes, mappedSceneNodes);
     RebuildEditedBindPose(scene, model, deletedNodes, mappedSceneNodes);

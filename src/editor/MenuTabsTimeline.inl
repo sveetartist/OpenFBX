@@ -63,7 +63,7 @@ void DrawMenuBar(Font font,
         openMenuBounds = Rectangle{ 124.0f, 29.0f, 230.0f, 368.0f };
         break;
     case OpenMenu::Preferences:
-        openMenuBounds = Rectangle{ 186.0f, 29.0f, 420.0f, 318.0f };
+        openMenuBounds = Rectangle{ 186.0f, 29.0f, 420.0f, 348.0f };
         break;
     case OpenMenu::Help:
         openMenuBounds = Rectangle{ 308.0f, 29.0f, 230.0f, 38.0f };
@@ -207,7 +207,7 @@ void DrawMenuBar(Font font,
     }
     else if (openMenu == OpenMenu::Preferences)
     {
-        DrawRectangle(186, 29, 420, 318, Color{ 28, 31, 35, 245 });
+        DrawRectangle(186, 29, 420, 348, Color{ 28, 31, 35, 245 });
         DrawUiText(font, "NAVIGATION", 198.0f, 39.0f, 16.0f, Color{ 165, 182, 196, 255 });
         if (DrawMenuItem(font, Rectangle{ 196.0f, 64.0f, 185.0f, 30.0f }, "Blender", navigation == NavigationPreset::Blender))
         {
@@ -235,12 +235,28 @@ void DrawMenuBar(Font font,
             gTransformGizmoScale = 1.0f;
         }
 
-        DrawUiText(font, "HOTKEYS", 198.0f, 184.0f, 16.0f, Color{ 165, 182, 196, 255 });
-        DrawUiText(font, "Q/W/E/R tools    Ctrl+O open FBX    Ctrl+R reload", 198.0f, 210.0f, 15.0f, Color{ 205, 213, 220, 255 });
-        DrawUiText(font, "Ctrl+Z undo    Ctrl+Y redo    T textures    C channels", 198.0f, 236.0f, 15.0f, Color{ 205, 213, 220, 255 });
-        DrawUiText(font, "Blender: MMB orbit, Alt snap, Shift+MMB pan, Wheel zoom", 198.0f, 262.0f, 15.0f, Color{ 205, 213, 220, 255 });
-        DrawUiText(font, "Maya: Alt+LMB orbit, Shift snap, Alt+MMB pan, Alt+RMB/Wheel zoom", 198.0f, 288.0f, 15.0f, Color{ 205, 213, 220, 255 });
-        DrawUiText(font, "Esc deselects    Ctrl+W closes tab    Ctrl+Q quits", 198.0f, 314.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        char gizmoThicknessText[64] = {};
+        std::snprintf(gizmoThicknessText, sizeof(gizmoThicknessText), "Thickness: %.1f px", gTransformGizmoLineWidth);
+        DrawUiText(font, gizmoThicknessText, 198.0f, 169.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        if (DrawPanelButton(font, Rectangle{ 330.0f, 162.0f, 34.0f, 26.0f }, "-"))
+        {
+            gTransformGizmoLineWidth = ClampFloat(gTransformGizmoLineWidth - 0.5f, kMinTransformGizmoLineWidth, kMaxTransformGizmoLineWidth);
+        }
+        if (DrawPanelButton(font, Rectangle{ 372.0f, 162.0f, 34.0f, 26.0f }, "+"))
+        {
+            gTransformGizmoLineWidth = ClampFloat(gTransformGizmoLineWidth + 0.5f, kMinTransformGizmoLineWidth, kMaxTransformGizmoLineWidth);
+        }
+        if (DrawPanelButton(font, Rectangle{ 416.0f, 162.0f, 70.0f, 26.0f }, "Reset"))
+        {
+            gTransformGizmoLineWidth = 6.0f;
+        }
+
+        DrawUiText(font, "HOTKEYS", 198.0f, 214.0f, 16.0f, Color{ 165, 182, 196, 255 });
+        DrawUiText(font, "Q/W/E/R tools    Ctrl+O open FBX    Ctrl+R reload", 198.0f, 240.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        DrawUiText(font, "Ctrl+Z undo    Ctrl+Y redo    T textures    C channels", 198.0f, 266.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        DrawUiText(font, "Blender: MMB orbit, Alt snap, Shift+MMB pan, Wheel zoom", 198.0f, 292.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        DrawUiText(font, "Maya: Alt+LMB orbit, Shift snap, Alt+MMB pan, Alt+RMB/Wheel zoom", 198.0f, 318.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        DrawUiText(font, "Esc deselects    Ctrl+W closes tab    Ctrl+Q quits", 198.0f, 344.0f, 15.0f, Color{ 205, 213, 220, 255 });
     }
     else if (openMenu == OpenMenu::Help)
     {

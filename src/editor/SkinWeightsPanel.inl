@@ -323,11 +323,40 @@ void DrawHierarchyPanel(Font font,
 
     const Vector2 mouse = GetMousePosition();
     const bool additiveSelection = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
+    const bool leftPressed = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    const bool leftDown = IsMouseButtonDown(MOUSE_BUTTON_LEFT);
+    const bool leftReleased = IsMouseButtonReleased(MOUSE_BUTTON_LEFT);
     if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT) || !additiveSelection)
     {
         panel.shiftDragSelecting = false;
         panel.shiftDragAnchorNode = -1;
         panel.shiftDragLastNode = -1;
+    }
+    if (!leftDown && !leftReleased)
+    {
+        panel.reparentDragArmed = false;
+        panel.reparentDragging = false;
+        panel.reparentDragNode = -1;
+        panel.reparentDropTarget = -1;
+        panel.reparentDragNodes.clear();
+    }
+    if (additiveSelection)
+    {
+        panel.reparentDragArmed = false;
+        panel.reparentDragging = false;
+    }
+    if (panel.reparentDragArmed && leftDown && !panel.reparentDragging)
+    {
+        const float dragDistance = Vector2Distance(mouse, panel.reparentDragStart);
+        if (dragDistance > 5.0f)
+        {
+            panel.reparentDragging = true;
+            panel.contextMenuOpen = false;
+        }
+    }
+    if (panel.reparentDragging)
+    {
+        panel.reparentDropTarget = -1;
     }
 
     auto getContextMenuHeight = [&]()
@@ -341,10 +370,11 @@ void DrawHierarchyPanel(Font font,
     float rowY = GetHierarchyContentStartY();
     int visibleRow = 0;
     const int firstRow = static_cast<int>(std::floor(panel.scroll));
+    const std::vector<int> hierarchyOrder = BuildVisibleHierarchyOrder(*active, active->collapsedNodes);
 
-    for (int i = 0; i < static_cast<int>(active->loaded.nodes.size()); ++i)
+    for (int orderIndex = 0; orderIndex < static_cast<int>(hierarchyOrder.size()); ++orderIndex)
     {
-        if (!IsSceneNodeVisible(*active, active->collapsedNodes, i)) continue;
+        const int i = hierarchyOrder[static_cast<size_t>(orderIndex)];
         if (visibleRow++ < firstRow) continue;
         if (rowY + rowH > panelY + panelH) break;
 
@@ -366,12 +396,19 @@ void DrawHierarchyPanel(Font font,
         {
             DrawRectangleRec(row, Color{ 34, 39, 45, 255 });
         }
+        if (panel.reparentDragging && hovered)
+        {
+            panel.reparentDropTarget = i;
+            const bool validDrop = CanReparentNodeRoots(*active, panel.reparentDragNodes, i);
+            DrawRectangleRec(row, validDrop ? Color{ 52, 115, 82, 90 } : Color{ 130, 58, 58, 90 });
+            DrawRectangleLinesEx(row, 1.0f, validDrop ? Color{ 90, 210, 145, 230 } : Color{ 235, 105, 105, 230 });
+        }
 
         const Rectangle collapseRect{ panelX + 10.0f + indent, rowY + 3.0f, 14.0f, 16.0f };
         if (hasChildren)
         {
             DrawUiText(font, active->collapsedNodes[static_cast<size_t>(i)] ? ">" : "v", collapseRect.x, collapseRect.y, 15.0f, Color{ 190, 198, 206, 255 });
-            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, collapseRect))
+            if (leftPressed && CheckCollisionPointRec(mouse, collapseRect))
             {
                 active->collapsedNodes[static_cast<size_t>(i)] = !active->collapsedNodes[static_cast<size_t>(i)];
             }
@@ -386,7 +423,7 @@ void DrawHierarchyPanel(Font font,
         EndScissorMode();
 
         if (hovered &&
-            IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
+            leftPressed &&
             !IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) &&
             !IsMouseButtonDown(MOUSE_BUTTON_RIGHT) &&
             !mouseOverContextMenu &&
@@ -397,11 +434,33 @@ void DrawHierarchyPanel(Font font,
                 panel.shiftDragSelecting = true;
                 panel.shiftDragAnchorNode = i;
                 panel.shiftDragLastNode = i;
+                panel.reparentDragArmed = false;
+                panel.reparentDragging = false;
             }
-            SelectNode(*active, i, additiveSelection);
+            if (!additiveSelection)
+            {
+                panel.reparentDragArmed = true;
+                panel.reparentDragging = false;
+                panel.reparentDragNode = i;
+                panel.reparentDragStart = mouse;
+                panel.reparentDropTarget = -1;
+                panel.reparentDragNodes = GetReparentDragRoots(*active, i);
+                if (!IsNodeSelected(*active, i) || active->selectedNodes.size() <= 1)
+                {
+                    SelectNode(*active, i, false);
+                }
+                else
+                {
+                    active->selectedNode = i;
+                }
+            }
+            else
+            {
+                SelectNode(*active, i, true);
+            }
             panel.contextMenuOpen = false;
         }
-        else if (hovered && panel.shiftDragSelecting && additiveSelection && IsMouseButtonDown(MOUSE_BUTTON_LEFT) &&
+        else if (hovered && panel.shiftDragSelecting && additiveSelection && leftDown &&
                  !mouseOverContextMenu && !CheckCollisionPointRec(mouse, collapseRect) &&
                  i != panel.shiftDragLastNode)
         {
@@ -440,6 +499,41 @@ void DrawHierarchyPanel(Font font,
         }
 
         rowY += rowH;
+    }
+
+    if (leftReleased && panel.reparentDragging)
+    {
+        if (CanReparentNodeRoots(*active, panel.reparentDragNodes, panel.reparentDropTarget))
+        {
+            PushUndoSnapshot(*active);
+            const int changedCount = ReparentNodeRoots(*active, panel.reparentDragNodes, panel.reparentDropTarget);
+            if (changedCount > 0)
+            {
+                if (panel.reparentDropTarget >= 0 && panel.reparentDropTarget < static_cast<int>(active->collapsedNodes.size()))
+                {
+                    active->collapsedNodes[static_cast<size_t>(panel.reparentDropTarget)] = false;
+                }
+                notice = "Reparented " + std::to_string(changedCount) + " object" + std::string(changedCount == 1 ? "." : "s.");
+                error.clear();
+            }
+        }
+        else if (panel.reparentDropTarget >= 0)
+        {
+            error = "Cannot parent an object to itself or one of its children.";
+            notice.clear();
+        }
+    }
+    else if (leftReleased && panel.reparentDragArmed && !panel.reparentDragging)
+    {
+        SelectNode(*active, panel.reparentDragNode, false);
+    }
+    if (leftReleased)
+    {
+        panel.reparentDragArmed = false;
+        panel.reparentDragging = false;
+        panel.reparentDragNode = -1;
+        panel.reparentDropTarget = -1;
+        panel.reparentDragNodes.clear();
     }
 
     const int visibleCount = CountVisibleSceneNodes(*active, active->collapsedNodes);

@@ -57,6 +57,98 @@ bool IsSceneNodeVisible(const ModelTab& tab, const std::vector<bool>& collapsed,
     return true;
 }
 
+void AppendVisibleHierarchyNodes(const LoadedFbxModel& loaded,
+                                 const std::vector<bool>& collapsed,
+                                 int parentIndex,
+                                 std::vector<bool>& visited,
+                                 std::vector<int>& order)
+{
+    for (int nodeIndex = 0; nodeIndex < static_cast<int>(loaded.nodes.size()); ++nodeIndex)
+    {
+        if (nodeIndex >= static_cast<int>(visited.size()) ||
+            visited[static_cast<size_t>(nodeIndex)] ||
+            loaded.nodes[static_cast<size_t>(nodeIndex)].parent != parentIndex)
+        {
+            continue;
+        }
+
+        visited[static_cast<size_t>(nodeIndex)] = true;
+        if (IsSceneRootNode(loaded, nodeIndex))
+        {
+            AppendVisibleHierarchyNodes(loaded, collapsed, nodeIndex, visited, order);
+            continue;
+        }
+
+        order.push_back(nodeIndex);
+        const bool collapsedNode = nodeIndex < static_cast<int>(collapsed.size()) && collapsed[static_cast<size_t>(nodeIndex)];
+        if (!collapsedNode)
+        {
+            AppendVisibleHierarchyNodes(loaded, collapsed, nodeIndex, visited, order);
+        }
+    }
+}
+
+void AppendVisibleHierarchyNodes(const ModelTab& tab,
+                                 const std::vector<bool>& collapsed,
+                                 int parentIndex,
+                                 std::vector<bool>& visited,
+                                 std::vector<int>& order)
+{
+    for (int nodeIndex = 0; nodeIndex < static_cast<int>(tab.loaded.nodes.size()); ++nodeIndex)
+    {
+        if (nodeIndex >= static_cast<int>(visited.size()) ||
+            visited[static_cast<size_t>(nodeIndex)] ||
+            tab.loaded.nodes[static_cast<size_t>(nodeIndex)].parent != parentIndex)
+        {
+            continue;
+        }
+
+        visited[static_cast<size_t>(nodeIndex)] = true;
+        if (IsSceneRootNode(tab.loaded, nodeIndex))
+        {
+            AppendVisibleHierarchyNodes(tab, collapsed, nodeIndex, visited, order);
+            continue;
+        }
+
+        if (IsDeletedNode(tab, nodeIndex)) continue;
+
+        order.push_back(nodeIndex);
+        const bool collapsedNode = nodeIndex < static_cast<int>(collapsed.size()) && collapsed[static_cast<size_t>(nodeIndex)];
+        if (!collapsedNode)
+        {
+            AppendVisibleHierarchyNodes(tab, collapsed, nodeIndex, visited, order);
+        }
+    }
+}
+
+std::vector<int> BuildVisibleHierarchyOrder(const LoadedFbxModel& loaded, const std::vector<bool>& collapsed)
+{
+    std::vector<int> order;
+    std::vector<bool> visited(loaded.nodes.size(), false);
+    AppendVisibleHierarchyNodes(loaded, collapsed, -1, visited, order);
+    for (int nodeIndex = 0; nodeIndex < static_cast<int>(loaded.nodes.size()); ++nodeIndex)
+    {
+        if (nodeIndex < static_cast<int>(visited.size()) && visited[static_cast<size_t>(nodeIndex)]) continue;
+        if (IsSceneRootNode(loaded, nodeIndex)) continue;
+        if (IsSceneNodeVisible(loaded, collapsed, nodeIndex)) order.push_back(nodeIndex);
+    }
+    return order;
+}
+
+std::vector<int> BuildVisibleHierarchyOrder(const ModelTab& tab, const std::vector<bool>& collapsed)
+{
+    std::vector<int> order;
+    std::vector<bool> visited(tab.loaded.nodes.size(), false);
+    AppendVisibleHierarchyNodes(tab, collapsed, -1, visited, order);
+    for (int nodeIndex = 0; nodeIndex < static_cast<int>(tab.loaded.nodes.size()); ++nodeIndex)
+    {
+        if (nodeIndex < static_cast<int>(visited.size()) && visited[static_cast<size_t>(nodeIndex)]) continue;
+        if (IsSceneRootNode(tab.loaded, nodeIndex)) continue;
+        if (IsSceneNodeVisible(tab, collapsed, nodeIndex)) order.push_back(nodeIndex);
+    }
+    return order;
+}
+
 float GetHierarchyPanelHeight()
 {
     return static_cast<float>(GetScreenHeight()) - 61.0f - gBottomPanelReservedHeight;
@@ -69,22 +161,12 @@ float GetHierarchyContentStartY()
 
 int CountVisibleSceneNodes(const LoadedFbxModel& loaded, const std::vector<bool>& collapsed)
 {
-    int count = 0;
-    for (int i = 0; i < static_cast<int>(loaded.nodes.size()); ++i)
-    {
-        if (IsSceneNodeVisible(loaded, collapsed, i)) ++count;
-    }
-    return count;
+    return static_cast<int>(BuildVisibleHierarchyOrder(loaded, collapsed).size());
 }
 
 int CountVisibleSceneNodes(const ModelTab& tab, const std::vector<bool>& collapsed)
 {
-    int count = 0;
-    for (int i = 0; i < static_cast<int>(tab.loaded.nodes.size()); ++i)
-    {
-        if (IsSceneNodeVisible(tab, collapsed, i)) ++count;
-    }
-    return count;
+    return static_cast<int>(BuildVisibleHierarchyOrder(tab, collapsed).size());
 }
 
 int GetHierarchyDisplayDepth(const LoadedFbxModel& loaded, int nodeIndex)
@@ -104,24 +186,20 @@ int GetHierarchyDisplayDepth(const LoadedFbxModel& loaded, int nodeIndex)
 
 int GetVisibleSceneNodeRow(const LoadedFbxModel& loaded, const std::vector<bool>& collapsed, int nodeIndex)
 {
-    int row = 0;
-    for (int i = 0; i < static_cast<int>(loaded.nodes.size()); ++i)
+    const std::vector<int> order = BuildVisibleHierarchyOrder(loaded, collapsed);
+    for (int row = 0; row < static_cast<int>(order.size()); ++row)
     {
-        if (!IsSceneNodeVisible(loaded, collapsed, i)) continue;
-        if (i == nodeIndex) return row;
-        ++row;
+        if (order[static_cast<size_t>(row)] == nodeIndex) return row;
     }
     return -1;
 }
 
 int GetVisibleSceneNodeRow(const ModelTab& tab, const std::vector<bool>& collapsed, int nodeIndex)
 {
-    int row = 0;
-    for (int i = 0; i < static_cast<int>(tab.loaded.nodes.size()); ++i)
+    const std::vector<int> order = BuildVisibleHierarchyOrder(tab, collapsed);
+    for (int row = 0; row < static_cast<int>(order.size()); ++row)
     {
-        if (!IsSceneNodeVisible(tab, collapsed, i)) continue;
-        if (i == nodeIndex) return row;
-        ++row;
+        if (order[static_cast<size_t>(row)] == nodeIndex) return row;
     }
     return -1;
 }

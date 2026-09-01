@@ -97,13 +97,12 @@ void SetVisibleNodeRangeSelection(ModelTab& tab, const std::vector<bool>& collap
 
     int anchorRow = -1;
     int targetRow = -1;
-    int visibleRow = 0;
-    for (int i = 0; i < static_cast<int>(tab.loaded.nodes.size()); ++i)
+    const std::vector<int> order = BuildVisibleHierarchyOrder(tab, collapsed);
+    for (int visibleRow = 0; visibleRow < static_cast<int>(order.size()); ++visibleRow)
     {
-        if (!IsSceneNodeVisible(tab, collapsed, i)) continue;
+        const int i = order[static_cast<size_t>(visibleRow)];
         if (i == anchorNode) anchorRow = visibleRow;
         if (i == targetNode) targetRow = visibleRow;
-        ++visibleRow;
     }
 
     if (anchorRow < 0 || targetRow < 0) return;
@@ -111,15 +110,13 @@ void SetVisibleNodeRangeSelection(ModelTab& tab, const std::vector<bool>& collap
     const int firstRow = std::min(anchorRow, targetRow);
     const int lastRow = std::max(anchorRow, targetRow);
     tab.selectedNodes.clear();
-    visibleRow = 0;
-    for (int i = 0; i < static_cast<int>(tab.loaded.nodes.size()); ++i)
+    for (int visibleRow = 0; visibleRow < static_cast<int>(order.size()); ++visibleRow)
     {
-        if (!IsSceneNodeVisible(tab, collapsed, i)) continue;
+        const int i = order[static_cast<size_t>(visibleRow)];
         if (visibleRow >= firstRow && visibleRow <= lastRow && IsValidSelectableNode(tab, i))
         {
             tab.selectedNodes.push_back(i);
         }
-        ++visibleRow;
     }
     tab.selectedNode = targetNode;
 }
@@ -255,6 +252,138 @@ std::vector<int> GetContextActionRoots(const ModelTab& tab, const std::vector<in
 std::vector<int> GetContextActionRoots(const ModelTab& tab, int contextNodeIndex, const std::vector<int>& contextNodeIndices)
 {
     return GetContextActionRoots(tab, GetContextActionNodes(tab, contextNodeIndex, contextNodeIndices));
+}
+
+int FindReparentNearestBoneParent(const LoadedFbxModel& loaded, int nodeIndex)
+{
+    int parent = nodeIndex >= 0 && nodeIndex < static_cast<int>(loaded.nodes.size()) ? loaded.nodes[static_cast<size_t>(nodeIndex)].parent : -1;
+    while (parent >= 0 && parent < static_cast<int>(loaded.nodes.size()))
+    {
+        if (loaded.nodes[static_cast<size_t>(parent)].type == SceneNodeType::Bone) return parent;
+        parent = loaded.nodes[static_cast<size_t>(parent)].parent;
+    }
+    return -1;
+}
+
+Vector3 GetBonePosePositionOrNode(const LoadedFbxModel& loaded, const std::vector<BonePose>& poses, int nodeIndex)
+{
+    if (const BonePose* pose = FindBonePoseByNode(poses, nodeIndex))
+    {
+        return pose->position;
+    }
+
+    if (nodeIndex >= 0 && nodeIndex < static_cast<int>(loaded.nodes.size()))
+    {
+        return loaded.nodes[static_cast<size_t>(nodeIndex)].position;
+    }
+
+    return Vector3Zero();
+}
+
+std::vector<BoneSegment> BuildBoneSegmentsFromHierarchy(const LoadedFbxModel& loaded, const std::vector<BonePose>& poses)
+{
+    std::vector<BoneSegment> bones;
+    for (int nodeIndex = 0; nodeIndex < static_cast<int>(loaded.nodes.size()); ++nodeIndex)
+    {
+        const SceneNode& node = loaded.nodes[static_cast<size_t>(nodeIndex)];
+        if (node.type != SceneNodeType::Bone) continue;
+
+        const int parent = FindReparentNearestBoneParent(loaded, nodeIndex);
+        if (parent < 0) continue;
+
+        bones.push_back(BoneSegment{
+            GetBonePosePositionOrNode(loaded, poses, parent),
+            GetBonePosePositionOrNode(loaded, poses, nodeIndex),
+            parent,
+            nodeIndex
+        });
+    }
+    return bones;
+}
+
+void RebuildBoneSegmentsAfterReparent(ModelTab& tab)
+{
+    tab.loaded.bones = BuildBoneSegmentsFromHierarchy(tab.loaded, tab.loaded.bonePoses);
+    for (AnimationClip& clip : tab.loaded.animations)
+    {
+        for (BoneFrame& frame : clip.frames)
+        {
+            frame.bones = BuildBoneSegmentsFromHierarchy(tab.loaded, frame.poses);
+        }
+    }
+
+    if (tab.animation.clipIndex < 0)
+    {
+        tab.visibleBones = tab.loaded.bones;
+        tab.visibleBonePoses = tab.loaded.bonePoses;
+    }
+    InvalidateDisplayedAnimationCaches(tab);
+}
+
+void RecomputeSceneNodeDepths(LoadedFbxModel& loaded)
+{
+    for (int nodeIndex = 0; nodeIndex < static_cast<int>(loaded.nodes.size()); ++nodeIndex)
+    {
+        int depth = 0;
+        int parent = loaded.nodes[static_cast<size_t>(nodeIndex)].parent;
+        std::vector<bool> visited(loaded.nodes.size(), false);
+        while (parent >= 0 && parent < static_cast<int>(loaded.nodes.size()) && !visited[static_cast<size_t>(parent)])
+        {
+            visited[static_cast<size_t>(parent)] = true;
+            ++depth;
+            parent = loaded.nodes[static_cast<size_t>(parent)].parent;
+        }
+        loaded.nodes[static_cast<size_t>(nodeIndex)].depth = depth;
+    }
+}
+
+std::vector<int> GetReparentDragRoots(const ModelTab& tab, int sourceNode)
+{
+    if (!IsValidSelectableNode(tab, sourceNode)) return {};
+    if (IsNodeSelected(tab, sourceNode))
+    {
+        std::vector<int> selected = GetValidContextActionNodes(tab, tab.selectedNodes);
+        std::vector<int> roots = GetContextActionRoots(tab, selected);
+        if (!roots.empty()) return roots;
+    }
+    return { sourceNode };
+}
+
+bool CanReparentNodeRoots(const ModelTab& tab, const std::vector<int>& roots, int newParent)
+{
+    if (!IsValidSelectableNode(tab, newParent)) return false;
+    if (roots.empty()) return false;
+
+    bool changesParent = false;
+    for (int root : roots)
+    {
+        if (!IsValidSelectableNode(tab, root)) return false;
+        if (root == newParent) return false;
+        if (IsDescendantNode(tab.loaded, newParent, root)) return false;
+        changesParent = changesParent || tab.loaded.nodes[static_cast<size_t>(root)].parent != newParent;
+    }
+    return changesParent;
+}
+
+int ReparentNodeRoots(ModelTab& tab, const std::vector<int>& roots, int newParent)
+{
+    if (!CanReparentNodeRoots(tab, roots, newParent)) return 0;
+
+    int changedCount = 0;
+    for (int root : roots)
+    {
+        SceneNode& node = tab.loaded.nodes[static_cast<size_t>(root)];
+        if (node.parent == newParent) continue;
+        node.parent = newParent;
+        ++changedCount;
+    }
+
+    if (changedCount <= 0) return 0;
+
+    RecomputeSceneNodeDepths(tab.loaded);
+    RebuildBoneSegmentsAfterReparent(tab);
+    RefreshDisplayedMesh(tab);
+    return changedCount;
 }
 
 bool HasBoneNode(const ModelTab& tab, const std::vector<int>& nodeIndices)

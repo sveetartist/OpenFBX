@@ -359,9 +359,40 @@ bool UpdateTransformGizmoInput(ModelTab* active,
     return true;
 }
 
+float GetGizmoStrokeRadius(const ModelTab& tab, Vector3 point)
+{
+    const float lineWidth = ClampFloat(gTransformGizmoLineWidth, kMinTransformGizmoLineWidth, kMaxTransformGizmoLineWidth);
+    const float worldPerPixel = GetViewPlaneWorldPerPixel(tab, point);
+    return std::max(worldPerPixel * lineWidth * 0.5f, GetTransformGizmoLength(tab) * 0.0025f);
+}
+
+void DrawGizmoStroke(const ModelTab& tab, Vector3 start, Vector3 end, Color color)
+{
+    if (Vector3Distance(start, end) <= 0.000001f) return;
+
+    const Vector3 midpoint = Vector3Scale(Vector3Add(start, end), 0.5f);
+    const float radius = GetGizmoStrokeRadius(tab, midpoint);
+    DrawCylinderEx(start, end, radius, radius, 10, color);
+}
+
+void DrawGizmoCircle(const ModelTab& tab, Vector3 position, Vector3 axisA, Vector3 axisB, float radius, Color color)
+{
+    constexpr int kSegments = 64;
+    Vector3 previous = Vector3Add(position, Vector3Scale(axisA, radius));
+    for (int i = 1; i <= kSegments; ++i)
+    {
+        const float angle = static_cast<float>(i) / static_cast<float>(kSegments) * 2.0f * PI;
+        const Vector3 offset = Vector3Add(Vector3Scale(axisA, std::cos(angle) * radius),
+                                          Vector3Scale(axisB, std::sin(angle) * radius));
+        const Vector3 current = Vector3Add(position, offset);
+        DrawGizmoStroke(tab, previous, current, color);
+        previous = current;
+    }
+}
+
 void DrawMoveGizmoArrow(const ModelTab& tab, Vector3 start, Vector3 end, Vector3 axisVector, float length, Color color)
 {
-    DrawLine3D(start, end, color);
+    DrawGizmoStroke(tab, start, end, color);
 
     const Vector3 cameraForward = GetCameraForward(tab.orbit.camera);
     Vector3 side = Vector3CrossProduct(axisVector, cameraForward);
@@ -374,12 +405,12 @@ void DrawMoveGizmoArrow(const ModelTab& tab, Vector3 start, Vector3 end, Vector3
     const float headLength = length * 0.12f;
     const float headWidth = length * 0.05f;
     const Vector3 base = Vector3Subtract(end, Vector3Scale(axisVector, headLength));
-    DrawLine3D(end, Vector3Add(base, Vector3Scale(side, headWidth)), color);
-    DrawLine3D(end, Vector3Subtract(base, Vector3Scale(side, headWidth)), color);
+    DrawGizmoStroke(tab, end, Vector3Add(base, Vector3Scale(side, headWidth)), color);
+    DrawGizmoStroke(tab, end, Vector3Subtract(base, Vector3Scale(side, headWidth)), color);
 
     const Vector3 upWing = NormalizeOrFallback(Vector3CrossProduct(axisVector, side), ChoosePerpendicular(axisVector));
-    DrawLine3D(end, Vector3Add(base, Vector3Scale(upWing, headWidth)), color);
-    DrawLine3D(end, Vector3Subtract(base, Vector3Scale(upWing, headWidth)), color);
+    DrawGizmoStroke(tab, end, Vector3Add(base, Vector3Scale(upWing, headWidth)), color);
+    DrawGizmoStroke(tab, end, Vector3Subtract(base, Vector3Scale(upWing, headWidth)), color);
 }
 
 void DrawTransformGizmo(const ModelTab& tab, TransformTool tool, const TransformGizmoState& state, GizmoOrientation orientation, bool editPivotMode)
@@ -398,7 +429,6 @@ void DrawTransformGizmo(const ModelTab& tab, TransformTool tool, const Transform
     rlDrawRenderBatchActive();
     rlDisableDepthTest();
     rlDisableDepthMask();
-    rlSetLineWidth(4.5f);
 
     const bool centerActive = state.dragging && state.axis == TransformAxis::Center;
     const Color centerColor = (editPivotMode || pivotDragInProgress) ? Color{ 255, 214, 84, 245 } : Color{ 225, 232, 238, 235 };
@@ -416,7 +446,7 @@ void DrawTransformGizmo(const ModelTab& tab, TransformTool tool, const Transform
             Vector3 axisB{};
             if (GetTransformPlaneBasis(tab, axis, orientation, axisA, axisB))
             {
-                DrawJointCircle(pivot, axisA, axisB, radius, color);
+                DrawGizmoCircle(tab, pivot, axisA, axisB, radius, color);
             }
         }
         else
@@ -428,12 +458,11 @@ void DrawTransformGizmo(const ModelTab& tab, TransformTool tool, const Transform
             }
             else if (activeTool == TransformTool::Scale)
             {
-                DrawLine3D(pivot, end, color);
+                DrawGizmoStroke(tab, pivot, end, color);
                 DrawCubeV(end, Vector3{ handleRadius * 2.0f, handleRadius * 2.0f, handleRadius * 2.0f }, color);
             }
         }
     }
-    rlSetLineWidth(1.0f);
     rlDrawRenderBatchActive();
     rlEnableDepthMask();
     rlEnableDepthTest();
