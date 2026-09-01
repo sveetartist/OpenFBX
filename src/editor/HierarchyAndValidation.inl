@@ -228,6 +228,7 @@ struct SceneStats
     int bones = 0;
     int empties = 0;
     int vertices = 0;
+    int polygons = 0;
     int triangles = 0;
     int materials = 0;
 };
@@ -248,6 +249,7 @@ SceneStats CalculateSceneStats(const LoadedFbxModel& loaded)
         case SceneNodeType::Mesh:
             ++stats.meshes;
             stats.vertices += node.meshVertexCount;
+            stats.polygons += node.meshPolygonCount;
             stats.triangles += node.meshTriangleCount;
             if (!node.materialName.empty() && node.materialName != "None" &&
                 std::find(materialNames.begin(), materialNames.end(), node.materialName) == materialNames.end())
@@ -772,6 +774,7 @@ bool ExportFbxJson(const ModelTab& tab, std::string& outputPath, std::string& er
     out << "    \"bones\": " << stats.bones << ",\n";
     out << "    \"empties\": " << stats.empties << ",\n";
     out << "    \"vertices\": " << stats.vertices << ",\n";
+    out << "    \"polygons\": " << stats.polygons << ",\n";
     out << "    \"triangles\": " << stats.triangles << ",\n";
     out << "    \"materials\": " << stats.materials << "\n";
     out << "  },\n";
@@ -812,6 +815,7 @@ bool ExportFbxJson(const ModelTab& tab, std::string& outputPath, std::string& er
         out << ",\n";
         out << "      \"meshVertexStart\": " << node.meshVertexStart << ",\n";
         out << "      \"meshVertexCount\": " << node.meshVertexCount << ",\n";
+        out << "      \"meshPolygonCount\": " << node.meshPolygonCount << ",\n";
         out << "      \"meshTriangleCount\": " << node.meshTriangleCount << ",\n";
         out << "      \"material\": ";
         WriteJsonString(out, node.materialName);

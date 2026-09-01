@@ -490,7 +490,10 @@ void DrawSceneStatsPanel(Font font, const ModelTab& tab, float panelX, float pan
     std::snprintf(line, sizeof(line), "Vertices: %d", stats.vertices);
     DrawUiText(font, line, contentX, y, 15.0f, Color{ 205, 213, 220, 255 });
     y += 24.0f;
-    std::snprintf(line, sizeof(line), "Triangles: %d", stats.triangles);
+    std::snprintf(line, sizeof(line), "Polygons: %d", stats.polygons);
+    DrawUiText(font, line, contentX, y, 15.0f, Color{ 205, 213, 220, 255 });
+    y += 24.0f;
+    std::snprintf(line, sizeof(line), "Render triangles: %d", stats.triangles);
     DrawUiText(font, line, contentX, y, 15.0f, Color{ 205, 213, 220, 255 });
     y += 24.0f;
     std::snprintf(line, sizeof(line), "Materials: %d", stats.materials);

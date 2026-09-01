@@ -165,6 +165,30 @@ void DrawMaterialModel(ModelTab& tab, const LitShader& lit, MaterialPreviewMode 
     rlEnableDepthMask();
 }
 
+void DrawMaterialColorModel(ModelTab& tab, const LitShader& lit)
+{
+    EnsurePbrMaterialStates(tab);
+    if (!tab.loaded.hasMesh || tab.loaded.model.meshCount <= 0) return;
+
+    UpdateMaterialShader(lit, nullptr, MaterialPreviewMode::Shaded, false);
+    const Matrix transform = MatrixIdentity();
+    for (int meshIndex = 0; meshIndex < tab.loaded.model.meshCount; ++meshIndex)
+    {
+        int materialIndex = tab.loaded.model.meshMaterial ? tab.loaded.model.meshMaterial[meshIndex] : meshIndex;
+        materialIndex = ClampInt(materialIndex, 0, std::max(0, tab.loaded.model.materialCount - 1));
+
+        Material material = tab.loaded.model.materials[materialIndex];
+        MaterialMap maps[MATERIAL_MAP_BRDF + 1]{};
+        for (int mapIndex = 0; mapIndex <= MATERIAL_MAP_BRDF; ++mapIndex)
+        {
+            maps[mapIndex] = tab.loaded.model.materials[materialIndex].maps[mapIndex];
+        }
+        material.maps = maps;
+        material.maps[MATERIAL_MAP_DIFFUSE].color = GetDebugIndexColor(materialIndex);
+        DrawMesh(tab.loaded.model.meshes[meshIndex], material, transform);
+    }
+}
+
 void DrawMeterGridLine(Vector3 start, Vector3 end, bool major, bool floorLine)
 {
     const Color color = floorLine ? Color{ 230, 236, 242, 235 } :

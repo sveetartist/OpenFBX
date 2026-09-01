@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <filesystem>
 #include <limits>
 #include <memory>
 #include <unordered_map>
@@ -44,6 +45,7 @@ struct MeshBuilder
     std::vector<unsigned int> indices;
     std::vector<RenderVertexRef> renderVertices;
     std::vector<int> vertexMaterialIndices;
+    std::vector<MeshEdge> polygonEdges;
     std::vector<std::string> materialNames;
     std::unordered_map<std::string, int> materialNameToIndex;
     std::vector<BoneSegment> bones;
@@ -373,6 +375,8 @@ void AppendMesh(FbxNode* node, FbxMesh* mesh, MeshBuilder& out)
     const int polygonCount = mesh->GetPolygonCount();
     if (polygonCount <= 0) return;
     const int meshVertexStart = out.VertexCount();
+    const auto nodeIndexFound = out.nodeToIndex.find(node);
+    const int sceneNodeIndex = nodeIndexFound != out.nodeToIndex.end() ? nodeIndexFound->second : -1;
 
     FbxStringList uvSetNames;
     mesh->GetUVSetNames(uvSetNames);
@@ -392,39 +396,48 @@ void AppendMesh(FbxNode* node, FbxMesh* mesh, MeshBuilder& out)
     const SkinBindData skinBind = BuildSkinBindData(node, mesh);
     bool meshHadNormals = true;
     bool meshHadUvs = uvSetName != nullptr;
+    int importedPolygonCount = 0;
     int degenerateTriangles = 0;
 
     for (int polygon = 0; polygon < polygonCount; ++polygon)
     {
-        if (mesh->GetPolygonSize(polygon) != 3) continue;
+        const int polygonSize = mesh->GetPolygonSize(polygon);
+        if (polygonSize < 3) continue;
 
-        Vector3 points[3]{};
-        Vector3 normals[3]{};
-        Vector2 uvs[3]{};
-        std::vector<std::array<Vector2, 3>> uvSetValues(out.uvSets.size());
-        RenderVertexRef refs[3]{};
-        bool triangleHasNormals = true;
-        bool triangleHasUvs = uvSetName != nullptr;
+        std::vector<Vector3> polygonPoints(static_cast<size_t>(polygonSize));
+        std::vector<Vector3> polygonNormals(static_cast<size_t>(polygonSize));
+        std::vector<Vector2> polygonUvs(static_cast<size_t>(polygonSize));
+        std::vector<RenderVertexRef> polygonRefs(static_cast<size_t>(polygonSize));
+        std::vector<std::vector<Vector2>> polygonUvSetValues(out.uvSets.size(), std::vector<Vector2>(static_cast<size_t>(polygonSize)));
+        bool polygonHasNormals = true;
+        bool polygonHasUvs = uvSetName != nullptr;
+        bool validPolygon = true;
         const int localMaterialIndex = GetPolygonMaterialLocalIndex(mesh, polygon);
         const int materialIndex = GetOrAddMaterialIndex(out, GetNodeMaterialName(node, localMaterialIndex));
 
-        for (int vertex = 0; vertex < 3; ++vertex)
+        for (int vertex = 0; vertex < polygonSize; ++vertex)
         {
             const int controlPointIndex = mesh->GetPolygonVertex(polygon, vertex);
-            refs[vertex] = RenderVertexRef{ node, mesh, controlPointIndex, FbxVector4(0.0, 1.0, 0.0, 0.0), false };
-            points[vertex] = ToVector3(meshTransform.MultT(controlPoints[controlPointIndex]));
+            if (controlPointIndex < 0 || controlPointIndex >= mesh->GetControlPointsCount())
+            {
+                validPolygon = false;
+                break;
+            }
+
+            polygonRefs[static_cast<size_t>(vertex)] = RenderVertexRef{ node, mesh, controlPointIndex, FbxVector4(0.0, 1.0, 0.0, 0.0), false };
+            polygonPoints[static_cast<size_t>(vertex)] = ToVector3(meshTransform.MultT(controlPoints[controlPointIndex]));
 
             FbxVector4 normal;
             if (mesh->GetPolygonVertexNormal(polygon, vertex, normal))
             {
                 normal[3] = 0.0;
-                refs[vertex].localNormal = normal;
-                refs[vertex].hasNormal = true;
-                normals[vertex] = ToVector3(TransformVector(normalTransform, normal));
+                polygonRefs[static_cast<size_t>(vertex)].localNormal = normal;
+                polygonRefs[static_cast<size_t>(vertex)].hasNormal = true;
+                polygonNormals[static_cast<size_t>(vertex)] = ToVector3(TransformVector(normalTransform, normal));
             }
             else
             {
-                triangleHasNormals = false;
+                polygonHasNormals = false;
             }
 
             if (uvSetName)
@@ -433,58 +446,106 @@ void AppendMesh(FbxNode* node, FbxMesh* mesh, MeshBuilder& out)
                 bool unmapped = false;
                 if (mesh->GetPolygonVertexUV(polygon, vertex, uvSetName, uv, unmapped) && !unmapped)
                 {
-                    uvs[vertex] = ToVector2(uv);
+                    polygonUvs[static_cast<size_t>(vertex)] = ToVector2(uv);
                 }
                 else
                 {
-                    triangleHasUvs = false;
+                    polygonHasUvs = false;
                 }
             }
 
             for (int uvSet = 0; uvSet < uvSetNames.GetCount(); ++uvSet)
             {
                 const int globalUvSet = uvSet < static_cast<int>(meshUvSetIndices.size()) ? meshUvSetIndices[static_cast<size_t>(uvSet)] : -1;
-                if (globalUvSet < 0 || globalUvSet >= static_cast<int>(uvSetValues.size())) continue;
+                if (globalUvSet < 0 || globalUvSet >= static_cast<int>(polygonUvSetValues.size())) continue;
 
                 FbxVector2 uv;
                 bool unmapped = false;
                 if (mesh->GetPolygonVertexUV(polygon, vertex, uvSetNames.GetStringAt(uvSet), uv, unmapped) && !unmapped)
                 {
-                    uvSetValues[static_cast<size_t>(globalUvSet)][vertex] = ToVector2(uv);
+                    polygonUvSetValues[static_cast<size_t>(globalUvSet)][static_cast<size_t>(vertex)] = ToVector2(uv);
                 }
             }
         }
 
-        if (!triangleHasNormals)
+        if (!validPolygon) continue;
+        ++importedPolygonCount;
+
+        if (!polygonHasNormals)
         {
             meshHadNormals = false;
         }
-        if (!triangleHasUvs)
+        if (!polygonHasUvs)
         {
             meshHadUvs = false;
         }
 
-        const Vector3 e0 = Vector3Subtract(points[1], points[0]);
-        const Vector3 e1 = Vector3Subtract(points[2], points[0]);
-        if (Vector3LengthSqr(Vector3CrossProduct(e0, e1)) <= 0.000000000001f)
+        std::vector<int> polygonCornerVertices(static_cast<size_t>(polygonSize), -1);
+        for (int fan = 1; fan + 1 < polygonSize; ++fan)
         {
-            ++degenerateTriangles;
+            const int sourceCorners[3] = { 0, fan, fan + 1 };
+            Vector3 points[3]{};
+            Vector3 normals[3]{};
+            Vector2 uvs[3]{};
+            RenderVertexRef refs[3]{};
+            std::vector<std::array<Vector2, 3>> uvSetValues(out.uvSets.size());
+            for (int corner = 0; corner < 3; ++corner)
+            {
+                const int sourceCorner = sourceCorners[corner];
+                points[corner] = polygonPoints[static_cast<size_t>(sourceCorner)];
+                normals[corner] = polygonNormals[static_cast<size_t>(sourceCorner)];
+                uvs[corner] = polygonUvs[static_cast<size_t>(sourceCorner)];
+                refs[corner] = polygonRefs[static_cast<size_t>(sourceCorner)];
+                for (size_t uvSet = 0; uvSet < uvSetValues.size(); ++uvSet)
+                {
+                    uvSetValues[uvSet][corner] = polygonUvSetValues[uvSet][static_cast<size_t>(sourceCorner)];
+                }
+            }
+
+            const Vector3 e0 = Vector3Subtract(points[1], points[0]);
+            const Vector3 e1 = Vector3Subtract(points[2], points[0]);
+            if (Vector3LengthSqr(Vector3CrossProduct(e0, e1)) <= 0.000000000001f)
+            {
+                ++degenerateTriangles;
+            }
+
+            const int renderVertexStart = out.VertexCount();
+            AddTriangle(out, points, normals, uvs, uvSetValues, refs, skinBind, materialIndex, polygonHasNormals, polygonHasUvs);
+            for (int corner = 0; corner < 3; ++corner)
+            {
+                const int sourceCorner = sourceCorners[corner];
+                if (polygonCornerVertices[static_cast<size_t>(sourceCorner)] < 0)
+                {
+                    polygonCornerVertices[static_cast<size_t>(sourceCorner)] = renderVertexStart + corner;
+                }
+            }
         }
 
-        AddTriangle(out, points, normals, uvs, uvSetValues, refs, skinBind, materialIndex, triangleHasNormals, triangleHasUvs);
+        if (sceneNodeIndex >= 0)
+        {
+            for (int vertex = 0; vertex < polygonSize; ++vertex)
+            {
+                const int a = polygonCornerVertices[static_cast<size_t>(vertex)];
+                const int b = polygonCornerVertices[static_cast<size_t>((vertex + 1) % polygonSize)];
+                if (a >= 0 && b >= 0 && a != b)
+                {
+                    out.polygonEdges.push_back(MeshEdge{ a, b, sceneNodeIndex });
+                }
+            }
+        }
     }
 
     const int meshVertexCount = out.VertexCount() - meshVertexStart;
-    const auto foundNode = out.nodeToIndex.find(node);
-    if (meshVertexCount > 0 && foundNode != out.nodeToIndex.end())
+    if (meshVertexCount > 0 && sceneNodeIndex >= 0)
     {
-        SceneNode& sceneNode = out.nodes[static_cast<size_t>(foundNode->second)];
+        SceneNode& sceneNode = out.nodes[static_cast<size_t>(sceneNodeIndex)];
         if (sceneNode.meshVertexStart < 0)
         {
             sceneNode.meshVertexStart = meshVertexStart;
         }
         sceneNode.meshVertexCount += meshVertexCount;
         sceneNode.meshTriangleCount += meshVertexCount / 3;
+        sceneNode.meshPolygonCount += importedPolygonCount;
         sceneNode.meshHadNormals = sceneNode.meshHadNormals && meshHadNormals;
         sceneNode.meshHadUvs = sceneNode.meshHadUvs && meshHadUvs;
         sceneNode.meshHasSkin = sceneNode.meshHasSkin || skinBind.hasSkin;
@@ -1304,30 +1365,86 @@ void ApplyEditedMeshGeometry(const LoadedFbxModel& model,
 
             std::vector<FbxVector4> accumulated(static_cast<size_t>(controlPointCount), FbxVector4(0.0, 0.0, 0.0, 0.0));
             std::vector<int> counts(static_cast<size_t>(controlPointCount), 0);
+            const bool hasEditedNormals = model.bindNormals.size() == model.bindVertices.size();
+            int rawPolygonVertexCount = 0;
+            for (int polygon = 0; polygon < mesh->GetPolygonCount(); ++polygon)
+            {
+                rawPolygonVertexCount += std::max(0, mesh->GetPolygonSize(polygon));
+            }
 
+            FbxGeometryElementNormal* normalElement = nullptr;
+            const bool canRewritePolygonVertexNormals = hasEditedNormals && rawPolygonVertexCount == sceneNode.meshVertexCount;
+            FbxAMatrix worldNormalToLocal = editedMeshGlobal.Transpose();
+            if (canRewritePolygonVertexNormals && mesh->GetElementNormalCount() > 0)
+            {
+                normalElement = mesh->GetElementNormal(0);
+                if (normalElement)
+                {
+                    normalElement->SetMappingMode(FbxGeometryElement::eByPolygonVertex);
+                    normalElement->SetReferenceMode(FbxGeometryElement::eDirect);
+                    normalElement->GetDirectArray().Clear();
+                    normalElement->GetIndexArray().Clear();
+                }
+            }
+
+            for (int currentGlobalVertex = sceneNode.meshVertexStart; currentGlobalVertex < globalVertexEnd; ++currentGlobalVertex)
+            {
+                if (currentGlobalVertex < 0 || currentGlobalVertex >= static_cast<int>(model.meshControlPointIndices.size())) continue;
+
+                const int controlPoint = model.meshControlPointIndices[static_cast<size_t>(currentGlobalVertex)];
+                if (controlPoint < 0 || controlPoint >= controlPointCount) continue;
+
+                const size_t base = static_cast<size_t>(currentGlobalVertex) * 3;
+                if (base + 2 >= model.bindVertices.size()) continue;
+
+                const Vector3 editedWorld{
+                    model.bindVertices[base],
+                    model.bindVertices[base + 1],
+                    model.bindVertices[base + 2]
+                };
+                const FbxVector4 editedLocal = worldToLocal.MultT(ToFbxPoint(editedWorld));
+                FbxVector4& sum = accumulated[static_cast<size_t>(controlPoint)];
+                sum[0] += editedLocal[0];
+                sum[1] += editedLocal[1];
+                sum[2] += editedLocal[2];
+                ++counts[static_cast<size_t>(controlPoint)];
+            }
+
+            globalVertex = sceneNode.meshVertexStart;
             const int polygonCount = mesh->GetPolygonCount();
             for (int polygon = 0; polygon < polygonCount; ++polygon)
             {
                 const int polygonSize = mesh->GetPolygonSize(polygon);
                 for (int vertex = 0; vertex < polygonSize && globalVertex < globalVertexEnd; ++vertex, ++globalVertex)
                 {
-                    const int controlPoint = mesh->GetPolygonVertex(polygon, vertex);
-                    if (controlPoint < 0 || controlPoint >= controlPointCount) continue;
-
-                    const size_t base = static_cast<size_t>(globalVertex) * 3;
-                    if (base + 2 >= model.bindVertices.size()) continue;
-
-                    const Vector3 editedWorld{
-                        model.bindVertices[base],
-                        model.bindVertices[base + 1],
-                        model.bindVertices[base + 2]
-                    };
-                    const FbxVector4 editedLocal = worldToLocal.MultT(ToFbxPoint(editedWorld));
-                    FbxVector4& sum = accumulated[static_cast<size_t>(controlPoint)];
-                    sum[0] += editedLocal[0];
-                    sum[1] += editedLocal[1];
-                    sum[2] += editedLocal[2];
-                    ++counts[static_cast<size_t>(controlPoint)];
+                    const int currentGlobalVertex = globalVertex;
+                    if (normalElement)
+                    {
+                        const size_t normalBase = static_cast<size_t>(currentGlobalVertex) * 3;
+                        FbxVector4 editedLocalNormal(0.0, 1.0, 0.0, 0.0);
+                        if (normalBase + 2 < model.bindNormals.size())
+                        {
+                            const FbxVector4 editedWorldNormal(model.bindNormals[normalBase],
+                                                               model.bindNormals[normalBase + 1],
+                                                               model.bindNormals[normalBase + 2],
+                                                               0.0);
+                            editedLocalNormal = TransformVector(worldNormalToLocal, editedWorldNormal);
+                            const double length = std::sqrt(editedLocalNormal[0] * editedLocalNormal[0] +
+                                                            editedLocalNormal[1] * editedLocalNormal[1] +
+                                                            editedLocalNormal[2] * editedLocalNormal[2]);
+                            if (length > 0.000001)
+                            {
+                                editedLocalNormal[0] /= length;
+                                editedLocalNormal[1] /= length;
+                                editedLocalNormal[2] /= length;
+                            }
+                            else
+                            {
+                                editedLocalNormal = FbxVector4(0.0, 1.0, 0.0, 0.0);
+                            }
+                        }
+                        normalElement->GetDirectArray().Add(editedLocalNormal);
+                    }
                 }
             }
 
@@ -1344,7 +1461,6 @@ void ApplyEditedMeshGeometry(const LoadedFbxModel& model,
                 mesh->SetControlPointAt(value, controlPoint);
             }
 
-            mesh->GenerateNormals(true, false);
         }
     }
 }
@@ -1677,6 +1793,13 @@ bool BuildRaylibModel(const MeshBuilder& builder, LoadedFbxModel& outModel, std:
     outModel.bindVertices = builder.vertices;
     outModel.bindNormals = builder.normals;
     outModel.skinnedVertices = builder.skinnedVertices;
+    outModel.meshControlPointIndices.clear();
+    outModel.meshControlPointIndices.reserve(builder.renderVertices.size());
+    for (const RenderVertexRef& ref : builder.renderVertices)
+    {
+        outModel.meshControlPointIndices.push_back(ref.controlPointIndex);
+    }
+    outModel.meshPolygonEdges = builder.polygonEdges;
     outModel.uvSetNames = builder.uvSetNames;
     outModel.uvSets = builder.uvSets;
     outModel.materialNames = builder.materialNames.empty() ? std::vector<std::string>{ "Default" } : builder.materialNames;
@@ -1805,11 +1928,6 @@ bool LoadFbxModel(const std::string& path, LoadedFbxModel& outModel, std::string
     FbxSystemUnit::m.ConvertScene(scene);
 
     FbxGeometryConverter converter(manager.get());
-    if (!converter.Triangulate(scene, true))
-    {
-        error = "FBX SDK triangulation failed.";
-        return false;
-    }
     PrepareMeshNormals(scene->GetRootNode(), converter);
 
     MeshBuilder builder;
@@ -1836,6 +1954,39 @@ bool SaveFbxModelAnimations(const std::string& sourcePath,
     {
         error = "Missing FBX save path.";
         return false;
+    }
+
+    const std::filesystem::path sourceFile(sourcePath);
+    const std::filesystem::path outputFile(outputPath);
+    std::error_code pathError;
+    bool savingInPlace = std::filesystem::equivalent(sourceFile, outputFile, pathError);
+    if (pathError)
+    {
+        savingInPlace = std::filesystem::absolute(sourceFile).lexically_normal() ==
+                        std::filesystem::absolute(outputFile).lexically_normal();
+    }
+
+    std::filesystem::path exportFile = outputFile;
+    if (savingInPlace)
+    {
+        for (int suffix = 0; suffix < 1000; ++suffix)
+        {
+            std::filesystem::path candidate = outputFile;
+            candidate += ".openfbx_tmp_";
+            candidate += std::to_string(suffix);
+            candidate += outputFile.extension();
+            std::error_code existsError;
+            if (!std::filesystem::exists(candidate, existsError))
+            {
+                exportFile = candidate;
+                break;
+            }
+        }
+        if (exportFile == outputFile)
+        {
+            error = "Failed to choose a temporary FBX save path.";
+            return false;
+        }
     }
 
     std::unique_ptr<FbxManager, FbxManagerDestroy> manager(FbxManager::Create());
@@ -1868,14 +2019,6 @@ bool SaveFbxModelAnimations(const std::string& sourcePath,
     FbxAxisSystem::OpenGL.ConvertScene(scene);
     FbxSystemUnit::m.ConvertScene(scene);
 
-    FbxGeometryConverter converter(manager.get());
-    if (!converter.Triangulate(scene, true))
-    {
-        error = "FBX SDK triangulation failed.";
-        return false;
-    }
-    PrepareMeshNormals(scene->GetRootNode(), converter);
-
     const std::vector<FbxNode*> sceneNodes = BuildMappedSceneNodes(model, BuildSceneNodeIndex(scene));
     if (!WriteAnimationStacks(scene, model, sceneNodes, error))
     {
@@ -1888,7 +2031,8 @@ bool SaveFbxModelAnimations(const std::string& sourcePath,
     }
 
     FbxExporter* exporter = FbxExporter::Create(manager.get(), "");
-    if (!exporter->Initialize(outputPath.c_str(), -1, manager->GetIOSettings()))
+    const std::string exportPathString = exportFile.string();
+    if (!exporter->Initialize(exportPathString.c_str(), -1, manager->GetIOSettings()))
     {
         error = std::string("Failed to initialize FBX exporter: ") + exporter->GetStatus().GetErrorString();
         exporter->Destroy();
@@ -1903,6 +2047,20 @@ bool SaveFbxModelAnimations(const std::string& sourcePath,
         return false;
     }
     exporter->Destroy();
+
+    if (savingInPlace)
+    {
+        std::error_code copyError;
+        if (!std::filesystem::copy_file(exportFile, outputFile, std::filesystem::copy_options::overwrite_existing, copyError))
+        {
+            error = "Failed to replace original FBX after temporary export: " + copyError.message();
+            return false;
+        }
+
+        std::error_code removeError;
+        std::filesystem::remove(exportFile, removeError);
+    }
+
     return true;
 }
 

@@ -2,6 +2,27 @@ void DrawMeshNodeWireframe(const ModelTab& tab, const SceneNode& node, Color col
 {
     const float* vertices = GetCurrentMeshVertices(tab);
     if (!vertices || node.meshVertexStart < 0 || node.meshVertexCount < 3) return;
+    const int nodeIndex = static_cast<int>(&node - tab.loaded.nodes.data());
+
+    if (nodeIndex >= 0 && nodeIndex < static_cast<int>(tab.loaded.nodes.size()) && !tab.loaded.meshPolygonEdges.empty())
+    {
+        const int vertexCount = static_cast<int>(tab.loaded.bindVertices.size() / 3);
+        bool drewSourceEdges = false;
+        for (const MeshEdge& edge : tab.loaded.meshPolygonEdges)
+        {
+            if (edge.node != nodeIndex) continue;
+            if (edge.a < 0 || edge.b < 0 || edge.a >= vertexCount || edge.b >= vertexCount) continue;
+
+            const int i0 = edge.a * 3;
+            const int i1 = edge.b * 3;
+            const Vector3 p0{ vertices[i0], vertices[i0 + 1], vertices[i0 + 2] };
+            const Vector3 p1{ vertices[i1], vertices[i1 + 1], vertices[i1 + 2] };
+            DrawLine3D(p0, p1, color);
+            drewSourceEdges = true;
+        }
+
+        if (drewSourceEdges) return;
+    }
 
     const int start = node.meshVertexStart;
     const int end = node.meshVertexStart + node.meshVertexCount;
@@ -16,6 +37,16 @@ void DrawMeshNodeWireframe(const ModelTab& tab, const SceneNode& node, Color col
         DrawLine3D(p0, p1, color);
         DrawLine3D(p1, p2, color);
         DrawLine3D(p2, p0, color);
+    }
+}
+
+void DrawVisibleMeshWireframe(const ModelTab& tab, Color color)
+{
+    for (int nodeIndex = 0; nodeIndex < static_cast<int>(tab.loaded.nodes.size()); ++nodeIndex)
+    {
+        const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(nodeIndex)];
+        if (node.type != SceneNodeType::Mesh || !IsViewportNodeVisible(tab, nodeIndex)) continue;
+        DrawMeshNodeWireframe(tab, node, color);
     }
 }
 

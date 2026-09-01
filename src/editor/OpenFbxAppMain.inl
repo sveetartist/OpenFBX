@@ -39,13 +39,46 @@ int RunOpenFbxApp(int argc, char** argv)
     WeightBrushSettings weightBrush;
     WeightBrushState weightBrushState;
 
+    auto initializeLoadedTab = [&](ModelTab& tab, const std::string& path)
+    {
+        ApplyNeutralMaterial(tab.loaded);
+        ApplyLitShader(tab.loaded, litShader);
+        EnsurePbrMaterialStates(tab);
+        tab.orbit = CreateDefaultCamera();
+        FocusCameraOnBounds(tab.orbit, tab.loaded.bounds);
+        tab.animation.clipIndex = -1;
+        tab.animation.time = 0.0f;
+        tab.animation.playing = false;
+        tab.originalBindBonePoses = tab.loaded.bonePoses;
+        tab.visibleBones = tab.loaded.bones;
+        tab.visibleBonePoses = tab.loaded.bonePoses;
+        tab.collapsedNodes.assign(tab.loaded.nodes.size(), false);
+        tab.deletedNodes.assign(tab.loaded.nodes.size(), false);
+        tab.selectedNode = -1;
+        for (int nodeIndex = 0; nodeIndex < static_cast<int>(tab.loaded.nodes.size()); ++nodeIndex)
+        {
+            if (IsValidSelectableNode(tab, nodeIndex))
+            {
+                tab.selectedNode = nodeIndex;
+                break;
+            }
+        }
+        if (tab.selectedNode >= 0)
+        {
+            tab.selectedNodes.assign(1, tab.selectedNode);
+        }
+        tab.isolatedNode = -1;
+        tab.path = path;
+        tab.title = MakeTabTitle(path);
+    };
+
     auto openPathInNewTab = [&](const std::string& path)
     {
         DrawLoadingScreen(uiFont, path);
 
-        auto tab = std::make_unique<ModelTab>();
+        LoadedFbxModel loaded;
         std::string loadError;
-        if (!LoadFbxModel(path, tab->loaded, loadError))
+        if (!LoadFbxModel(path, loaded, loadError))
         {
             error = loadError;
             notice.clear();
@@ -53,40 +86,126 @@ int RunOpenFbxApp(int argc, char** argv)
             return;
         }
 
-        ApplyNeutralMaterial(tab->loaded);
-        ApplyLitShader(tab->loaded, litShader);
-        EnsurePbrMaterialStates(*tab);
-        tab->orbit = CreateDefaultCamera();
-        FocusCameraOnBounds(tab->orbit, tab->loaded.bounds);
-        tab->animation.clipIndex = -1;
-        tab->animation.time = 0.0f;
-        tab->animation.playing = false;
-        tab->originalBindBonePoses = tab->loaded.bonePoses;
-        tab->visibleBones = tab->loaded.bones;
-        tab->visibleBonePoses = tab->loaded.bonePoses;
-        tab->collapsedNodes.assign(tab->loaded.nodes.size(), false);
-        tab->deletedNodes.assign(tab->loaded.nodes.size(), false);
-        tab->selectedNode = -1;
-        for (int nodeIndex = 0; nodeIndex < static_cast<int>(tab->loaded.nodes.size()); ++nodeIndex)
-        {
-            if (IsValidSelectableNode(*tab, nodeIndex))
-            {
-                tab->selectedNode = nodeIndex;
-                break;
-            }
-        }
-        if (tab->selectedNode >= 0)
-        {
-            tab->selectedNodes.assign(1, tab->selectedNode);
-        }
-        tab->isolatedNode = -1;
-        tab->path = path;
-        tab->title = MakeTabTitle(path);
+        auto tab = std::make_unique<ModelTab>();
+        tab->loaded = std::move(loaded);
+        initializeLoadedTab(*tab, path);
 
         tabs.push_back(std::move(tab));
         activeTab = static_cast<int>(tabs.size()) - 1;
         error.clear();
         notice.clear();
+    };
+
+    auto restorePbrMaterialState = [&](ModelTab& tab,
+                                       const std::vector<std::string>& previousMaterialNames,
+                                       const std::vector<PbrMaterialSnapshot>& previousMaterials,
+                                       int previousSelectedMaterial,
+                                       std::string& restoreError)
+    {
+        restoreError.clear();
+        EnsurePbrMaterialStates(tab);
+
+        auto findPreviousMaterial = [&](int materialIndex) -> int
+        {
+            if (materialIndex >= 0 && materialIndex < static_cast<int>(tab.loaded.materialNames.size()))
+            {
+                const std::string& materialName = tab.loaded.materialNames[static_cast<size_t>(materialIndex)];
+                for (int previousIndex = 0; previousIndex < static_cast<int>(previousMaterialNames.size()); ++previousIndex)
+                {
+                    if (materialName == previousMaterialNames[static_cast<size_t>(previousIndex)])
+                    {
+                        return previousIndex;
+                    }
+                }
+            }
+            return materialIndex < static_cast<int>(previousMaterials.size()) ? materialIndex : -1;
+        };
+
+        for (int materialIndex = 0; materialIndex < static_cast<int>(tab.pbrMaterials.size()); ++materialIndex)
+        {
+            const int previousIndex = findPreviousMaterial(materialIndex);
+            if (previousIndex < 0 || previousIndex >= static_cast<int>(previousMaterials.size())) continue;
+
+            const PbrMaterialSnapshot& previous = previousMaterials[static_cast<size_t>(previousIndex)];
+            PbrMaterialState& material = tab.pbrMaterials[static_cast<size_t>(materialIndex)];
+            material.normalDirectX = previous.normalDirectX;
+            material.roughnessChannel = previous.roughnessChannel;
+            material.metallicChannel = previous.metallicChannel;
+            material.aoChannel = previous.aoChannel;
+            material.opacityChannel = previous.opacityChannel;
+
+            for (int slotIndex = 0; slotIndex < static_cast<int>(PbrTextureSlot::Count); ++slotIndex)
+            {
+                const PbrTextureSnapshot& texture = previous.textures[static_cast<size_t>(slotIndex)];
+                if (!texture.loaded || texture.path.empty()) continue;
+
+                std::string textureError;
+                if (!LoadPbrTexture(tab, materialIndex, static_cast<PbrTextureSlot>(slotIndex), texture.path, textureError) && restoreError.empty())
+                {
+                    restoreError = textureError;
+                }
+            }
+        }
+
+        int selectedMaterial = -1;
+        if (previousSelectedMaterial >= 0 && previousSelectedMaterial < static_cast<int>(previousMaterialNames.size()))
+        {
+            const std::string& previousSelectedName = previousMaterialNames[static_cast<size_t>(previousSelectedMaterial)];
+            for (int materialIndex = 0; materialIndex < static_cast<int>(tab.loaded.materialNames.size()); ++materialIndex)
+            {
+                if (tab.loaded.materialNames[static_cast<size_t>(materialIndex)] == previousSelectedName)
+                {
+                    selectedMaterial = materialIndex;
+                    break;
+                }
+            }
+        }
+        if (selectedMaterial < 0 && previousSelectedMaterial < static_cast<int>(tab.pbrMaterials.size()))
+        {
+            selectedMaterial = previousSelectedMaterial;
+        }
+        tab.selectedMaterial = ClampInt(selectedMaterial, 0, std::max(0, static_cast<int>(tab.pbrMaterials.size()) - 1));
+    };
+
+    auto reloadActiveTab = [&]()
+    {
+        if (activeTab < 0 || activeTab >= static_cast<int>(tabs.size())) return false;
+
+        ModelTab& tab = *tabs[static_cast<size_t>(activeTab)];
+        if (tab.path.empty()) return false;
+
+        const std::string path = tab.path;
+        DrawLoadingScreen(uiFont, path);
+
+        LoadedFbxModel reloaded;
+        std::string loadError;
+        if (!LoadFbxModel(path, reloaded, loadError))
+        {
+            error = loadError;
+            notice.clear();
+            std::cerr << error << "\n";
+            return true;
+        }
+
+        const std::vector<std::string> previousMaterialNames = tab.loaded.materialNames;
+        const EditSnapshot previousState = CaptureEditSnapshot(tab);
+
+        UnloadPbrTextures(tab);
+        UnloadFbxModel(tab.loaded);
+        tab = ModelTab{};
+        tab.loaded = std::move(reloaded);
+        initializeLoadedTab(tab, path);
+
+        std::string restoreError;
+        restorePbrMaterialState(tab, previousMaterialNames, previousState.pbrMaterials, previousState.selectedMaterial, restoreError);
+        renameEditor = RenameEditor{};
+        CancelTransformValueEdit(transformValueEditor);
+        transformGizmo = TransformGizmoState{};
+        textureClipboard = TextureClipboard{};
+        hierarchyPanel.contextMenuOpen = false;
+        notice = "Reloaded FBX: " + path;
+        error = restoreError;
+        return true;
     };
 
     auto closeActiveTab = [&]()
@@ -112,6 +231,7 @@ int RunOpenFbxApp(int argc, char** argv)
         const bool altDown = IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT);
         const bool modalOpen = aboutVisible;
         bool openRequested = !modalOpen && !renameEditor.active && controlDown && IsKeyPressed(KEY_O);
+        bool reloadFbxRequested = !modalOpen && !renameEditor.active && !transformValueEditor.active && controlDown && !shiftDown && !altDown && IsKeyPressed(KEY_R);
         bool saveFbxRequested = !modalOpen && !renameEditor.active && controlDown && !shiftDown && IsKeyPressed(KEY_S);
         bool saveAsFbxRequested = !modalOpen && !renameEditor.active && controlDown && shiftDown && IsKeyPressed(KEY_S);
         bool undoRequested = false;
@@ -277,6 +397,7 @@ int RunOpenFbxApp(int argc, char** argv)
         }
         if (!modalOpen && !renameEditor.active && !transformValueEditor.active && IsKeyPressed(KEY_M))
         {
+            viewMode = ViewMode::Shaded;
             materialPreviewMode = MaterialPreviewMode::Shaded;
         }
         if (!modalOpen && !renameEditor.active && !transformValueEditor.active && IsKeyPressed(KEY_T))
@@ -435,6 +556,16 @@ int RunOpenFbxApp(int argc, char** argv)
                     DrawMaterialModel(*active, litShader, materialPreviewMode, visibility.textures);
                     EndBlendMode();
                 }
+                else if (viewMode == ViewMode::MaterialColors)
+                {
+                    BeginBlendMode(BLEND_ALPHA);
+                    DrawMaterialColorModel(*active, litShader);
+                    EndBlendMode();
+                }
+                else if (viewMode == ViewMode::UvIslands)
+                {
+                    DrawUvIslandColorOverlay(*active);
+                }
 
                 if (visibility.skinWeights)
                 {
@@ -443,9 +574,7 @@ int RunOpenFbxApp(int argc, char** argv)
 
                 if (viewMode == ViewMode::ShadedWireframe || viewMode == ViewMode::Wireframe)
                 {
-                    rlEnableWireMode();
-                    DrawModel(active->loaded.model, Vector3{ 0.0f, 0.0f, 0.0f }, 1.0f, viewMode == ViewMode::Wireframe ? Color{ 220, 225, 230, 255 } : Color{ 25, 28, 31, 150 });
-                    rlDisableWireMode();
+                    DrawVisibleMeshWireframe(*active, viewMode == ViewMode::Wireframe ? Color{ 220, 225, 230, 255 } : Color{ 25, 28, 31, 180 });
                 }
 
                 rlDisableBackfaceCulling();
@@ -483,7 +612,25 @@ int RunOpenFbxApp(int argc, char** argv)
         if (active)
         {
             char channelText[128] = {};
-            std::snprintf(channelText, sizeof(channelText), "Material Channel: %s", GetMaterialPreviewModeName(materialPreviewMode));
+            if (viewMode == ViewMode::MaterialColors)
+            {
+                std::snprintf(channelText, sizeof(channelText), "Viewport: Material Colors");
+            }
+            else if (viewMode == ViewMode::UvIslands)
+            {
+                if (!active->loaded.uvSetNames.empty() && active->selectedUvSet >= 0 && active->selectedUvSet < static_cast<int>(active->loaded.uvSetNames.size()))
+                {
+                    std::snprintf(channelText, sizeof(channelText), "Viewport: UV Islands (%s)", active->loaded.uvSetNames[static_cast<size_t>(active->selectedUvSet)].c_str());
+                }
+                else
+                {
+                    std::snprintf(channelText, sizeof(channelText), "Viewport: UV Islands");
+                }
+            }
+            else
+            {
+                std::snprintf(channelText, sizeof(channelText), "Material Channel: %s", GetMaterialPreviewModeName(materialPreviewMode));
+            }
             const Vector2 channelSize = MeasureTextEx(uiFont, channelText, 16.0f, 1.0f);
             const Rectangle channelBadge{ hierarchyBlockW + 12.0f, 66.0f, channelSize.x + 18.0f, 26.0f };
             DrawRectangleRec(channelBadge, Color{ 24, 27, 31, 210 });
@@ -538,6 +685,7 @@ int RunOpenFbxApp(int argc, char** argv)
 
         bool menuOpenRequested = false;
         bool menuCloseTabRequested = false;
+        bool menuReloadTabRequested = false;
         bool menuUndoRequested = false;
         bool menuRedoRequested = false;
         bool menuSaveFbxRequested = false;
@@ -552,6 +700,7 @@ int RunOpenFbxApp(int argc, char** argv)
                         openMenu,
                         menuOpenRequested,
                         menuCloseTabRequested,
+                        menuReloadTabRequested,
                         menuUndoRequested,
                         menuRedoRequested,
                         menuSaveFbxRequested,
@@ -569,6 +718,7 @@ int RunOpenFbxApp(int argc, char** argv)
         }
         undoRequested = undoRequested || menuUndoRequested;
         redoRequested = redoRequested || menuRedoRequested;
+        reloadFbxRequested = reloadFbxRequested || menuReloadTabRequested;
         saveFbxRequested = saveFbxRequested || menuSaveFbxRequested;
         saveAsFbxRequested = saveAsFbxRequested || menuSaveAsFbxRequested;
         DrawSkeletonCompareResultWindow(uiFont, compareResultVisible, compareResultCompatible, compareResultPath, compareResultText);
@@ -602,6 +752,19 @@ int RunOpenFbxApp(int argc, char** argv)
             else
             {
                 error = "No active tab to close.";
+                notice.clear();
+            }
+        }
+
+        if (reloadFbxRequested)
+        {
+            if (reloadActiveTab())
+            {
+                active = activeTab >= 0 && activeTab < static_cast<int>(tabs.size()) ? tabs[static_cast<size_t>(activeTab)].get() : nullptr;
+            }
+            else
+            {
+                error = "No active FBX tab to reload.";
                 notice.clear();
             }
         }

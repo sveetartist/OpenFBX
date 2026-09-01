@@ -2,6 +2,7 @@ void DrawMenuBar(Font font,
                  OpenMenu& openMenu,
                  bool& openRequested,
                  bool& closeTabRequested,
+                 bool& reloadTabRequested,
                  bool& undoRequested,
                  bool& redoRequested,
                  bool& saveFbxRequested,
@@ -53,13 +54,13 @@ void DrawMenuBar(Font font,
     switch (openMenu)
     {
     case OpenMenu::File:
-        openMenuBounds = Rectangle{ 8.0f, 29.0f, 270.0f, 248.0f };
+        openMenuBounds = Rectangle{ 8.0f, 29.0f, 270.0f, 278.0f };
         break;
     case OpenMenu::Edit:
         openMenuBounds = Rectangle{ 66.0f, 29.0f, 230.0f, 68.0f };
         break;
     case OpenMenu::View:
-        openMenuBounds = Rectangle{ 124.0f, 29.0f, 230.0f, 308.0f };
+        openMenuBounds = Rectangle{ 124.0f, 29.0f, 230.0f, 368.0f };
         break;
     case OpenMenu::Preferences:
         openMenuBounds = Rectangle{ 186.0f, 29.0f, 420.0f, 318.0f };
@@ -81,7 +82,7 @@ void DrawMenuBar(Font font,
 
     if (openMenu == OpenMenu::File)
     {
-        DrawRectangle(8, 29, 270, 248, Color{ 28, 31, 35, 245 });
+        DrawRectangle(8, 29, 270, 278, Color{ 28, 31, 35, 245 });
         if (DrawMenuItem(font, Rectangle{ 8.0f, 29.0f, 270.0f, 30.0f }, "Open FBX...        Ctrl+O"))
         {
             openRequested = true;
@@ -92,32 +93,37 @@ void DrawMenuBar(Font font,
             closeTabRequested = true;
             openMenu = OpenMenu::None;
         }
-        if (DrawMenuItem(font, Rectangle{ 8.0f, 89.0f, 270.0f, 30.0f }, "Save FBX        Ctrl+S"))
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 89.0f, 270.0f, 30.0f }, "Reload Tab        Ctrl+R"))
+        {
+            reloadTabRequested = true;
+            openMenu = OpenMenu::None;
+        }
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 119.0f, 270.0f, 30.0f }, "Save FBX        Ctrl+S"))
         {
             saveFbxRequested = true;
             openMenu = OpenMenu::None;
         }
-        if (DrawMenuItem(font, Rectangle{ 8.0f, 119.0f, 270.0f, 30.0f }, "Save As...        Ctrl+Shift+S"))
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 149.0f, 270.0f, 30.0f }, "Save As...        Ctrl+Shift+S"))
         {
             saveAsFbxRequested = true;
             openMenu = OpenMenu::None;
         }
-        if (DrawMenuItem(font, Rectangle{ 8.0f, 149.0f, 270.0f, 30.0f }, "Import Animations..."))
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 179.0f, 270.0f, 30.0f }, "Import Animations..."))
         {
             importAnimationsRequested = true;
             openMenu = OpenMenu::None;
         }
-        if (DrawMenuItem(font, Rectangle{ 8.0f, 179.0f, 270.0f, 30.0f }, "Export JSON"))
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 209.0f, 270.0f, 30.0f }, "Export JSON"))
         {
             exportJsonRequested = true;
             openMenu = OpenMenu::None;
         }
-        if (DrawMenuItem(font, Rectangle{ 8.0f, 209.0f, 270.0f, 30.0f }, "Compare FBX..."))
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 239.0f, 270.0f, 30.0f }, "Compare FBX..."))
         {
             compareFbxRequested = true;
             openMenu = OpenMenu::None;
         }
-        if (DrawMenuItem(font, Rectangle{ 8.0f, 239.0f, 270.0f, 30.0f }, "Exit        Ctrl+Q"))
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 269.0f, 270.0f, 30.0f }, "Exit        Ctrl+Q"))
         {
             quitRequested = true;
             openMenu = OpenMenu::None;
@@ -149,7 +155,7 @@ void DrawMenuBar(Font font,
     }
     else if (openMenu == OpenMenu::View)
     {
-        DrawRectangle(124, 29, 230, 308, Color{ 28, 31, 35, 245 });
+        DrawRectangle(124, 29, 230, 368, Color{ 28, 31, 35, 245 });
         if (DrawMenuItem(font, Rectangle{ 124.0f, 29.0f, 230.0f, 30.0f }, "Shaded", viewMode == ViewMode::Shaded))
         {
             viewMode = ViewMode::Shaded;
@@ -162,31 +168,39 @@ void DrawMenuBar(Font font,
         {
             viewMode = ViewMode::Wireframe;
         }
-        if (DrawMenuItem(font, Rectangle{ 124.0f, 127.0f, 230.0f, 30.0f }, visibility.geometry ? "[x] Geometry        G" : "[ ] Geometry        G"))
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 119.0f, 230.0f, 30.0f }, "Material Colors", viewMode == ViewMode::MaterialColors))
+        {
+            viewMode = ViewMode::MaterialColors;
+        }
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 149.0f, 230.0f, 30.0f }, "UV Islands", viewMode == ViewMode::UvIslands))
+        {
+            viewMode = ViewMode::UvIslands;
+        }
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 187.0f, 230.0f, 30.0f }, visibility.geometry ? "[x] Geometry        G" : "[ ] Geometry        G"))
         {
             visibility.geometry = !visibility.geometry;
         }
-        if (DrawMenuItem(font, Rectangle{ 124.0f, 157.0f, 230.0f, 30.0f }, visibility.textures ? "[x] Textures" : "[ ] Textures"))
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 217.0f, 230.0f, 30.0f }, visibility.textures ? "[x] Textures" : "[ ] Textures"))
         {
             visibility.textures = !visibility.textures;
         }
-        if (DrawMenuItem(font, Rectangle{ 124.0f, 187.0f, 230.0f, 30.0f }, visibility.backfaceCulling ? "[x] Backface Culling" : "[ ] Backface Culling"))
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 247.0f, 230.0f, 30.0f }, visibility.backfaceCulling ? "[x] Backface Culling" : "[ ] Backface Culling"))
         {
             visibility.backfaceCulling = !visibility.backfaceCulling;
         }
-        if (DrawMenuItem(font, Rectangle{ 124.0f, 217.0f, 230.0f, 30.0f }, visibility.bones ? "[x] Bones        B" : "[ ] Bones        B"))
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 277.0f, 230.0f, 30.0f }, visibility.bones ? "[x] Bones        B" : "[ ] Bones        B"))
         {
             visibility.bones = !visibility.bones;
         }
-        if (DrawMenuItem(font, Rectangle{ 124.0f, 247.0f, 230.0f, 30.0f }, visibility.boneRotations ? "[x] Bone Orientation  O" : "[ ] Bone Orientation  O"))
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 307.0f, 230.0f, 30.0f }, visibility.boneRotations ? "[x] Bone Orientation  O" : "[ ] Bone Orientation  O"))
         {
             visibility.boneRotations = !visibility.boneRotations;
         }
-        if (DrawMenuItem(font, Rectangle{ 124.0f, 277.0f, 230.0f, 30.0f }, visibility.empties ? "[x] Empties" : "[ ] Empties"))
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 337.0f, 230.0f, 30.0f }, visibility.empties ? "[x] Empties" : "[ ] Empties"))
         {
             visibility.empties = !visibility.empties;
         }
-        if (DrawMenuItem(font, Rectangle{ 124.0f, 307.0f, 230.0f, 30.0f }, visibility.skinWeights ? "[x] Skin Weights" : "[ ] Skin Weights"))
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 367.0f, 230.0f, 30.0f }, visibility.skinWeights ? "[x] Skin Weights" : "[ ] Skin Weights"))
         {
             visibility.skinWeights = !visibility.skinWeights;
         }
@@ -222,7 +236,7 @@ void DrawMenuBar(Font font,
         }
 
         DrawUiText(font, "HOTKEYS", 198.0f, 184.0f, 16.0f, Color{ 165, 182, 196, 255 });
-        DrawUiText(font, "Q/W/E/R tools    Ctrl+O open FBX    V view mode", 198.0f, 210.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        DrawUiText(font, "Q/W/E/R tools    Ctrl+O open FBX    Ctrl+R reload", 198.0f, 210.0f, 15.0f, Color{ 205, 213, 220, 255 });
         DrawUiText(font, "Ctrl+Z undo    Ctrl+Y redo    T textures    C channels", 198.0f, 236.0f, 15.0f, Color{ 205, 213, 220, 255 });
         DrawUiText(font, "Blender: MMB orbit, Alt snap, Shift+MMB pan, Wheel zoom", 198.0f, 262.0f, 15.0f, Color{ 205, 213, 220, 255 });
         DrawUiText(font, "Maya: Alt+LMB orbit, Shift snap, Alt+MMB pan, Alt+RMB/Wheel zoom", 198.0f, 288.0f, 15.0f, Color{ 205, 213, 220, 255 });

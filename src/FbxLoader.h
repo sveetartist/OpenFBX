@@ -52,6 +52,13 @@ struct SkinnedVertex
     std::vector<SkinnedVertexInfluence> influences;
 };
 
+struct MeshEdge
+{
+    int a = -1;
+    int b = -1;
+    int node = -1;
+};
+
 enum class SceneNodeType
 {
     Empty,
@@ -77,6 +84,7 @@ struct SceneNode
     int meshVertexStart = -1;
     int meshVertexCount = 0;
     int meshTriangleCount = 0;
+    int meshPolygonCount = 0;
     bool meshHadNormals = true;
     bool meshHadUvs = true;
     bool meshHasSkin = false;
@@ -103,6 +111,8 @@ struct LoadedFbxModel
     std::vector<float> bindNormals;
     std::vector<SkinnedVertex> skinnedVertices;
     std::vector<std::vector<int>> meshGlobalVertexIndices;
+    std::vector<int> meshControlPointIndices;
+    std::vector<MeshEdge> meshPolygonEdges;
     std::vector<std::string> uvSetNames;
     std::vector<std::vector<float>> uvSets;
     std::vector<std::string> materialNames;

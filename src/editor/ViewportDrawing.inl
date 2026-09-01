@@ -377,6 +377,246 @@ Color GetSkinWeightHeatColor(float weight)
     return LerpColor(Color{ 245, 220, 76, 230 }, Color{ 238, 54, 46, 245 }, (weight - 0.75f) / 0.25f);
 }
 
+int QuantizeViewportCoord(float value)
+{
+    constexpr float scale = 100000.0f;
+    return static_cast<int>(std::round(value * scale));
+}
+
+std::string MakeViewportUvPointKey(Vector2 value)
+{
+    return std::to_string(QuantizeViewportCoord(value.x)) + "," +
+           std::to_string(QuantizeViewportCoord(value.y));
+}
+
+Vector3 GetBindVertexPosition(const LoadedFbxModel& loaded, int vertexIndex)
+{
+    const size_t base = static_cast<size_t>(vertexIndex) * 3;
+    if (base + 2 >= loaded.bindVertices.size()) return Vector3{};
+    return Vector3{ loaded.bindVertices[base], loaded.bindVertices[base + 1], loaded.bindVertices[base + 2] };
+}
+
+std::string MakeViewportPositionPointKey(const LoadedFbxModel& loaded, int vertexIndex)
+{
+    const Vector3 value = GetBindVertexPosition(loaded, vertexIndex);
+    return std::to_string(QuantizeViewportCoord(value.x)) + "," +
+           std::to_string(QuantizeViewportCoord(value.y)) + "," +
+           std::to_string(QuantizeViewportCoord(value.z));
+}
+
+std::string MakeOrderedViewportEdgeKey(const std::string& a, const std::string& b)
+{
+    return a <= b ? a + "|" + b : b + "|" + a;
+}
+
+Vector2 GetViewportVertexUv(const std::vector<float>& uvs, int vertexIndex)
+{
+    const size_t base = static_cast<size_t>(vertexIndex) * 2;
+    if (base + 1 >= uvs.size()) return Vector2{};
+    return Vector2{ uvs[base], uvs[base + 1] };
+}
+
+std::string MakeViewportUvAdjacencyKey(const LoadedFbxModel& loaded,
+                                       const std::vector<float>& uvs,
+                                       const ViewportUvIslandTriangle& triangle,
+                                       int edge)
+{
+    const int next = (edge + 1) % 3;
+    const std::string positionEdge = MakeOrderedViewportEdgeKey(MakeViewportPositionPointKey(loaded, triangle.vertex[edge]),
+                                                                MakeViewportPositionPointKey(loaded, triangle.vertex[next]));
+    const std::string uvEdge = MakeOrderedViewportEdgeKey(MakeViewportUvPointKey(GetViewportVertexUv(uvs, triangle.vertex[edge])),
+                                                          MakeViewportUvPointKey(GetViewportVertexUv(uvs, triangle.vertex[next])));
+    return positionEdge + "#" + uvEdge;
+}
+
+int FindViewportIslandParent(std::vector<int>& parents, int value)
+{
+    if (parents[static_cast<size_t>(value)] == value) return value;
+    parents[static_cast<size_t>(value)] = FindViewportIslandParent(parents, parents[static_cast<size_t>(value)]);
+    return parents[static_cast<size_t>(value)];
+}
+
+void UnionViewportIslandParents(std::vector<int>& parents, int a, int b)
+{
+    const int rootA = FindViewportIslandParent(parents, a);
+    const int rootB = FindViewportIslandParent(parents, b);
+    if (rootA != rootB)
+    {
+        parents[static_cast<size_t>(rootB)] = rootA;
+    }
+}
+
+void BuildViewportUvIslandCache(ModelTab& tab, int uvSetIndex)
+{
+    ViewportUvIslandCache cache;
+    cache.uvSetIndex = uvSetIndex;
+    cache.nodeCount = tab.loaded.nodes.size();
+    cache.vertexValueCount = tab.loaded.bindVertices.size();
+    if (uvSetIndex < 0 || uvSetIndex >= static_cast<int>(tab.loaded.uvSets.size()))
+    {
+        tab.viewportUvIslandCache = std::move(cache);
+        return;
+    }
+
+    const std::vector<float>& uvs = tab.loaded.uvSets[static_cast<size_t>(uvSetIndex)];
+    cache.uvValueCount = uvs.size();
+    const int vertexFloatCount = static_cast<int>(tab.loaded.bindVertices.size());
+    for (int nodeIndex = 0; nodeIndex < static_cast<int>(tab.loaded.nodes.size()); ++nodeIndex)
+    {
+        const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(nodeIndex)];
+        if (node.type != SceneNodeType::Mesh || node.meshVertexStart < 0 || node.meshVertexCount < 3) continue;
+        if (uvs.size() < static_cast<size_t>(node.meshVertexStart + node.meshVertexCount) * 2) continue;
+
+        const int start = node.meshVertexStart;
+        const int end = node.meshVertexStart + node.meshVertexCount;
+        for (int vertex = start; vertex + 2 < end; vertex += 3)
+        {
+            if ((vertex + 2) * 3 + 2 >= vertexFloatCount) continue;
+
+            ViewportUvIslandTriangle triangle;
+            triangle.vertex[0] = vertex;
+            triangle.vertex[1] = vertex + 1;
+            triangle.vertex[2] = vertex + 2;
+            triangle.nodeIndex = nodeIndex;
+            cache.triangles.push_back(triangle);
+        }
+    }
+
+    if (cache.triangles.empty())
+    {
+        tab.viewportUvIslandCache = std::move(cache);
+        return;
+    }
+
+    std::vector<int> parents(cache.triangles.size());
+    for (int i = 0; i < static_cast<int>(parents.size()); ++i)
+    {
+        parents[static_cast<size_t>(i)] = i;
+    }
+
+    std::unordered_map<std::string, int> edgeToTriangle;
+    for (int triangleIndex = 0; triangleIndex < static_cast<int>(cache.triangles.size()); ++triangleIndex)
+    {
+        const ViewportUvIslandTriangle& triangle = cache.triangles[static_cast<size_t>(triangleIndex)];
+        for (int edge = 0; edge < 3; ++edge)
+        {
+            const std::string edgeKey = MakeViewportUvAdjacencyKey(tab.loaded, uvs, triangle, edge);
+            const auto found = edgeToTriangle.find(edgeKey);
+            if (found == edgeToTriangle.end())
+            {
+                edgeToTriangle[edgeKey] = triangleIndex;
+            }
+            else
+            {
+                UnionViewportIslandParents(parents, triangleIndex, found->second);
+            }
+        }
+    }
+
+    std::unordered_map<int, int> rootToIsland;
+    for (int triangleIndex = 0; triangleIndex < static_cast<int>(cache.triangles.size()); ++triangleIndex)
+    {
+        const int root = FindViewportIslandParent(parents, triangleIndex);
+        auto found = rootToIsland.find(root);
+        if (found == rootToIsland.end())
+        {
+            const int islandIndex = static_cast<int>(rootToIsland.size());
+            found = rootToIsland.emplace(root, islandIndex).first;
+        }
+        cache.triangles[static_cast<size_t>(triangleIndex)].islandIndex = found->second;
+    }
+
+    tab.viewportUvIslandCache = std::move(cache);
+}
+
+ViewportUvIslandCache& GetViewportUvIslandCache(ModelTab& tab, int uvSetIndex)
+{
+    const size_t uvValueCount = uvSetIndex >= 0 && uvSetIndex < static_cast<int>(tab.loaded.uvSets.size()) ?
+                                tab.loaded.uvSets[static_cast<size_t>(uvSetIndex)].size() :
+                                0;
+    if (tab.viewportUvIslandCache.uvSetIndex != uvSetIndex ||
+        tab.viewportUvIslandCache.uvValueCount != uvValueCount ||
+        tab.viewportUvIslandCache.vertexValueCount != tab.loaded.bindVertices.size() ||
+        tab.viewportUvIslandCache.nodeCount != tab.loaded.nodes.size())
+    {
+        BuildViewportUvIslandCache(tab, uvSetIndex);
+    }
+    return tab.viewportUvIslandCache;
+}
+
+Vector3 OffsetViewportPoint(Vector3 point, Vector3 normal, float offset)
+{
+    return Vector3Add(point, Vector3Scale(normal, offset));
+}
+
+void DrawUvIslandColorOverlay(ModelTab& tab)
+{
+    if (!tab.loaded.hasMesh || tab.loaded.uvSets.empty()) return;
+
+    const int uvSetIndex = ClampInt(tab.selectedUvSet, 0, static_cast<int>(tab.loaded.uvSets.size()) - 1);
+    ViewportUvIslandCache& cache = GetViewportUvIslandCache(tab, uvSetIndex);
+    if (cache.triangles.empty()) return;
+
+    const float* vertices = GetCurrentMeshVertices(tab);
+    const float* normals = GetCurrentMeshNormals(tab);
+    if (!vertices) return;
+
+    const int vertexFloatCount = static_cast<int>(tab.loaded.bindVertices.size());
+    const int normalFloatCount = static_cast<int>(tab.loaded.bindNormals.size());
+    const float offset = ClampFloat(GetBoundsDiagonal(tab.loaded.bounds) * 0.00035f, 0.0001f, 0.006f);
+
+    rlBegin(RL_TRIANGLES);
+    for (const ViewportUvIslandTriangle& triangle : cache.triangles)
+    {
+        if (!IsViewportNodeVisible(tab, triangle.nodeIndex)) continue;
+
+        Vector3 points[3]{};
+        Vector3 normalValues[3]{};
+        bool validTriangle = true;
+        bool hasCornerNormals = normals != nullptr;
+        for (int corner = 0; corner < 3; ++corner)
+        {
+            const int positionBase = triangle.vertex[corner] * 3;
+            if (positionBase + 2 >= vertexFloatCount)
+            {
+                validTriangle = false;
+                break;
+            }
+
+            points[corner] = Vector3{ vertices[positionBase], vertices[positionBase + 1], vertices[positionBase + 2] };
+            if (normals && positionBase + 2 < normalFloatCount)
+            {
+                normalValues[corner] = NormalizeOrFallback(Vector3{ normals[positionBase], normals[positionBase + 1], normals[positionBase + 2] },
+                                                           Vector3{ 0.0f, 1.0f, 0.0f });
+            }
+            else
+            {
+                hasCornerNormals = false;
+            }
+        }
+        if (!validTriangle) continue;
+
+        if (!hasCornerNormals)
+        {
+            const Vector3 fallbackNormal = NormalizeOrFallback(Vector3CrossProduct(Vector3Subtract(points[1], points[0]),
+                                                                                   Vector3Subtract(points[2], points[0])),
+                                                               Vector3{ 0.0f, 1.0f, 0.0f });
+            normalValues[0] = fallbackNormal;
+            normalValues[1] = fallbackNormal;
+            normalValues[2] = fallbackNormal;
+        }
+
+        const Color color = GetDebugIndexColor(triangle.islandIndex);
+        rlColor4ub(color.r, color.g, color.b, color.a);
+        for (int corner = 0; corner < 3; ++corner)
+        {
+            const Vector3 point = OffsetViewportPoint(points[corner], normalValues[corner], offset);
+            rlVertex3f(point.x, point.y, point.z);
+        }
+    }
+    rlEnd();
+}
+
 bool GetSelectedBoneName(const ModelTab& tab, std::string& boneName)
 {
     if (tab.selectedNode < 0 || tab.selectedNode >= static_cast<int>(tab.loaded.nodes.size())) return false;

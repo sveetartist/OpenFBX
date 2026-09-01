@@ -125,7 +125,9 @@ enum class ViewMode
 {
     Shaded,
     ShadedWireframe,
-    Wireframe
+    Wireframe,
+    MaterialColors,
+    UvIslands
 };
 
 enum class OpenMenu
@@ -325,6 +327,22 @@ struct ValidatorIssue
     int node = -1;
 };
 
+struct ViewportUvIslandTriangle
+{
+    int vertex[3]{};
+    int nodeIndex = -1;
+    int islandIndex = -1;
+};
+
+struct ViewportUvIslandCache
+{
+    int uvSetIndex = -1;
+    size_t uvValueCount = 0;
+    size_t vertexValueCount = 0;
+    size_t nodeCount = 0;
+    std::vector<ViewportUvIslandTriangle> triangles;
+};
+
 struct ModelTab
 {
     LoadedFbxModel loaded;
@@ -360,6 +378,7 @@ struct ModelTab
     int uvSelectionNodeIndex = -1;
     int uvSelectionUvSet = -1;
     bool uvSelectionSameMaterial = false;
+    ViewportUvIslandCache viewportUvIslandCache;
     int appliedClipIndex = -2;
     int appliedMeshFrameIndex = -1;
     int appliedNextMeshFrameIndex = -1;
@@ -798,6 +817,29 @@ const BonePose* FindBonePoseByNode(const std::vector<BonePose>& poses, int nodeI
 bool RebuildCurrentSkinnedMeshFromBones(ModelTab& tab);
 bool RebuildSkinnedAnimationMeshFrames(ModelTab& tab);
 MeshFrame BuildSkinnedMeshFrame(const LoadedFbxModel& target, const BoneFrame& boneFrame);
+
+Color GetDebugIndexColor(int index, unsigned char alpha = 255)
+{
+    static constexpr Color palette[] = {
+        Color{ 90, 170, 225, 255 },
+        Color{ 235, 175, 70, 255 },
+        Color{ 120, 205, 135, 255 },
+        Color{ 220, 120, 175, 255 },
+        Color{ 145, 150, 235, 255 },
+        Color{ 235, 115, 95, 255 },
+        Color{ 85, 205, 195, 255 },
+        Color{ 205, 145, 85, 255 },
+        Color{ 170, 210, 80, 255 },
+        Color{ 210, 125, 235, 255 },
+        Color{ 235, 220, 85, 255 },
+        Color{ 125, 185, 110, 255 }
+    };
+    const int paletteCount = static_cast<int>(sizeof(palette) / sizeof(palette[0]));
+    Color color = index >= 0 && index < paletteCount ? palette[index] : ColorFromHSV(static_cast<float>((index * 137) % 360), 0.58f, 0.90f);
+    color.a = alpha;
+    return color;
+}
+
 void ApplyPbrTextureToModel(ModelTab& tab, int materialIndex, PbrTextureSlot slot)
 {
     if (!tab.loaded.hasMesh || tab.loaded.model.materialCount <= 0) return;

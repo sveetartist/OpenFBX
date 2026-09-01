@@ -20,7 +20,7 @@ void DrawLoadingScreen(Font font, const std::string& path)
     const char* fileName = GetFileName(path.c_str());
     const char* title = "LOADING FBX";
     const char* detail = fileName && fileName[0] ? fileName : path.c_str();
-    const char* note = "Importing scene, triangulating meshes, sampling skeleton and skin deformation";
+    const char* note = "Importing scene, sampling mesh data, skeleton, and skin deformation";
 
     const float centerX = static_cast<float>(GetScreenWidth()) * 0.5f;
     const float centerY = static_cast<float>(GetScreenHeight()) * 0.5f;
@@ -46,6 +46,8 @@ const char* GetViewModeName(ViewMode mode)
     case ViewMode::Shaded: return "SHADED";
     case ViewMode::ShadedWireframe: return "SHADED + WIREFRAME";
     case ViewMode::Wireframe: return "WIREFRAME";
+    case ViewMode::MaterialColors: return "MATERIAL COLORS";
+    case ViewMode::UvIslands: return "UV ISLANDS";
     }
 
     return "UNKNOWN";
@@ -57,7 +59,9 @@ ViewMode NextViewMode(ViewMode mode)
     {
     case ViewMode::Shaded: return ViewMode::ShadedWireframe;
     case ViewMode::ShadedWireframe: return ViewMode::Wireframe;
-    case ViewMode::Wireframe: return ViewMode::Shaded;
+    case ViewMode::Wireframe: return ViewMode::MaterialColors;
+    case ViewMode::MaterialColors: return ViewMode::UvIslands;
+    case ViewMode::UvIslands: return ViewMode::Shaded;
     }
 
     return ViewMode::Shaded;
@@ -571,7 +575,7 @@ void DrawSelectedInfoPanel(Font font, const ModelTab* active, const TransformVal
         for (int nodeIndex : selectedMeshNodes)
         {
             const SceneNode& meshNode = active->loaded.nodes[static_cast<size_t>(nodeIndex)];
-            totalPolys += meshNode.meshTriangleCount;
+            totalPolys += meshNode.meshPolygonCount > 0 ? meshNode.meshPolygonCount : meshNode.meshTriangleCount;
             if (!SameFloatValue(firstMesh.position.x, meshNode.position.x)) samePositionX = false;
             if (!SameFloatValue(firstMesh.position.y, meshNode.position.y)) samePositionY = false;
             if (!SameFloatValue(firstMesh.position.z, meshNode.position.z)) samePositionZ = false;
@@ -647,7 +651,7 @@ void DrawSelectedInfoPanel(Font font, const ModelTab* active, const TransformVal
     DrawTransformValueRow(font, transformValueEditor, "Rot:", TransformValueField::Rotation, rotation, panelX, panelY + 80.0f, 2);
     DrawTransformValueRow(font, transformValueEditor, "Scale:", TransformValueField::Scale, scale, panelX, panelY + 102.0f, 3);
 
-    std::snprintf(line, sizeof(line), "Polys: %d", node.meshTriangleCount);
+    std::snprintf(line, sizeof(line), "Polys: %d", node.meshPolygonCount > 0 ? node.meshPolygonCount : node.meshTriangleCount);
     DrawUiText(font, line, panelX + 12.0f, panelY + 124.0f, 14.0f, Color{ 205, 213, 220, 255 });
     DrawUiTextClipped(font, node.materialName.empty() ? "Material: None" : (std::string("Material: ") + node.materialName).c_str(), panelX + 120.0f, panelY + 124.0f, 14.0f, panelW - 132.0f, Color{ 205, 213, 220, 255 });
 }
