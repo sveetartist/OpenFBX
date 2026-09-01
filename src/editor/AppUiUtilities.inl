@@ -225,10 +225,10 @@ Rectangle GetTransformValueCellRect(float panelX, float rowY, int component)
     return Rectangle{ panelX + 58.0f + static_cast<float>(component) * 78.0f, rowY - 2.0f, 72.0f, 20.0f };
 }
 
-Vector3 GetNodeDisplayedTransformValue(const ModelTab& tab, int nodeIndex, TransformValueField field)
+Vector3 GetNodeDisplayedTransformValue(const ModelTab& tab, int nodeIndex, TransformValueField field, bool editPivotMode = false)
 {
     const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(nodeIndex)];
-    const BonePose* currentBonePose = node.type == SceneNodeType::Bone ? FindCurrentBonePose(tab, nodeIndex) : nullptr;
+    const BonePose* currentBonePose = !editPivotMode && node.type == SceneNodeType::Bone ? FindCurrentBonePose(tab, nodeIndex) : nullptr;
     if (field == TransformValueField::Position) return currentBonePose ? currentBonePose->position : node.position;
     if (field == TransformValueField::Rotation) return currentBonePose ? currentBonePose->rotation : node.rotation;
     return currentBonePose ? currentBonePose->scale : node.scale;
@@ -267,14 +267,14 @@ bool TryParseTransformValue(const char* text, float& outValue)
     return true;
 }
 
-void BeginTransformValueEdit(TransformValueEditor& editor, const ModelTab& tab, TransformValueField field, int component)
+void BeginTransformValueEdit(TransformValueEditor& editor, const ModelTab& tab, TransformValueField field, int component, bool editPivotMode = false)
 {
     if (!IsValidSelectableNode(tab, tab.selectedNode)) return;
     editor.active = true;
     editor.nodeIndex = tab.selectedNode;
     editor.field = field;
     editor.component = std::clamp(component, 0, 2);
-    const Vector3 value = GetNodeDisplayedTransformValue(tab, tab.selectedNode, field);
+    const Vector3 value = GetNodeDisplayedTransformValue(tab, tab.selectedNode, field, editPivotMode && field != TransformValueField::Scale);
     for (int i = 0; i < 3; ++i)
     {
         std::snprintf(editor.text[i], sizeof(editor.text[i]), field == TransformValueField::Rotation ? "%.2f" : "%.3f", GetTransformValueComponent(value, i));
@@ -308,7 +308,8 @@ bool CommitTransformValueEdit(ModelTab& tab, TransformValueEditor& editor, bool 
         SetTransformValueComponent(updated, i, parsed);
     }
 
-    const Vector3 current = GetNodeDisplayedTransformValue(tab, editor.nodeIndex, editor.field);
+    const bool editingPivot = editPivotMode && editor.field != TransformValueField::Scale && IsValidPivotNode(tab, editor.nodeIndex);
+    const Vector3 current = GetNodeDisplayedTransformValue(tab, editor.nodeIndex, editor.field, editingPivot);
     if (Vector3Distance(current, updated) <= 0.000001f)
     {
         CancelTransformValueEdit(editor);
@@ -319,12 +320,12 @@ bool CommitTransformValueEdit(ModelTab& tab, TransformValueEditor& editor, bool 
     PushUndoSnapshot(tab);
     if (editor.field == TransformValueField::Position)
     {
-        if (editPivotMode && IsValidJointPivotNode(tab, editor.nodeIndex))
+        if (editingPivot)
         {
             const int previousSelectedNode = tab.selectedNode;
             const std::vector<int> previousSelectedNodes = tab.selectedNodes;
             SetSingleSelectedNode(tab, editor.nodeIndex);
-            MoveSelectedJointPivot(tab, Vector3Subtract(updated, current));
+            MoveSelectedPivot(tab, Vector3Subtract(updated, current));
             tab.selectedNode = previousSelectedNode;
             tab.selectedNodes = previousSelectedNodes;
             PruneSelectedNodes(tab);
@@ -351,12 +352,12 @@ bool CommitTransformValueEdit(ModelTab& tab, TransformValueEditor& editor, bool 
     }
     else if (editor.field == TransformValueField::Rotation)
     {
-        if (editPivotMode && IsValidJointPivotNode(tab, editor.nodeIndex))
+        if (editingPivot)
         {
             const int previousSelectedNode = tab.selectedNode;
             const std::vector<int> previousSelectedNodes = tab.selectedNodes;
             SetSingleSelectedNode(tab, editor.nodeIndex);
-            SetSelectedJointPivotRotation(tab, updated);
+            SetSelectedPivotRotation(tab, updated);
             tab.selectedNode = previousSelectedNode;
             tab.selectedNodes = previousSelectedNodes;
             PruneSelectedNodes(tab);
@@ -453,11 +454,11 @@ bool UpdateSelectedInfoPanelInput(ModelTab* active, TransformValueEditor& editor
                 }
                 if (component < 2)
                 {
-                    BeginTransformValueEdit(editor, *active, field, component + 1);
+                    BeginTransformValueEdit(editor, *active, field, component + 1, editPivotMode);
                 }
                 else
                 {
-                    BeginTransformValueEdit(editor, *active, GetNextTransformValueField(field, editPivotMode), 0);
+                    BeginTransformValueEdit(editor, *active, GetNextTransformValueField(field, editPivotMode), 0, editPivotMode);
                 }
             }
         }
@@ -502,7 +503,7 @@ bool UpdateSelectedInfoPanelInput(ModelTab* active, TransformValueEditor& editor
                     {
                         return true;
                     }
-                    BeginTransformValueEdit(editor, *active, row.field, component);
+                    BeginTransformValueEdit(editor, *active, row.field, component, editPivotMode);
                     return true;
                 }
             }
@@ -512,7 +513,7 @@ bool UpdateSelectedInfoPanelInput(ModelTab* active, TransformValueEditor& editor
             {
                 return true;
             }
-            BeginTransformValueEdit(editor, *active, row.field, 0);
+            BeginTransformValueEdit(editor, *active, row.field, 0, editPivotMode);
             return true;
         }
     }
@@ -551,7 +552,7 @@ void DrawTransformValueRow(Font font, const TransformValueEditor& editor, const 
     DrawTransformValueCell(font, editor, field, 2, value.z, panelX, rowY, decimals);
 }
 
-void DrawSelectedInfoPanel(Font font, const ModelTab* active, const TransformValueEditor& transformValueEditor)
+void DrawSelectedInfoPanel(Font font, const ModelTab* active, const TransformValueEditor& transformValueEditor, bool editPivotMode)
 {
     if (!active || active->selectedNode < 0 || active->selectedNode >= static_cast<int>(active->loaded.nodes.size())) return;
     if (!IsValidSelectableNode(*active, active->selectedNode)) return;
@@ -628,7 +629,8 @@ void DrawSelectedInfoPanel(Font font, const ModelTab* active, const TransformVal
     }
 
     const SceneNode& node = active->loaded.nodes[static_cast<size_t>(active->selectedNode)];
-    const BonePose* currentBonePose = node.type == SceneNodeType::Bone ? FindCurrentBonePose(*active, active->selectedNode) : nullptr;
+    const bool showingPivot = editPivotMode && IsValidPivotNode(*active, active->selectedNode);
+    const BonePose* currentBonePose = !showingPivot && node.type == SceneNodeType::Bone ? FindCurrentBonePose(*active, active->selectedNode) : nullptr;
     const Vector3 position = currentBonePose ? currentBonePose->position : node.position;
     const Vector3 rotation = currentBonePose ? currentBonePose->rotation : node.rotation;
     const Vector3 scale = currentBonePose ? currentBonePose->scale : node.scale;
@@ -640,7 +642,7 @@ void DrawSelectedInfoPanel(Font font, const ModelTab* active, const TransformVal
     DrawRectangleRec(Rectangle{ panelX, panelY, panelW, panelH }, Color{ 18, 20, 23, 225 });
     DrawRectangleLinesEx(Rectangle{ panelX, panelY, panelW, panelH }, 1.0f, Color{ 70, 78, 88, 255 });
 
-    DrawUiText(font, "SELECTION", panelX + 12.0f, panelY + 10.0f, 15.0f, Color{ 165, 182, 196, 255 });
+    DrawUiText(font, showingPivot ? "PIVOT" : "SELECTION", panelX + 12.0f, panelY + 10.0f, 15.0f, Color{ 165, 182, 196, 255 });
     DrawUiTextClipped(font, node.name.c_str(), panelX + 100.0f, panelY + 10.0f, 15.0f, panelW - 112.0f, RAYWHITE);
 
     char line[256] = {};

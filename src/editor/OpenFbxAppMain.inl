@@ -416,12 +416,16 @@ int RunOpenFbxApp(int argc, char** argv)
         {
             visibility.boneRotations = !visibility.boneRotations;
         }
+        const bool pivotEditLocksSelection = editPivotMode &&
+                                             active &&
+                                             IsValidPivotNode(*active, active->selectedNode);
         if (active &&
             mouseInViewport &&
             !toolbarConsumedMouse &&
             !transformInfoConsumedMouse &&
             !transformConsumedMouse &&
             !weightBrushConsumedMouse &&
+            !pivotEditLocksSelection &&
             IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
             !IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) &&
             !IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
@@ -445,6 +449,7 @@ int RunOpenFbxApp(int argc, char** argv)
             !transformInfoConsumedMouse &&
             !transformConsumedMouse &&
             !weightBrushConsumedMouse &&
+            !pivotEditLocksSelection &&
             IsMouseButtonPressed(MOUSE_BUTTON_RIGHT))
         {
             std::vector<int> selectedContextNodes = GetValidContextActionNodes(*active, active->selectedNodes);
@@ -594,7 +599,7 @@ int RunOpenFbxApp(int argc, char** argv)
                     DrawBoneRotations(GetVisibleBonePoses(*active), GetBoundsDiagonal(active->loaded.bounds), active->selectedNode);
                 }
             }
-            DrawSelectedNodeOverlay(*active, visibility);
+            DrawSelectedNodeOverlay(*active, visibility, transformTool);
             DrawTransformGizmo(*active, transformTool, transformGizmo, gizmoOrientation, editPivotMode);
             rlDrawRenderBatchActive();
             rlEnableDepthTest();
@@ -651,7 +656,7 @@ int RunOpenFbxApp(int argc, char** argv)
             DrawUiText(uiFont, notice.c_str(), 12, static_cast<float>(GetScreenHeight() - 154), 18, Color{ 150, 225, 170, 255 });
         }
 
-        DrawSelectedInfoPanel(uiFont, active, transformValueEditor);
+        DrawSelectedInfoPanel(uiFont, active, transformValueEditor, editPivotMode);
 
         if (active)
         {

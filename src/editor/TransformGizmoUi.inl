@@ -211,7 +211,7 @@ bool UpdateTransformGizmoInput(ModelTab* active,
         return false;
     }
 
-    if ((editPivotMode || pivotDragInProgress) && !IsValidJointPivotNode(*active, active->selectedNode))
+    if ((editPivotMode || pivotDragInProgress) && !IsValidPivotNode(*active, active->selectedNode))
     {
         state = TransformGizmoState{};
         return false;
@@ -250,7 +250,7 @@ bool UpdateTransformGizmoInput(ModelTab* active,
                 {
                     if (draggingPivotMode)
                     {
-                        MoveSelectedJointPivot(*active, moveDelta);
+                        MoveSelectedPivot(*active, moveDelta);
                     }
                     else
                     {
@@ -268,8 +268,8 @@ bool UpdateTransformGizmoInput(ModelTab* active,
                 {
                     if (draggingPivotMode)
                     {
-                        RotateSelectedJointPivot(*active, right, rightRadians);
-                        RotateSelectedJointPivot(*active, up, upRadians);
+                        RotateSelectedPivot(*active, right, rightRadians);
+                        RotateSelectedPivot(*active, up, upRadians);
                     }
                     else
                     {
@@ -302,7 +302,7 @@ bool UpdateTransformGizmoInput(ModelTab* active,
                 {
                     if (draggingPivotMode)
                     {
-                        RotateSelectedJointPivot(*active, axisVector, radians);
+                        RotateSelectedPivot(*active, axisVector, radians);
                     }
                     else
                     {
@@ -321,7 +321,7 @@ bool UpdateTransformGizmoInput(ModelTab* active,
                         const Vector3 moveDelta = Vector3Scale(axisVector, scalarPixels * GetAxisWorldPerPixel(*active, pivot, axisVector));
                         if (draggingPivotMode)
                         {
-                            MoveSelectedJointPivot(*active, moveDelta);
+                            MoveSelectedPivot(*active, moveDelta);
                         }
                         else
                         {
@@ -354,7 +354,7 @@ bool UpdateTransformGizmoInput(ModelTab* active,
     {
         state.lastAngle = GetScreenAngleAroundPivot(mouse, GetWorldToScreen(pivot, active->orbit.camera));
     }
-    notice = editPivotMode ? "Edit joint pivot." : std::string(GetTransformToolName(activeTool)) + " gizmo.";
+    notice = editPivotMode ? "Edit pivot." : std::string(GetTransformToolName(activeTool)) + " gizmo.";
     error.clear();
     return true;
 }
@@ -388,13 +388,13 @@ void DrawTransformGizmo(const ModelTab& tab, TransformTool tool, const Transform
     const TransformTool requestedTool = editPivotMode && tool != TransformTool::Move && tool != TransformTool::Rotate ? TransformTool::Select : tool;
     const TransformTool activeTool = state.dragging ? state.tool : requestedTool;
     if (activeTool == TransformTool::Select || activeTool == TransformTool::WeightsBrush) return;
-    if ((editPivotMode || pivotDragInProgress) && !IsValidJointPivotNode(tab, tab.selectedNode)) return;
+    if ((editPivotMode || pivotDragInProgress) && !IsValidPivotNode(tab, tab.selectedNode)) return;
 
     Vector3 pivot{};
     if (!GetGizmoPivot(tab, pivot)) return;
 
     const float length = GetTransformGizmoLength(tab);
-    const float handleRadius = ClampFloat(length * 0.045f, 0.012f, 0.08f);
+    const float handleRadius = ClampFloat(length * 0.032f, 0.008f, 0.055f);
     rlDrawRenderBatchActive();
     rlDisableDepthTest();
     rlDisableDepthMask();
@@ -402,7 +402,7 @@ void DrawTransformGizmo(const ModelTab& tab, TransformTool tool, const Transform
 
     const bool centerActive = state.dragging && state.axis == TransformAxis::Center;
     const Color centerColor = (editPivotMode || pivotDragInProgress) ? Color{ 255, 214, 84, 245 } : Color{ 225, 232, 238, 235 };
-    DrawSphere(pivot, handleRadius * 0.9f, centerActive ? Color{ 255, 235, 128, 255 } : centerColor);
+    DrawSphere(pivot, handleRadius * 0.65f, centerActive ? Color{ 255, 235, 128, 255 } : centerColor);
 
     for (TransformAxis axis : { TransformAxis::X, TransformAxis::Y, TransformAxis::Z })
     {

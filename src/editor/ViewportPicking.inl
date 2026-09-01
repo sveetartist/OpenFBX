@@ -469,7 +469,7 @@ void DrawSelectedMeshOverlay(const ModelTab& tab, const VisibilityState& visibil
     }
 }
 
-void DrawSelectedNodeOverlay(const ModelTab& tab, const VisibilityState& visibility)
+void DrawSelectedNodeOverlay(const ModelTab& tab, const VisibilityState& visibility, TransformTool tool)
 {
     for (int nodeIndex : tab.selectedNodes)
     {
@@ -479,7 +479,11 @@ void DrawSelectedNodeOverlay(const ModelTab& tab, const VisibilityState& visibil
         const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(nodeIndex)];
         if (node.type == SceneNodeType::Mesh && node.hasBounds)
         {
-            DrawMeshOrigin(node, GetBoundsDiagonal(tab.loaded.bounds));
+            DrawMeshOrigin(node, tab.orbit.camera);
+        }
+        else if (node.type == SceneNodeType::Bone && visibility.bones && tool == TransformTool::Select)
+        {
+            DrawBoneOrigin(node, FindBonePoseByNodeLinear(GetVisibleBonePoses(tab), nodeIndex), tab.orbit.camera);
         }
         else if (node.type == SceneNodeType::Empty && visibility.empties)
         {

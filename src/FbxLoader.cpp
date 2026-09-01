@@ -1300,6 +1300,25 @@ FbxAMatrix GetEditedGlobalMatrix(const LoadedFbxModel& model, int nodeIndex)
     return identity;
 }
 
+const BonePose* FindBindPoseByNode(const LoadedFbxModel& model, int nodeIndex)
+{
+    for (const BonePose& pose : model.bonePoses)
+    {
+        if (pose.node == nodeIndex) return &pose;
+    }
+    return nullptr;
+}
+
+FbxAMatrix GetEditedBindGlobalMatrix(const LoadedFbxModel& model, int nodeIndex)
+{
+    if (const BonePose* pose = FindBindPoseByNode(model, nodeIndex))
+    {
+        return MatrixFromPose(*pose);
+    }
+
+    return GetEditedGlobalMatrix(model, nodeIndex);
+}
+
 void ApplyEditedNodeTransforms(const LoadedFbxModel& model,
                                const std::vector<bool>& deletedNodes,
                                const std::vector<FbxNode*>& sceneNodes)
@@ -1323,6 +1342,125 @@ void ApplyEditedNodeTransforms(const LoadedFbxModel& model,
         targetNode->LclTranslation.Set(ToFbxDouble3(local.GetT()));
         targetNode->LclRotation.Set(ToFbxDouble3(local.GetR()));
         targetNode->LclScaling.Set(ToFbxDouble3(local.GetS()));
+    }
+}
+
+std::unordered_map<FbxNode*, int> BuildFbxNodeToModelIndex(const LoadedFbxModel& model,
+                                                           const std::vector<FbxNode*>& sceneNodes)
+{
+    std::unordered_map<FbxNode*, int> nodeToIndex;
+    const int count = std::min(static_cast<int>(model.nodes.size()), static_cast<int>(sceneNodes.size()));
+    for (int nodeIndex = 0; nodeIndex < count; ++nodeIndex)
+    {
+        FbxNode* node = sceneNodes[static_cast<size_t>(nodeIndex)];
+        if (node) nodeToIndex.emplace(node, nodeIndex);
+    }
+    return nodeToIndex;
+}
+
+void ApplyEditedSkinBindMatrices(const LoadedFbxModel& model,
+                                 const std::vector<bool>& deletedNodes,
+                                 const std::vector<FbxNode*>& sceneNodes)
+{
+    const std::unordered_map<FbxNode*, int> nodeToIndex = BuildFbxNodeToModelIndex(model, sceneNodes);
+    const int nodeCount = std::min(static_cast<int>(model.nodes.size()), static_cast<int>(sceneNodes.size()));
+    for (int nodeIndex = 0; nodeIndex < nodeCount; ++nodeIndex)
+    {
+        if (IsDeletedModelNode(deletedNodes, nodeIndex)) continue;
+
+        const SceneNode& sceneNode = model.nodes[static_cast<size_t>(nodeIndex)];
+        if (sceneNode.type != SceneNodeType::Mesh) continue;
+
+        FbxNode* fbxNode = sceneNodes[static_cast<size_t>(nodeIndex)];
+        if (!fbxNode) continue;
+
+        const FbxAMatrix meshBindGlobal = MatrixFromSceneNode(sceneNode);
+        for (int attributeIndex = 0; attributeIndex < fbxNode->GetNodeAttributeCount(); ++attributeIndex)
+        {
+            FbxNodeAttribute* attribute = fbxNode->GetNodeAttributeByIndex(attributeIndex);
+            if (!attribute || attribute->GetAttributeType() != FbxNodeAttribute::eMesh) continue;
+
+            FbxMesh* mesh = static_cast<FbxMesh*>(attribute);
+            const int skinCount = mesh->GetDeformerCount(FbxDeformer::eSkin);
+            for (int skinIndex = 0; skinIndex < skinCount; ++skinIndex)
+            {
+                FbxSkin* skin = static_cast<FbxSkin*>(mesh->GetDeformer(skinIndex, FbxDeformer::eSkin));
+                if (!skin) continue;
+
+                for (int clusterIndex = 0; clusterIndex < skin->GetClusterCount(); ++clusterIndex)
+                {
+                    FbxCluster* cluster = skin->GetCluster(clusterIndex);
+                    FbxNode* link = cluster ? cluster->GetLink() : nullptr;
+                    if (!cluster) continue;
+
+                    cluster->SetTransformMatrix(meshBindGlobal);
+
+                    const auto found = nodeToIndex.find(link);
+                    if (found == nodeToIndex.end()) continue;
+
+                    const int linkNodeIndex = found->second;
+                    if (IsDeletedModelNode(deletedNodes, linkNodeIndex)) continue;
+
+                    cluster->SetTransformLinkMatrix(GetEditedBindGlobalMatrix(model, linkNodeIndex));
+                }
+            }
+        }
+    }
+}
+
+void RemoveExistingBindPoses(FbxScene* scene)
+{
+    if (!scene) return;
+
+    for (int poseIndex = scene->GetPoseCount() - 1; poseIndex >= 0; --poseIndex)
+    {
+        FbxPose* pose = scene->GetPose(poseIndex);
+        if (!pose || !pose->IsBindPose()) continue;
+
+        scene->RemovePose(poseIndex);
+        pose->Destroy(true);
+    }
+}
+
+void RebuildEditedBindPose(FbxScene* scene,
+                           const LoadedFbxModel& model,
+                           const std::vector<bool>& deletedNodes,
+                           const std::vector<FbxNode*>& sceneNodes)
+{
+    if (!scene) return;
+
+    RemoveExistingBindPoses(scene);
+
+    FbxPose* bindPose = FbxPose::Create(scene, "openfbx_bind_pose");
+    if (!bindPose) return;
+
+    bindPose->SetIsBindPose(true);
+
+    bool addedAnyNode = false;
+    const int nodeCount = std::min(static_cast<int>(model.nodes.size()), static_cast<int>(sceneNodes.size()));
+    for (int nodeIndex = 0; nodeIndex < nodeCount; ++nodeIndex)
+    {
+        if (IsDeletedModelNode(deletedNodes, nodeIndex)) continue;
+
+        FbxNode* node = sceneNodes[static_cast<size_t>(nodeIndex)];
+        if (!node) continue;
+
+        const SceneNode& sceneNode = model.nodes[static_cast<size_t>(nodeIndex)];
+        const FbxAMatrix global = sceneNode.type == SceneNodeType::Bone
+            ? GetEditedBindGlobalMatrix(model, nodeIndex)
+            : MatrixFromSceneNode(sceneNode);
+
+        const int itemIndex = bindPose->Add(node, FbxMatrix(global), false, true);
+        addedAnyNode = addedAnyNode || itemIndex >= 0;
+    }
+
+    if (addedAnyNode)
+    {
+        scene->AddPose(bindPose);
+    }
+    else
+    {
+        bindPose->Destroy(true);
     }
 }
 
@@ -1521,6 +1659,8 @@ bool ApplyEditedModelToScene(FbxScene* scene,
 
     const std::vector<FbxNode*> mappedSceneNodes = BuildMappedSceneNodes(model, sceneNodes);
     ApplyEditedNodeTransforms(model, deletedNodes, mappedSceneNodes);
+    ApplyEditedSkinBindMatrices(model, deletedNodes, mappedSceneNodes);
+    RebuildEditedBindPose(scene, model, deletedNodes, mappedSceneNodes);
     ApplyEditedMeshGeometry(model, deletedNodes, mappedSceneNodes);
     ApplyEditedNodeNames(model, deletedNodes, mappedSceneNodes);
     ApplyDeletedNodes(scene, model, deletedNodes, mappedSceneNodes);

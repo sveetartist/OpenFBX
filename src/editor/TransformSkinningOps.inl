@@ -787,10 +787,15 @@ void MoveSelectedSubtree(ModelTab& tab, Vector3 delta)
     ApplyTransformToSelectedSubtree(tab, transformPoint, transformDirection, TransformTool::Move, TransformAxis::None, 0.0f);
 }
 
-bool IsValidJointPivotNode(const ModelTab& tab, int nodeIndex)
+bool IsValidPivotNode(const ModelTab& tab, int nodeIndex)
 {
     return IsValidSelectableNode(tab, nodeIndex) &&
-           nodeIndex < static_cast<int>(tab.loaded.nodes.size()) &&
+           nodeIndex < static_cast<int>(tab.loaded.nodes.size());
+}
+
+bool IsValidJointPivotNode(const ModelTab& tab, int nodeIndex)
+{
+    return IsValidPivotNode(tab, nodeIndex) &&
            tab.loaded.nodes[static_cast<size_t>(nodeIndex)].type == SceneNodeType::Bone;
 }
 
@@ -923,6 +928,20 @@ void MoveSelectedJointPivot(ModelTab& tab, Vector3 delta)
             OffsetBoneFrameJointPosition(frame, nodeIndex, delta);
         }
     }
+    InvalidateDisplayedAnimationCaches(tab);
+}
+
+void MoveSelectedPivot(ModelTab& tab, Vector3 delta)
+{
+    if (Vector3Length(delta) <= 0.000001f || !IsValidPivotNode(tab, tab.selectedNode)) return;
+    if (IsValidJointPivotNode(tab, tab.selectedNode))
+    {
+        MoveSelectedJointPivot(tab, delta);
+        return;
+    }
+
+    SceneNode& node = tab.loaded.nodes[static_cast<size_t>(tab.selectedNode)];
+    node.position = Vector3Add(node.position, delta);
 }
 
 void RotateSelectedJointPivot(ModelTab& tab, Vector3 axisVector, float radians)
@@ -961,6 +980,24 @@ void RotateSelectedJointPivot(ModelTab& tab, Vector3 axisVector, float radians)
             RotateBoneFrameJointAxes(frame, nodeIndex, axisVector, radians);
         }
     }
+    InvalidateDisplayedAnimationCaches(tab);
+}
+
+void RotateSelectedPivot(ModelTab& tab, Vector3 axisVector, float radians)
+{
+    if (std::fabs(radians) <= 0.000001f || !IsValidPivotNode(tab, tab.selectedNode)) return;
+    if (IsValidJointPivotNode(tab, tab.selectedNode))
+    {
+        RotateSelectedJointPivot(tab, axisVector, radians);
+        return;
+    }
+
+    SceneNode& node = tab.loaded.nodes[static_cast<size_t>(tab.selectedNode)];
+    axisVector = NormalizeOrFallback(axisVector, Vector3{ 0.0f, 1.0f, 0.0f });
+    node.axisX = NormalizeOrFallback(Vector3RotateByAxisAngle(node.axisX, axisVector, radians), node.axisX);
+    node.axisY = NormalizeOrFallback(Vector3RotateByAxisAngle(node.axisY, axisVector, radians), node.axisY);
+    node.axisZ = NormalizeOrFallback(Vector3RotateByAxisAngle(node.axisZ, axisVector, radians), node.axisZ);
+    node.rotation = EulerDegreesFromAxes(node.axisX, node.axisY, node.axisZ);
 }
 
 void RotateSelectedSubtree(ModelTab& tab, Vector3 pivot, TransformAxis axis, Vector3 axisVector, float radians)
@@ -1077,6 +1114,21 @@ void SetSelectedJointPivotRotation(ModelTab& tab, Vector3 rotation)
             for (BonePose& pose : frame.poses) setPose(pose);
         }
     }
+    InvalidateDisplayedAnimationCaches(tab);
+}
+
+void SetSelectedPivotRotation(ModelTab& tab, Vector3 rotation)
+{
+    if (!IsValidPivotNode(tab, tab.selectedNode)) return;
+    if (IsValidJointPivotNode(tab, tab.selectedNode))
+    {
+        SetSelectedJointPivotRotation(tab, rotation);
+        return;
+    }
+
+    SceneNode& node = tab.loaded.nodes[static_cast<size_t>(tab.selectedNode)];
+    AxesFromEulerDegrees(rotation, node.axisX, node.axisY, node.axisZ);
+    node.rotation = rotation;
 }
 
 void SetSelectedNodeRotation(ModelTab& tab, int nodeIndex, Vector3 rotation)

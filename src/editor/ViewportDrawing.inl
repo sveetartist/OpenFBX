@@ -151,17 +151,42 @@ void DrawMeshOriginAxis(Vector3 origin, Vector3 axis, float length, Color color)
     DrawLine3D(origin, Vector3Add(origin, Vector3Scale(axis, length)), color);
 }
 
-void DrawMeshOrigin(const SceneNode& node, float sceneDiagonal)
+float GetViewScaledAxisLength(const Camera3D& camera, Vector3 origin)
 {
-    const float axisLength = ClampFloat(sceneDiagonal * 0.045f, 0.07f, 0.55f);
-    const float crossLength = axisLength * 0.32f;
-    const float sphereRadius = axisLength * 0.026f;
+    const float screenHeight = std::max(1.0f, static_cast<float>(GetScreenHeight()));
+    float worldPerPixel = 0.001f;
+    if (camera.projection == CAMERA_ORTHOGRAPHIC)
+    {
+        worldPerPixel = std::max(0.000001f, camera.fovy / screenHeight);
+    }
+    else
+    {
+        const Vector3 forward = Vector3Normalize(Vector3Subtract(camera.target, camera.position));
+        const float depth = std::max(0.0001f, Vector3DotProduct(Vector3Subtract(origin, camera.position), forward));
+        worldPerPixel = std::max(0.000001f, (2.0f * depth * std::tan(camera.fovy * DEG2RAD * 0.5f)) / screenHeight);
+    }
 
-    DrawEmptyCross(node, crossLength, kSelectionColor);
-    DrawSphere(node.position, sphereRadius, kSelectionColor);
+    return ClampFloat(worldPerPixel * 38.0f, 0.02f, 0.35f);
+}
+
+void DrawMeshOrigin(const SceneNode& node, const Camera3D& camera)
+{
+    const float axisLength = GetViewScaledAxisLength(camera, node.position);
     DrawMeshOriginAxis(node.position, node.axisX, axisLength, Color{ 235, 74, 74, 255 });
     DrawMeshOriginAxis(node.position, node.axisY, axisLength, Color{ 92, 210, 94, 255 });
     DrawMeshOriginAxis(node.position, node.axisZ, axisLength, Color{ 86, 142, 255, 255 });
+}
+
+void DrawBoneOrigin(const SceneNode& node, const BonePose* pose, const Camera3D& camera)
+{
+    const Vector3 position = pose ? pose->position : node.position;
+    const Vector3 axisX = pose ? pose->axisX : node.axisX;
+    const Vector3 axisY = pose ? pose->axisY : node.axisY;
+    const Vector3 axisZ = pose ? pose->axisZ : node.axisZ;
+    const float axisLength = GetViewScaledAxisLength(camera, position);
+    DrawMeshOriginAxis(position, axisX, axisLength, Color{ 235, 74, 74, 255 });
+    DrawMeshOriginAxis(position, axisY, axisLength, Color{ 92, 210, 94, 255 });
+    DrawMeshOriginAxis(position, axisZ, axisLength, Color{ 86, 142, 255, 255 });
 }
 
 void DrawEmptyCrosses(const ModelTab& tab)
