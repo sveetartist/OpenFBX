@@ -7,6 +7,8 @@ void DrawMenuBar(Font font,
                  bool& redoRequested,
                  bool& saveFbxRequested,
                  bool& saveAsFbxRequested,
+                 bool& packageFbxRequested,
+                 bool& extractFbxTexturesRequested,
                  bool& importAnimationsRequested,
                  bool& exportJsonRequested,
                  bool& compareFbxRequested,
@@ -54,7 +56,7 @@ void DrawMenuBar(Font font,
     switch (openMenu)
     {
     case OpenMenu::File:
-        openMenuBounds = Rectangle{ 8.0f, 29.0f, 270.0f, 278.0f };
+        openMenuBounds = Rectangle{ 8.0f, 29.0f, 300.0f, 338.0f };
         break;
     case OpenMenu::Edit:
         openMenuBounds = Rectangle{ 66.0f, 29.0f, 230.0f, 68.0f };
@@ -82,48 +84,58 @@ void DrawMenuBar(Font font,
 
     if (openMenu == OpenMenu::File)
     {
-        DrawRectangle(8, 29, 270, 278, Color{ 28, 31, 35, 245 });
-        if (DrawMenuItem(font, Rectangle{ 8.0f, 29.0f, 270.0f, 30.0f }, "Open FBX...        Ctrl+O"))
+        DrawRectangle(8, 29, 300, 338, Color{ 28, 31, 35, 245 });
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 29.0f, 300.0f, 30.0f }, "Open FBX...        Ctrl+O"))
         {
             openRequested = true;
             openMenu = OpenMenu::None;
         }
-        if (DrawMenuItem(font, Rectangle{ 8.0f, 59.0f, 270.0f, 30.0f }, "Close Tab        Ctrl+W"))
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 59.0f, 300.0f, 30.0f }, "Close Tab        Ctrl+W"))
         {
             closeTabRequested = true;
             openMenu = OpenMenu::None;
         }
-        if (DrawMenuItem(font, Rectangle{ 8.0f, 89.0f, 270.0f, 30.0f }, "Reload Tab        Ctrl+R"))
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 89.0f, 300.0f, 30.0f }, "Reload Tab        Ctrl+R"))
         {
             reloadTabRequested = true;
             openMenu = OpenMenu::None;
         }
-        if (DrawMenuItem(font, Rectangle{ 8.0f, 119.0f, 270.0f, 30.0f }, "Save FBX        Ctrl+S"))
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 119.0f, 300.0f, 30.0f }, "Save FBX        Ctrl+S"))
         {
             saveFbxRequested = true;
             openMenu = OpenMenu::None;
         }
-        if (DrawMenuItem(font, Rectangle{ 8.0f, 149.0f, 270.0f, 30.0f }, "Save As...        Ctrl+Shift+S"))
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 149.0f, 300.0f, 30.0f }, "Save As...        Ctrl+Shift+S"))
         {
             saveAsFbxRequested = true;
             openMenu = OpenMenu::None;
         }
-        if (DrawMenuItem(font, Rectangle{ 8.0f, 179.0f, 270.0f, 30.0f }, "Import Animations..."))
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 179.0f, 300.0f, 30.0f }, "Package FBX (Embed Textures)"))
+        {
+            packageFbxRequested = true;
+            openMenu = OpenMenu::None;
+        }
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 209.0f, 300.0f, 30.0f }, "Extract Textures (Unpack FBX)"))
+        {
+            extractFbxTexturesRequested = true;
+            openMenu = OpenMenu::None;
+        }
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 239.0f, 300.0f, 30.0f }, "Import Animations..."))
         {
             importAnimationsRequested = true;
             openMenu = OpenMenu::None;
         }
-        if (DrawMenuItem(font, Rectangle{ 8.0f, 209.0f, 270.0f, 30.0f }, "Export JSON"))
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 269.0f, 300.0f, 30.0f }, "Export JSON"))
         {
             exportJsonRequested = true;
             openMenu = OpenMenu::None;
         }
-        if (DrawMenuItem(font, Rectangle{ 8.0f, 239.0f, 270.0f, 30.0f }, "Compare FBX..."))
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 299.0f, 300.0f, 30.0f }, "Compare FBX..."))
         {
             compareFbxRequested = true;
             openMenu = OpenMenu::None;
         }
-        if (DrawMenuItem(font, Rectangle{ 8.0f, 269.0f, 270.0f, 30.0f }, "Exit        Ctrl+Q"))
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 329.0f, 300.0f, 30.0f }, "Exit        Ctrl+Q"))
         {
             quitRequested = true;
             openMenu = OpenMenu::None;

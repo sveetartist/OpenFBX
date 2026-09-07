@@ -1006,6 +1006,14 @@ int LoadOrmTexture(ModelTab& tab, int materialIndex, const std::string& path, st
 {
     int loadedCount = 0;
     error.clear();
+    EnsurePbrMaterialStates(tab);
+    if (materialIndex >= 0 && materialIndex < static_cast<int>(tab.pbrMaterials.size()))
+    {
+        PbrMaterialState& material = tab.pbrMaterials[static_cast<size_t>(materialIndex)];
+        material.aoChannel = PackedChannel::R;
+        material.roughnessChannel = PackedChannel::G;
+        material.metallicChannel = PackedChannel::B;
+    }
 
     for (PbrTextureSlot slot : { PbrTextureSlot::AmbientOcclusion, PbrTextureSlot::Roughness, PbrTextureSlot::Metallic })
     {
@@ -1191,11 +1199,38 @@ int LoadPbrTexturesFromFolder(ModelTab& tab, int materialIndex, const std::files
     error.clear();
     EnsurePbrMaterialStates(tab);
     const std::string materialName = materialIndex >= 0 && materialIndex < static_cast<int>(tab.loaded.materialNames.size()) ? tab.loaded.materialNames[static_cast<size_t>(materialIndex)] : std::string{};
+    std::string loadedOrmPath;
+    const std::string ormPath = FindAutoTexturePath(tab.path, directory, materialName, PbrTextureSlot::AmbientOcclusion);
+    if (!ormPath.empty() && IsOrmTextureName(ToLower(std::filesystem::path(ormPath).stem().string())))
+    {
+        std::string loadError;
+        const int ormLoadedCount = LoadOrmTexture(tab, materialIndex, ormPath, loadError);
+        if (ormLoadedCount > 0)
+        {
+            loadedCount += ormLoadedCount;
+            loadedOrmPath = ToLower(AbsoluteNormalizedPath(ormPath).string());
+            PbrMaterialState& material = tab.pbrMaterials[static_cast<size_t>(materialIndex)];
+            material.aoChannel = PackedChannel::R;
+            material.roughnessChannel = PackedChannel::G;
+            material.metallicChannel = PackedChannel::B;
+        }
+        else if (error.empty())
+        {
+            error = loadError;
+        }
+    }
+
     for (int i = 0; i < static_cast<int>(PbrTextureSlot::Count); ++i)
     {
         const PbrTextureSlot slot = static_cast<PbrTextureSlot>(i);
         const std::string path = FindAutoTexturePath(tab.path, directory, materialName, slot);
         if (path.empty()) continue;
+        if (!loadedOrmPath.empty() &&
+            (slot == PbrTextureSlot::AmbientOcclusion || slot == PbrTextureSlot::Roughness || slot == PbrTextureSlot::Metallic) &&
+            ToLower(AbsoluteNormalizedPath(path).string()) == loadedOrmPath)
+        {
+            continue;
+        }
 
         std::string loadError;
         if (LoadPbrTexture(tab, materialIndex, slot, path, loadError))

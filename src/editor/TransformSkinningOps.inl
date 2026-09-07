@@ -130,6 +130,11 @@ Vector3 ScaleNormalAlongAxis(Vector3 normal, Vector3 axis, float factor)
     return NormalizeOrFallback(Vector3Add(perpendicular, parallel), normal);
 }
 
+Vector3 NegateVector3(Vector3 value)
+{
+    return Vector3{ -value.x, -value.y, -value.z };
+}
+
 Vector3 EulerDegreesFromAxes(Vector3 axisX, Vector3 axisY, Vector3 axisZ)
 {
     Matrix rotationMatrix = MatrixIdentity();
@@ -290,6 +295,112 @@ void TransformDirectionBuffer(std::vector<float>& values, int startVertex, int v
     }
 }
 
+void FlipNormalBufferRange(std::vector<float>& values, int startVertex, int vertexCount)
+{
+    if (values.empty() || startVertex < 0 || vertexCount <= 0) return;
+    const int start = std::max(0, startVertex);
+    const int end = std::min(startVertex + vertexCount, static_cast<int>(values.size() / 3));
+    for (int vertex = start; vertex < end; ++vertex)
+    {
+        const size_t base = static_cast<size_t>(vertex) * 3;
+        values[base] = -values[base];
+        values[base + 1] = -values[base + 1];
+        values[base + 2] = -values[base + 2];
+    }
+}
+
+bool FlipMeshNormals(ModelTab& tab, int nodeIndex)
+{
+    if (nodeIndex < 0 ||
+        nodeIndex >= static_cast<int>(tab.loaded.nodes.size()) ||
+        IsDeletedNode(tab, nodeIndex))
+    {
+        return false;
+    }
+
+    const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(nodeIndex)];
+    if (node.type != SceneNodeType::Mesh ||
+        node.meshVertexStart < 0 ||
+        node.meshVertexCount <= 0 ||
+        tab.loaded.bindNormals.empty())
+    {
+        return false;
+    }
+
+    FlipNormalBufferRange(tab.loaded.bindNormals, node.meshVertexStart, node.meshVertexCount);
+    FlipNormalBufferRange(tab.currentNormals, node.meshVertexStart, node.meshVertexCount);
+    for (AnimationClip& clip : tab.loaded.animations)
+    {
+        for (MeshFrame& frame : clip.meshFrames)
+        {
+            FlipNormalBufferRange(frame.normals, node.meshVertexStart, node.meshVertexCount);
+        }
+    }
+
+    const int start = std::max(0, node.meshVertexStart);
+    const int end = std::min(node.meshVertexStart + node.meshVertexCount, static_cast<int>(tab.loaded.skinnedVertices.size()));
+    for (int vertex = start; vertex < end; ++vertex)
+    {
+        SkinnedVertex& skinned = tab.loaded.skinnedVertices[static_cast<size_t>(vertex)];
+        skinned.bindNormal = NegateVector3(skinned.bindNormal);
+        for (SkinnedVertexInfluence& influence : skinned.influences)
+        {
+            influence.bindNormalInBone = NegateVector3(influence.bindNormalInBone);
+        }
+    }
+
+    InvalidateDisplayedAnimationCaches(tab);
+    RefreshDisplayedMesh(tab);
+    return true;
+}
+
+bool SetMeshPivotToBoundsPoint(ModelTab& tab, int nodeIndex, bool bottom)
+{
+    if (nodeIndex < 0 ||
+        nodeIndex >= static_cast<int>(tab.loaded.nodes.size()) ||
+        IsDeletedNode(tab, nodeIndex))
+    {
+        return false;
+    }
+
+    SceneNode& node = tab.loaded.nodes[static_cast<size_t>(nodeIndex)];
+    if (node.type != SceneNodeType::Mesh ||
+        node.meshVertexStart < 0 ||
+        node.meshVertexCount <= 0)
+    {
+        return false;
+    }
+
+    RecomputeMeshNodeBounds(tab, node);
+    if (!node.hasBounds) return false;
+
+    Vector3 pivot{
+        (node.bounds.min.x + node.bounds.max.x) * 0.5f,
+        (node.bounds.min.y + node.bounds.max.y) * 0.5f,
+        (node.bounds.min.z + node.bounds.max.z) * 0.5f
+    };
+    if (bottom)
+    {
+        pivot.y = node.bounds.min.y;
+    }
+
+    if (Vector3Distance(node.position, pivot) <= 0.000001f) return false;
+
+    node.position = pivot;
+    RefreshDisplayedMesh(tab);
+    return true;
+}
+
+bool SetMeshPivotToBoundsCenter(ModelTab& tab, int nodeIndex)
+{
+    return SetMeshPivotToBoundsPoint(tab, nodeIndex, false);
+}
+
+bool SetMeshPivotToBoundsBottom(ModelTab& tab, int nodeIndex)
+{
+    return SetMeshPivotToBoundsPoint(tab, nodeIndex, true);
+}
+
 template <typename PointTransform, typename DirectionTransform>
 void TransformMeshNodeRange(ModelTab& tab, SceneNode& node, PointTransform transformPoint, DirectionTransform transformDirection)
 {
@@ -403,6 +514,61 @@ void RecomputeAllMeshNodeBounds(ModelTab& tab)
     RecomputeSceneBounds(tab);
 }
 
+bool StoreMeshFrameAsBindMesh(ModelTab& tab, const MeshFrame& meshFrame)
+{
+    if (!HasCpuSkinnedMesh(tab.loaded) ||
+        meshFrame.vertices.size() != tab.loaded.bindVertices.size() ||
+        meshFrame.normals.size() != tab.loaded.bindNormals.size())
+    {
+        return false;
+    }
+
+    tab.loaded.bindVertices = meshFrame.vertices;
+    tab.loaded.bindNormals = meshFrame.normals;
+
+    const int vertexCount = std::min(static_cast<int>(tab.loaded.skinnedVertices.size()),
+                                     static_cast<int>(tab.loaded.bindVertices.size() / 3));
+    for (int vertex = 0; vertex < vertexCount; ++vertex)
+    {
+        const size_t base = static_cast<size_t>(vertex) * 3;
+        SkinnedVertex& skinned = tab.loaded.skinnedVertices[static_cast<size_t>(vertex)];
+        skinned.bindPosition = Vector3{
+            tab.loaded.bindVertices[base],
+            tab.loaded.bindVertices[base + 1],
+            tab.loaded.bindVertices[base + 2]
+        };
+        skinned.bindNormal = NormalizeOrFallback(Vector3{
+            tab.loaded.bindNormals[base],
+            tab.loaded.bindNormals[base + 1],
+            tab.loaded.bindNormals[base + 2]
+        }, skinned.bindNormal);
+    }
+
+    return true;
+}
+
+bool BakeSkinnedBindMeshFromBones(ModelTab& tab, bool updateDisplayedMesh)
+{
+    if (!HasCpuSkinnedMesh(tab.loaded) || tab.loaded.bonePoses.empty()) return false;
+
+    // The FBX writer rebuilds control points from bindVertices, so keep that
+    // buffer aligned with the CPU-skinned bind pose after bone transform edits.
+    const MeshFrame meshFrame = BuildSkinnedMeshFrame(tab.loaded, BuildBindBoneFrame(tab.loaded));
+    if (!StoreMeshFrameAsBindMesh(tab, meshFrame)) return false;
+
+    if (updateDisplayedMesh)
+    {
+        tab.currentVertices = meshFrame.vertices;
+        tab.currentNormals = meshFrame.normals;
+        tab.manualSkinnedMeshPose = true;
+        RefreshDisplayedMesh(tab);
+    }
+
+    RecomputeAllMeshNodeBounds(tab);
+    InvalidateDisplayedAnimationCaches(tab);
+    return true;
+}
+
 bool RebuildCurrentSkinnedMeshFromBones(ModelTab& tab)
 {
     if (!HasCpuSkinnedMesh(tab.loaded) || tab.loaded.bonePoses.empty()) return false;
@@ -461,6 +627,114 @@ bool SetScaleToApplied(Vector3& scale)
     return true;
 }
 
+float GetAxesHandedness(Vector3 axisX, Vector3 axisY, Vector3 axisZ)
+{
+    return Vector3DotProduct(Vector3CrossProduct(axisX, axisY), axisZ);
+}
+
+bool NormalizeAppliedScaleAxes(SceneNode& node, Vector3 appliedScale)
+{
+    Vector3 axisX = NormalizeOrFallback(node.axisX, Vector3{ 1.0f, 0.0f, 0.0f });
+    Vector3 axisY = NormalizeOrFallback(node.axisY, Vector3{ 0.0f, 1.0f, 0.0f });
+    Vector3 axisZ = NormalizeOrFallback(node.axisZ, Vector3{ 0.0f, 0.0f, 1.0f });
+
+    if (appliedScale.x < 0.0f) axisX = NegateVector3(axisX);
+    if (appliedScale.y < 0.0f) axisY = NegateVector3(axisY);
+    if (appliedScale.z < 0.0f) axisZ = NegateVector3(axisZ);
+
+    if (GetAxesHandedness(axisX, axisY, axisZ) < 0.0f)
+    {
+        Vector3 rotationAxisX{};
+        Vector3 rotationAxisY{};
+        Vector3 rotationAxisZ{};
+        AxesFromEulerDegrees(node.rotation, rotationAxisX, rotationAxisY, rotationAxisZ);
+        axisX = rotationAxisX;
+        axisY = rotationAxisY;
+        axisZ = rotationAxisZ;
+    }
+
+    if (GetAxesHandedness(axisX, axisY, axisZ) < 0.0f)
+    {
+        axisX = NegateVector3(axisX);
+    }
+
+    const bool changed = Vector3Distance(node.axisX, axisX) > 0.000001f ||
+                         Vector3Distance(node.axisY, axisY) > 0.000001f ||
+                         Vector3Distance(node.axisZ, axisZ) > 0.000001f;
+    if (changed)
+    {
+        node.axisX = axisX;
+        node.axisY = axisY;
+        node.axisZ = axisZ;
+        node.rotation = EulerDegreesFromAxes(node.axisX, node.axisY, node.axisZ);
+    }
+    return changed;
+}
+
+void SyncMeshRangeToSkinnedBindFallbacks(LoadedFbxModel& loaded, const SceneNode& node)
+{
+    if (node.type != SceneNodeType::Mesh ||
+        node.meshVertexStart < 0 ||
+        node.meshVertexCount <= 0 ||
+        loaded.skinnedVertices.empty())
+    {
+        return;
+    }
+
+    const int start = std::max(0, node.meshVertexStart);
+    const int end = std::min(node.meshVertexStart + node.meshVertexCount, static_cast<int>(loaded.skinnedVertices.size()));
+    for (int vertex = start; vertex < end; ++vertex)
+    {
+        const size_t base = static_cast<size_t>(vertex) * 3;
+        if (base + 2 >= loaded.bindVertices.size() || base + 2 >= loaded.bindNormals.size()) continue;
+
+        SkinnedVertex& skinned = loaded.skinnedVertices[static_cast<size_t>(vertex)];
+        skinned.bindPosition = Vector3{
+            loaded.bindVertices[base],
+            loaded.bindVertices[base + 1],
+            loaded.bindVertices[base + 2]
+        };
+        skinned.bindNormal = NormalizeOrFallback(Vector3{
+            loaded.bindNormals[base],
+            loaded.bindNormals[base + 1],
+            loaded.bindNormals[base + 2]
+        }, skinned.bindNormal);
+    }
+}
+
+void PreserveAppliedMeshScaleGeometry(ModelTab& tab, SceneNode& node)
+{
+    if (node.type != SceneNodeType::Mesh ||
+        node.meshVertexStart < 0 ||
+        node.meshVertexCount <= 0 ||
+        tab.loaded.bindVertices.size() != tab.loaded.bindNormals.size())
+    {
+        return;
+    }
+
+    if (tab.animation.clipIndex < 0 &&
+        tab.currentVertices.size() == tab.loaded.bindVertices.size() &&
+        tab.currentNormals.size() == tab.loaded.bindNormals.size() &&
+        (!node.meshHasSkin || !HasCpuSkinnedMesh(tab.loaded)))
+    {
+        const int start = std::max(0, node.meshVertexStart);
+        const int end = std::min(node.meshVertexStart + node.meshVertexCount, static_cast<int>(tab.loaded.bindVertices.size() / 3));
+        for (int vertex = start; vertex < end; ++vertex)
+        {
+            const size_t base = static_cast<size_t>(vertex) * 3;
+            tab.loaded.bindVertices[base] = tab.currentVertices[base];
+            tab.loaded.bindVertices[base + 1] = tab.currentVertices[base + 1];
+            tab.loaded.bindVertices[base + 2] = tab.currentVertices[base + 2];
+            tab.loaded.bindNormals[base] = tab.currentNormals[base];
+            tab.loaded.bindNormals[base + 1] = tab.currentNormals[base + 1];
+            tab.loaded.bindNormals[base + 2] = tab.currentNormals[base + 2];
+        }
+    }
+
+    SyncMeshRangeToSkinnedBindFallbacks(tab.loaded, node);
+    RecomputeMeshNodeBounds(tab, node);
+}
+
 Vector3 MultiplyComponents(Vector3 a, Vector3 b)
 {
     return Vector3{ a.x * b.x, a.y * b.y, a.z * b.z };
@@ -497,6 +771,7 @@ bool ApplyScaleToNode(ModelTab& tab, int nodeIndex)
     SceneNode& node = tab.loaded.nodes[static_cast<size_t>(nodeIndex)];
     bool changed = false;
     Vector3 boneScaleToBake = node.scale;
+    const Vector3 appliedScale = node.scale;
 
     if (node.type == SceneNodeType::Bone)
     {
@@ -509,6 +784,11 @@ bool ApplyScaleToNode(ModelTab& tab, int nodeIndex)
             }
         }
         BakeBoneScaleIntoSkinBindData(tab, node, boneScaleToBake);
+    }
+    else if (node.type == SceneNodeType::Mesh)
+    {
+        PreserveAppliedMeshScaleGeometry(tab, node);
+        changed = NormalizeAppliedScaleAxes(node, appliedScale) || changed;
     }
 
     changed = SetScaleToApplied(node.scale) || changed;
@@ -538,8 +818,9 @@ bool ApplyScaleToNode(ModelTab& tab, int nodeIndex)
 
     if (node.type == SceneNodeType::Bone)
     {
+        const bool bakedBindMesh = BakeSkinnedBindMeshFromBones(tab, tab.animation.clipIndex < 0);
         RebuildSkinnedAnimationMeshFrames(tab);
-        if (tab.animation.clipIndex < 0 && RebuildCurrentSkinnedMeshFromBones(tab))
+        if (bakedBindMesh && tab.animation.clipIndex < 0)
         {
             return true;
         }
@@ -682,8 +963,9 @@ bool ResetBoneSubtreeToOriginalBindPose(ModelTab& tab, int rootNodeIndex)
         tab.visibleBones = tab.loaded.bones;
         tab.visibleBonePoses = tab.loaded.bonePoses;
     }
-    InvalidateDisplayedAnimationCaches(tab);
-    if (tab.animation.clipIndex < 0 && !RebuildCurrentSkinnedMeshFromBones(tab))
+    const bool bakedBindMesh = BakeSkinnedBindMeshFromBones(tab, tab.animation.clipIndex < 0);
+    RebuildSkinnedAnimationMeshFrames(tab);
+    if (!bakedBindMesh && tab.animation.clipIndex < 0 && !RebuildCurrentSkinnedMeshFromBones(tab))
     {
         RecomputeSceneBounds(tab);
         RefreshDisplayedMesh(tab);
@@ -766,8 +1048,9 @@ void ApplyTransformToSelectedSubtree(ModelTab& tab,
 
     if (touchedBoneRoot && canCpuSkin)
     {
+        const bool bakedBindMesh = BakeSkinnedBindMeshFromBones(tab, tab.animation.clipIndex < 0);
         RebuildSkinnedAnimationMeshFrames(tab);
-        if (!RebuildCurrentSkinnedMeshFromBones(tab))
+        if (!bakedBindMesh && !RebuildCurrentSkinnedMeshFromBones(tab))
         {
             RecomputeSceneBounds(tab);
             RefreshDisplayedMesh(tab);

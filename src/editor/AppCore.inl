@@ -68,8 +68,8 @@ constexpr float kMaxTransformGizmoScale = 2.0f;
 constexpr float kMinTransformGizmoLineWidth = 2.0f;
 constexpr float kMaxTransformGizmoLineWidth = 10.0f;
 constexpr float kNodeContextMenuW = 152.0f;
-constexpr float kNodeContextMenuBaseH = 92.0f;
-constexpr float kNodeContextMenuBoneH = 122.0f;
+constexpr float kNodeContextMenuBaseH = 122.0f;
+constexpr float kNodeContextMenuBoneH = 152.0f;
 float gBottomPanelReservedHeight = kTimelinePanelHeight;
 float gTransformGizmoScale = 1.0f;
 float gTransformGizmoLineWidth = 6.0f;
@@ -818,6 +818,9 @@ void ClearNodeSelection(ModelTab& tab);
 void SetSingleSelectedNode(ModelTab& tab, int nodeIndex);
 void SelectNode(ModelTab& tab, int nodeIndex, bool additive);
 bool ApplyScaleToNode(ModelTab& tab, int nodeIndex);
+bool FlipMeshNormals(ModelTab& tab, int nodeIndex);
+bool SetMeshPivotToBoundsCenter(ModelTab& tab, int nodeIndex);
+bool SetMeshPivotToBoundsBottom(ModelTab& tab, int nodeIndex);
 bool ResetBoneSubtreeToOriginalBindPose(ModelTab& tab, int rootNodeIndex);
 std::vector<int> GetSelectedTransformRoots(const ModelTab& tab);
 void InvalidateDisplayedAnimationCaches(ModelTab& tab);
@@ -912,6 +915,530 @@ void UnloadPbrTextures(ModelTab& tab)
             UnloadPbrTexture(tab, materialIndex, static_cast<PbrTextureSlot>(i));
         }
     }
+}
+
+FbxTextureUsage ToFbxTextureUsage(PbrTextureSlot slot)
+{
+    switch (slot)
+    {
+    case PbrTextureSlot::Diffuse: return FbxTextureUsage::Diffuse;
+    case PbrTextureSlot::Normal: return FbxTextureUsage::Normal;
+    case PbrTextureSlot::Roughness: return FbxTextureUsage::Roughness;
+    case PbrTextureSlot::Metallic: return FbxTextureUsage::Metallic;
+    case PbrTextureSlot::AmbientOcclusion: return FbxTextureUsage::AmbientOcclusion;
+    case PbrTextureSlot::Emissive: return FbxTextureUsage::Emissive;
+    case PbrTextureSlot::Opacity: return FbxTextureUsage::Opacity;
+    case PbrTextureSlot::Count: break;
+    }
+    return FbxTextureUsage::Diffuse;
+}
+
+PbrTextureSlot ToPbrTextureSlot(FbxTextureUsage usage)
+{
+    switch (usage)
+    {
+    case FbxTextureUsage::Diffuse: return PbrTextureSlot::Diffuse;
+    case FbxTextureUsage::Normal: return PbrTextureSlot::Normal;
+    case FbxTextureUsage::Roughness: return PbrTextureSlot::Roughness;
+    case FbxTextureUsage::Metallic: return PbrTextureSlot::Metallic;
+    case FbxTextureUsage::AmbientOcclusion: return PbrTextureSlot::AmbientOcclusion;
+    case FbxTextureUsage::Emissive: return PbrTextureSlot::Emissive;
+    case FbxTextureUsage::Opacity: return PbrTextureSlot::Opacity;
+    }
+    return PbrTextureSlot::Diffuse;
+}
+
+std::string ToLowerAscii(std::string value)
+{
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value;
+}
+
+std::string CompactAsciiName(std::string value)
+{
+    value = ToLowerAscii(std::move(value));
+    value.erase(std::remove_if(value.begin(), value.end(), [](unsigned char c)
+    {
+        return !std::isalnum(c);
+    }), value.end());
+    return value;
+}
+
+bool LowerStemHasToken(const std::string& lowerStem, const char* token)
+{
+    const std::string value(token);
+    size_t position = lowerStem.find(value);
+    while (position != std::string::npos)
+    {
+        const bool startsOnBoundary = position == 0 || !std::isalnum(static_cast<unsigned char>(lowerStem[position - 1]));
+        const size_t end = position + value.size();
+        const bool endsOnBoundary = end >= lowerStem.size() || !std::isalnum(static_cast<unsigned char>(lowerStem[end]));
+        if (startsOnBoundary && endsOnBoundary) return true;
+        position = lowerStem.find(value, position + 1);
+    }
+    return false;
+}
+
+bool IsOrmTextureStem(const std::string& lowerStem)
+{
+    const std::string compactStem = CompactAsciiName(lowerStem);
+    return LowerStemHasToken(lowerStem, "orm") ||
+           lowerStem.find("occlusionroughnessmetallic") != std::string::npos ||
+           lowerStem.find("occlusion_roughness_metallic") != std::string::npos ||
+           lowerStem.find("occlusion-roughness-metallic") != std::string::npos ||
+           lowerStem.find("ao_roughness_metallic") != std::string::npos ||
+           lowerStem.find("ao-roughness-metallic") != std::string::npos ||
+           compactStem.find("occlusionroughnessmetallic") != std::string::npos ||
+           compactStem.find("aoroughnessmetallic") != std::string::npos;
+}
+
+bool IsOrmTexturePath(const std::string& path)
+{
+    return IsOrmTextureStem(ToLowerAscii(std::filesystem::path(path).stem().string()));
+}
+
+bool IsOrmTextureReference(const FbxTextureReference& reference)
+{
+    return IsOrmTexturePath(!reference.relativePath.empty() ? reference.relativePath : reference.filePath);
+}
+
+bool IsOrmPackedPbrSlot(PbrTextureSlot slot)
+{
+    return slot == PbrTextureSlot::AmbientOcclusion ||
+           slot == PbrTextureSlot::Roughness ||
+           slot == PbrTextureSlot::Metallic;
+}
+
+std::filesystem::path AbsoluteNormalizedPath(const std::filesystem::path& path)
+{
+    std::error_code pathError;
+    std::filesystem::path result = std::filesystem::weakly_canonical(path, pathError);
+    if (!pathError) return result.lexically_normal();
+
+    result = std::filesystem::absolute(path, pathError);
+    if (!pathError) return result.lexically_normal();
+
+    return path.lexically_normal();
+}
+
+std::filesystem::path MakeUniquePackageTextureName(const std::filesystem::path& sourcePath, std::unordered_map<std::string, bool>& usedNames)
+{
+    std::filesystem::path filename = sourcePath.filename();
+    if (filename.empty())
+    {
+        filename = "texture";
+        filename += sourcePath.extension();
+    }
+
+    const std::string stem = filename.stem().string().empty() ? "texture" : filename.stem().string();
+    const std::string extension = filename.extension().string();
+    for (int suffix = 0; suffix < 10000; ++suffix)
+    {
+        std::filesystem::path candidate = suffix == 0
+            ? std::filesystem::path(stem + extension)
+            : std::filesystem::path(stem + "_" + std::to_string(suffix + 1) + extension);
+        const std::string key = ToLowerAscii(candidate.string());
+        if (!usedNames[key])
+        {
+            usedNames[key] = true;
+            return candidate;
+        }
+    }
+
+    return std::filesystem::path(stem + "_copy" + extension);
+}
+
+std::string GetMaterialNameForPackage(const ModelTab& tab, int materialIndex)
+{
+    if (materialIndex >= 0 && materialIndex < static_cast<int>(tab.loaded.materialNames.size()))
+    {
+        const std::string& materialName = tab.loaded.materialNames[static_cast<size_t>(materialIndex)];
+        if (!materialName.empty()) return materialName;
+    }
+    return "Material " + std::to_string(materialIndex + 1);
+}
+
+void AddPackageTextureReference(std::vector<FbxTextureReference>& textureReferences,
+                                const std::string& materialName,
+                                PbrTextureSlot slot,
+                                const std::filesystem::path& sourcePath,
+                                const std::string& relativePath)
+{
+    FbxTextureReference reference;
+    reference.materialName = materialName;
+    reference.usage = ToFbxTextureUsage(slot);
+    reference.filePath = AbsoluteNormalizedPath(sourcePath).string();
+    reference.relativePath = relativePath;
+    textureReferences.push_back(reference);
+}
+
+int FindMaterialIndexByName(const ModelTab& tab, const std::string& materialName)
+{
+    for (int materialIndex = 0; materialIndex < static_cast<int>(tab.loaded.materialNames.size()); ++materialIndex)
+    {
+        if (tab.loaded.materialNames[static_cast<size_t>(materialIndex)] == materialName)
+        {
+            return materialIndex;
+        }
+    }
+    return -1;
+}
+
+int LoadOrmPbrTexture(ModelTab& tab,
+                      int materialIndex,
+                      const std::string& path,
+                      std::unordered_map<std::string, bool>& loadedSlots,
+                      std::string& error)
+{
+    int loadedCount = 0;
+    error.clear();
+    if (materialIndex < 0 || materialIndex >= static_cast<int>(tab.pbrMaterials.size())) return 0;
+
+    PbrMaterialState& material = tab.pbrMaterials[static_cast<size_t>(materialIndex)];
+    material.aoChannel = PackedChannel::R;
+    material.roughnessChannel = PackedChannel::G;
+    material.metallicChannel = PackedChannel::B;
+
+    const PbrTextureSlot slots[] = {
+        PbrTextureSlot::AmbientOcclusion,
+        PbrTextureSlot::Roughness,
+        PbrTextureSlot::Metallic
+    };
+
+    for (PbrTextureSlot slot : slots)
+    {
+        const std::string slotKey = std::to_string(materialIndex) + "|" + std::to_string(static_cast<int>(slot));
+        if (loadedSlots[slotKey]) continue;
+
+        std::string loadError;
+        if (LoadPbrTexture(tab, materialIndex, slot, path, loadError))
+        {
+            loadedSlots[slotKey] = true;
+            ++loadedCount;
+        }
+        else if (error.empty())
+        {
+            error = loadError;
+        }
+    }
+
+    return loadedCount;
+}
+
+int LoadImportedPbrTextures(ModelTab& tab, std::string& error)
+{
+    error.clear();
+    EnsurePbrMaterialStates(tab);
+
+    int loadedCount = 0;
+    std::unordered_map<std::string, bool> loadedSlots;
+    for (const FbxTextureReference& reference : tab.loaded.textureReferences)
+    {
+        const int materialIndex = FindMaterialIndexByName(tab, reference.materialName);
+        if (materialIndex < 0 || materialIndex >= static_cast<int>(tab.pbrMaterials.size())) continue;
+        if (reference.filePath.empty()) continue;
+
+        if (IsOrmTextureReference(reference))
+        {
+            std::string loadError;
+            const int ormLoadedCount = LoadOrmPbrTexture(tab, materialIndex, reference.filePath, loadedSlots, loadError);
+            loadedCount += ormLoadedCount;
+            if (ormLoadedCount == 0 && error.empty())
+            {
+                error = loadError;
+            }
+            continue;
+        }
+
+        const PbrTextureSlot slot = ToPbrTextureSlot(reference.usage);
+        const std::string slotKey = std::to_string(materialIndex) + "|" + std::to_string(static_cast<int>(slot));
+        if (loadedSlots[slotKey]) continue;
+
+        std::string loadError;
+        if (LoadPbrTexture(tab, materialIndex, slot, reference.filePath, loadError))
+        {
+            loadedSlots[slotKey] = true;
+            ++loadedCount;
+        }
+        else if (error.empty())
+        {
+            error = loadError;
+        }
+    }
+
+    return loadedCount;
+}
+
+std::filesystem::path MakePackagedFbxPath(const std::string& sourcePath)
+{
+    std::filesystem::path source(sourcePath);
+    if (source.empty()) return {};
+
+    const std::filesystem::path directory = source.parent_path().empty()
+        ? std::filesystem::current_path()
+        : source.parent_path();
+    const std::string stem = source.stem().string().empty() ? "packaged" : source.stem().string();
+
+    for (int suffix = 0; suffix < 10000; ++suffix)
+    {
+        const std::string fileName = suffix == 0
+            ? stem + "_packaged.fbx"
+            : stem + "_packaged_" + std::to_string(suffix + 1) + ".fbx";
+        std::filesystem::path candidate = directory / fileName;
+
+        std::error_code existsError;
+        if (!std::filesystem::exists(candidate, existsError) && !existsError)
+        {
+            return candidate;
+        }
+    }
+
+    return directory / (stem + "_packaged_copy.fbx");
+}
+
+std::filesystem::path MakeExtractedTextureDirectory(const std::string& sourcePath)
+{
+    std::filesystem::path source(sourcePath);
+    if (source.empty()) return {};
+
+    const std::filesystem::path directory = source.parent_path().empty()
+        ? std::filesystem::current_path()
+        : source.parent_path();
+    const std::string stem = source.stem().string().empty() ? "fbx" : source.stem().string();
+
+    for (int suffix = 0; suffix < 10000; ++suffix)
+    {
+        const std::string folderName = suffix == 0
+            ? stem + "_textures"
+            : stem + "_textures_" + std::to_string(suffix + 1);
+        const std::filesystem::path candidate = directory / folderName;
+
+        std::error_code existsError;
+        if (!std::filesystem::exists(candidate, existsError) && !existsError)
+        {
+            return candidate;
+        }
+    }
+
+    return directory / (stem + "_textures_copy");
+}
+
+std::filesystem::path MakeExtractedFbxPath(const std::string& sourcePath)
+{
+    std::filesystem::path source(sourcePath);
+    if (source.empty()) return {};
+
+    const std::filesystem::path directory = source.parent_path().empty()
+        ? std::filesystem::current_path()
+        : source.parent_path();
+    const std::string stem = source.stem().string().empty() ? "fbx" : source.stem().string();
+
+    for (int suffix = 0; suffix < 10000; ++suffix)
+    {
+        const std::string fileName = suffix == 0
+            ? stem + "_extracted.fbx"
+            : stem + "_extracted_" + std::to_string(suffix + 1) + ".fbx";
+        const std::filesystem::path candidate = directory / fileName;
+
+        std::error_code existsError;
+        if (!std::filesystem::exists(candidate, existsError) && !existsError)
+        {
+            return candidate;
+        }
+    }
+
+    return directory / (stem + "_extracted_copy.fbx");
+}
+
+bool CollectPackageTextures(ModelTab& tab,
+                            std::vector<FbxTextureReference>& textureReferences,
+                            int& embeddedTextureCount,
+                            std::string& error)
+{
+    textureReferences.clear();
+    embeddedTextureCount = 0;
+    error.clear();
+
+    EnsurePbrMaterialStates(tab);
+
+    std::unordered_map<std::string, std::string> relativeBySource;
+    std::unordered_map<std::string, bool> usedPackageNames;
+
+    for (int materialIndex = 0; materialIndex < static_cast<int>(tab.pbrMaterials.size()); ++materialIndex)
+    {
+        const std::string materialName = GetMaterialNameForPackage(tab, materialIndex);
+        const PbrMaterialState& material = tab.pbrMaterials[static_cast<size_t>(materialIndex)];
+        std::unordered_map<std::string, bool> exportedOrmSources;
+
+        for (int slotIndex = 0; slotIndex < static_cast<int>(PbrTextureSlot::Count); ++slotIndex)
+        {
+            const PbrTextureSlot slot = static_cast<PbrTextureSlot>(slotIndex);
+            const PbrTexture& texture = GetPbrTexture(material, slot);
+            if (!texture.loaded || texture.path.empty()) continue;
+
+            const std::filesystem::path sourcePath(texture.path);
+            std::error_code existsError;
+            if (!std::filesystem::exists(sourcePath, existsError) || existsError)
+            {
+                error = "Missing texture file: " + texture.path;
+                return false;
+            }
+
+            const std::string sourceKey = ToLowerAscii(AbsoluteNormalizedPath(sourcePath).string());
+            auto relativeFound = relativeBySource.find(sourceKey);
+            if (relativeFound == relativeBySource.end())
+            {
+                const std::filesystem::path packageName = MakeUniquePackageTextureName(sourcePath, usedPackageNames);
+                const std::string relativePath = packageName.generic_string();
+                relativeBySource[sourceKey] = relativePath;
+                ++embeddedTextureCount;
+                relativeFound = relativeBySource.find(sourceKey);
+            }
+
+            if (IsOrmPackedPbrSlot(slot) && IsOrmTexturePath(sourcePath.string()))
+            {
+                if (exportedOrmSources[sourceKey]) continue;
+
+                exportedOrmSources[sourceKey] = true;
+                AddPackageTextureReference(textureReferences, materialName, PbrTextureSlot::AmbientOcclusion, sourcePath, relativeFound->second);
+                AddPackageTextureReference(textureReferences, materialName, PbrTextureSlot::Roughness, sourcePath, relativeFound->second);
+                AddPackageTextureReference(textureReferences, materialName, PbrTextureSlot::Metallic, sourcePath, relativeFound->second);
+                continue;
+            }
+
+            AddPackageTextureReference(textureReferences, materialName, slot, sourcePath, relativeFound->second);
+        }
+    }
+
+    return true;
+}
+
+bool ExtractPackagedFbxTextures(const ModelTab& tab, std::string& notice, std::string& error)
+{
+    notice.clear();
+    error.clear();
+    if (tab.path.empty())
+    {
+        error = "Missing source FBX path.";
+        return false;
+    }
+
+    const std::filesystem::path outputDirectory = MakeExtractedTextureDirectory(tab.path);
+    if (outputDirectory.empty())
+    {
+        error = "Failed to choose texture extraction folder.";
+        return false;
+    }
+
+    std::error_code directoryError;
+    std::filesystem::create_directories(outputDirectory, directoryError);
+    if (directoryError)
+    {
+        error = "Failed to create texture extraction folder: " + outputDirectory.string();
+        return false;
+    }
+
+    std::unordered_map<std::string, std::filesystem::path> copiedBySource;
+    std::unordered_map<std::string, bool> usedNames;
+    std::vector<FbxTextureReference> extractedTextureReferences;
+    int copiedCount = 0;
+    for (const FbxTextureReference& reference : tab.loaded.textureReferences)
+    {
+        if (reference.filePath.empty()) continue;
+
+        const std::filesystem::path sourcePath(reference.filePath);
+        std::error_code existsError;
+        if (!std::filesystem::is_regular_file(sourcePath, existsError) || existsError) continue;
+
+        const std::string sourceKey = ToLowerAscii(AbsoluteNormalizedPath(sourcePath).string());
+        auto copiedFound = copiedBySource.find(sourceKey);
+
+        if (copiedFound == copiedBySource.end())
+        {
+            const std::filesystem::path preferredName = reference.relativePath.empty()
+                ? sourcePath.filename()
+                : std::filesystem::path(reference.relativePath).filename();
+            const std::filesystem::path textureName = MakeUniquePackageTextureName(preferredName.empty() ? sourcePath : preferredName, usedNames);
+            const std::filesystem::path targetPath = outputDirectory / textureName;
+
+            std::error_code copyError;
+            std::filesystem::copy_file(sourcePath, targetPath, std::filesystem::copy_options::none, copyError);
+            if (copyError)
+            {
+                error = "Failed to extract texture: " + sourcePath.string();
+                return false;
+            }
+
+            copiedBySource[sourceKey] = targetPath;
+            copiedFound = copiedBySource.find(sourceKey);
+            ++copiedCount;
+        }
+
+        if (copiedFound == copiedBySource.end()) continue;
+
+        FbxTextureReference extractedReference = reference;
+        extractedReference.filePath = AbsoluteNormalizedPath(copiedFound->second).string();
+        extractedReference.relativePath = (outputDirectory.filename() / copiedFound->second.filename()).generic_string();
+        extractedTextureReferences.push_back(extractedReference);
+    }
+
+    if (copiedCount == 0)
+    {
+        error = "No embedded/imported textures found to extract.";
+        return false;
+    }
+
+    const std::filesystem::path outputFbx = MakeExtractedFbxPath(tab.path);
+    if (outputFbx.empty())
+    {
+        error = "Failed to choose extracted FBX path.";
+        return false;
+    }
+
+    std::string saveError;
+    const std::string outputFbxString = outputFbx.string();
+    if (!SaveFbxModelAnimations(tab.path, outputFbxString, tab.loaded, tab.deletedNodes, extractedTextureReferences, false, true, saveError))
+    {
+        error = saveError;
+        return false;
+    }
+
+    notice = "Extracted " + std::to_string(copiedCount) + " texture file" + (copiedCount == 1 ? " and unpacked FBX: " : "s and unpacked FBX: ") + outputFbxString;
+    return true;
+}
+
+bool PackageFbxWithTextures(ModelTab& tab, std::string& notice, std::string& error)
+{
+    const std::filesystem::path outputPath = MakePackagedFbxPath(tab.path);
+    if (outputPath.empty())
+    {
+        error = "Missing source FBX path.";
+        notice.clear();
+        return false;
+    }
+
+    std::vector<FbxTextureReference> textureReferences;
+    int embeddedTextureCount = 0;
+    if (!CollectPackageTextures(tab, textureReferences, embeddedTextureCount, error))
+    {
+        notice.clear();
+        return false;
+    }
+
+    std::string saveError;
+    const std::string outputPathString = outputPath.string();
+    if (!SaveFbxModelAnimations(tab.path, outputPathString, tab.loaded, tab.deletedNodes, textureReferences, true, true, saveError))
+    {
+        error = saveError;
+        notice.clear();
+        return false;
+    }
+
+    notice = embeddedTextureCount == 0
+        ? "Packaged FBX (no loaded textures): " + outputPathString
+        : "Packaged FBX with " + std::to_string(embeddedTextureCount) + " embedded texture file" + (embeddedTextureCount == 1 ? ": " : "s: ") + outputPathString;
+    error.clear();
+    return true;
 }
 
 EditSnapshot CaptureEditSnapshot(const ModelTab& tab)

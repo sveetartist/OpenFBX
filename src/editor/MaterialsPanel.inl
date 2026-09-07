@@ -526,7 +526,8 @@ void DrawPbrTextureRow(Font font,
                        bool& droppedTextureHandled,
                        TextureClipboard& clipboard,
                        std::string& notice,
-                       std::string& error)
+                       std::string& error,
+                       bool inputBlocked)
 {
     const float contentX = panelX + 12.0f;
     EnsurePbrMaterialStates(tab);
@@ -534,9 +535,9 @@ void DrawPbrTextureRow(Font font,
     const PbrTexture& texture = GetPbrTexture(material, slot);
     const Rectangle thumbnail{ contentX, y - 2.0f, 44.0f, 44.0f };
     const bool thumbnailHovered = CheckCollisionPointRec(GetMousePosition(), thumbnail);
-    DrawTextureThumbnail(font, thumbnail, texture, thumbnailHovered && !droppedPaths.empty());
+    DrawTextureThumbnail(font, thumbnail, texture, !inputBlocked && thumbnailHovered && !droppedPaths.empty());
 
-    if (!droppedTextureHandled && thumbnailHovered)
+    if (!inputBlocked && !droppedTextureHandled && thumbnailHovered)
     {
         for (const std::string& droppedPath : droppedPaths)
         {
@@ -584,7 +585,7 @@ void DrawPbrTextureRow(Font font,
         }
     }
 
-    if (thumbnailHovered && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT))
+    if (!inputBlocked && thumbnailHovered && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT))
     {
         clipboard.menuOpen = true;
         clipboard.justOpened = true;
@@ -603,7 +604,7 @@ void DrawPbrTextureRow(Font font,
         PackedChannel* channel = slot == PbrTextureSlot::Roughness ? &material.roughnessChannel :
                                  slot == PbrTextureSlot::Metallic ? &material.metallicChannel : &material.aoChannel;
         const Rectangle channelButton{ buttonRight - 38.0f, y - 2.0f, 34.0f, 22.0f };
-        if (DrawChannelButton(font, channelButton, *channel))
+        if (!inputBlocked && DrawChannelButton(font, channelButton, *channel))
         {
             PushUndoSnapshot(tab);
             *channel = NextPackedChannel(*channel);
@@ -613,7 +614,7 @@ void DrawPbrTextureRow(Font font,
     else if (slot == PbrTextureSlot::Opacity)
     {
         const Rectangle channelButton{ buttonRight - 48.0f, y - 2.0f, 44.0f, 22.0f };
-        if (DrawPanelButton(font, channelButton, GetOpacityChannelName(material.opacityChannel)))
+        if (!inputBlocked && DrawPanelButton(font, channelButton, GetOpacityChannelName(material.opacityChannel)))
         {
             PushUndoSnapshot(tab);
             material.opacityChannel = NextOpacityChannel(material.opacityChannel);
@@ -623,17 +624,21 @@ void DrawPbrTextureRow(Font font,
 
     const Rectangle clearButton{ buttonRight - 48.0f, y - 2.0f, 48.0f, 22.0f };
     const Rectangle loadButton{ buttonRight - 102.0f, y - 2.0f, 48.0f, 22.0f };
-    if (DrawPanelButton(font, loadButton, "Load"))
+    if (!inputBlocked && DrawPanelButton(font, loadButton, "Load"))
     {
         const std::string path = OpenTextureFileDialog();
         if (!path.empty())
         {
             EditSnapshot before = CaptureEditSnapshot(tab);
             std::string loadError;
-            if (LoadPbrTexture(tab, materialIndex, slot, path, loadError))
+            const bool shouldLoadOrm = IsOrmPackedPbrSlot(slot) && IsOrmTexturePath(path);
+            const int loadedCount = shouldLoadOrm ? LoadOrmTexture(tab, materialIndex, path, loadError) : 0;
+            if ((shouldLoadOrm && loadedCount > 0) || (!shouldLoadOrm && LoadPbrTexture(tab, materialIndex, slot, path, loadError)))
             {
                 PushUndoSnapshot(tab, std::move(before));
-                notice = std::string("Loaded ") + GetPbrTextureSlotName(slot) + ": " + path;
+                notice = shouldLoadOrm
+                    ? "Loaded ORM texture to AO, Roughness, and Metallic: " + path
+                    : std::string("Loaded ") + GetPbrTextureSlotName(slot) + ": " + path;
                 error.clear();
             }
             else
@@ -643,7 +648,7 @@ void DrawPbrTextureRow(Font font,
             }
         }
     }
-    if (DrawPanelButton(font, clearButton, "Clear"))
+    if (!inputBlocked && DrawPanelButton(font, clearButton, "Clear"))
     {
         if (texture.loaded)
         {
@@ -668,7 +673,8 @@ void DrawMaterialsPanel(Font font,
                         bool& droppedTextureHandled,
                         TextureClipboard& clipboard,
                         std::string& notice,
-                        std::string& error)
+                        std::string& error,
+                        bool inputBlocked)
 {
     EnsurePbrMaterialStates(tab);
     const float contentX = panelX + 12.0f;
@@ -687,7 +693,7 @@ void DrawMaterialsPanel(Font font,
         DrawRectangleRec(row, selected ? Color{ 48, 70, 92, 255 } : hovered ? Color{ 34, 39, 45, 255 } : Color{ 24, 27, 31, 220 });
         const std::string name = i < static_cast<int>(tab.loaded.materialNames.size()) ? tab.loaded.materialNames[static_cast<size_t>(i)] : std::string("Material ") + std::to_string(i + 1);
         DrawUiTextClipped(font, name.c_str(), row.x + 8.0f, row.y + 3.0f, 14.0f, row.width - 16.0f, selected ? RAYWHITE : Color{ 185, 195, 205, 255 });
-        if (hovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+        if (!inputBlocked && hovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
         {
             tab.selectedMaterial = i;
         }
@@ -698,7 +704,7 @@ void DrawMaterialsPanel(Font font,
     const float clearAllW = 74.0f;
     const Rectangle loadFolderButton{ contentX, y, panelW - 30.0f - clearAllW, 24.0f };
     const Rectangle clearAllButton{ contentX + loadFolderButton.width + 6.0f, y, clearAllW, 24.0f };
-    if (DrawPanelButton(font, loadFolderButton, "Load Textures From Folder"))
+    if (!inputBlocked && DrawPanelButton(font, loadFolderButton, "Load Textures From Folder"))
     {
         const std::string pickedPath = OpenTextureFileDialog();
         std::string autoloadError;
@@ -721,7 +727,7 @@ void DrawMaterialsPanel(Font font,
             error.clear();
         }
     }
-    if (DrawPanelButton(font, clearAllButton, "Clear All"))
+    if (!inputBlocked && DrawPanelButton(font, clearAllButton, "Clear All"))
     {
         bool hadAnyTexture = false;
         for (int i = 0; i < static_cast<int>(PbrTextureSlot::Count); ++i)
@@ -745,23 +751,26 @@ void DrawMaterialsPanel(Font font,
     }
     y += 34.0f;
 
-    DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Diffuse, panelX, panelW, y, droppedPaths, droppedTextureHandled, clipboard, notice, error);
-    DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Normal, panelX, panelW, y, droppedPaths, droppedTextureHandled, clipboard, notice, error);
+    DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Diffuse, panelX, panelW, y, droppedPaths, droppedTextureHandled, clipboard, notice, error, inputBlocked);
+    DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Normal, panelX, panelW, y, droppedPaths, droppedTextureHandled, clipboard, notice, error, inputBlocked);
 
     const Rectangle normalModeButton{ contentX + 112.0f, y - 2.0f, panelW - 136.0f, 22.0f };
     DrawUiText(font, "Normal mode", contentX, y, 14.0f, Color{ 190, 200, 210, 255 });
-    if (DrawPanelButton(font, normalModeButton, material.normalDirectX ? "DirectX" : "OpenGL"))
+    if (!inputBlocked && DrawPanelButton(font, normalModeButton, material.normalDirectX ? "DirectX" : "OpenGL"))
     {
         PushUndoSnapshot(tab);
         material.normalDirectX = !material.normalDirectX;
     }
     y += 32.0f;
 
-    DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Roughness, panelX, panelW, y, droppedPaths, droppedTextureHandled, clipboard, notice, error);
-    DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Metallic, panelX, panelW, y, droppedPaths, droppedTextureHandled, clipboard, notice, error);
-    DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::AmbientOcclusion, panelX, panelW, y, droppedPaths, droppedTextureHandled, clipboard, notice, error);
-    DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Emissive, panelX, panelW, y, droppedPaths, droppedTextureHandled, clipboard, notice, error);
-    DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Opacity, panelX, panelW, y, droppedPaths, droppedTextureHandled, clipboard, notice, error);
-    DrawTextureContextMenu(font, tab, clipboard, notice, error);
+    DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Roughness, panelX, panelW, y, droppedPaths, droppedTextureHandled, clipboard, notice, error, inputBlocked);
+    DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Metallic, panelX, panelW, y, droppedPaths, droppedTextureHandled, clipboard, notice, error, inputBlocked);
+    DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::AmbientOcclusion, panelX, panelW, y, droppedPaths, droppedTextureHandled, clipboard, notice, error, inputBlocked);
+    DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Emissive, panelX, panelW, y, droppedPaths, droppedTextureHandled, clipboard, notice, error, inputBlocked);
+    DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Opacity, panelX, panelW, y, droppedPaths, droppedTextureHandled, clipboard, notice, error, inputBlocked);
+    if (!inputBlocked)
+    {
+        DrawTextureContextMenu(font, tab, clipboard, notice, error);
+    }
 }
 

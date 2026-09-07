@@ -2,9 +2,11 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <functional>
 #include <limits>
 #include <memory>
 #include <unordered_map>
@@ -41,10 +43,12 @@ struct MeshBuilder
     std::vector<float> texcoords;
     std::vector<std::string> uvSetNames;
     std::vector<std::vector<float>> uvSets;
+    std::vector<FbxTextureReference> textureReferences;
     std::vector<SkinnedVertex> skinnedVertices;
     std::vector<unsigned int> indices;
     std::vector<RenderVertexRef> renderVertices;
     std::vector<int> vertexMaterialIndices;
+    std::vector<int> polygonVertexGlobalIndices;
     std::vector<MeshEdge> polygonEdges;
     std::vector<std::string> materialNames;
     std::unordered_map<std::string, int> materialNameToIndex;
@@ -106,6 +110,15 @@ struct SkinBindData
 FbxVector4 TransformVector(const FbxAMatrix& matrix, FbxVector4 vector);
 SkinBindData BuildSkinBindData(FbxNode* node, FbxMesh* mesh);
 FbxAMatrix MatrixFromPose(const BonePose& pose);
+std::filesystem::path MakeEmbeddedTextureExtractionDirectory(const std::string& modelPath);
+std::filesystem::path MakeUniqueEmbeddedTextureExtractionDirectory(const std::string& modelPath);
+std::filesystem::path MakeSaveEmbeddedTextureExtractionDirectory(const std::string& modelPath);
+void RemoveEmbeddedTextureExtractionDirectory(const std::filesystem::path& directory);
+void CollectImportedTextureReferences(FbxScene* scene,
+                                      const std::string& modelPath,
+                                      const std::filesystem::path& extractionDirectory,
+                                      MeshBuilder& out);
+const char* GetTextureUsagePropertyName(FbxTextureUsage usage);
 
 void ExpandBounds(BoundingBox& bounds, Vector3 p, bool& hasBounds)
 {
@@ -375,6 +388,7 @@ void AppendMesh(FbxNode* node, FbxMesh* mesh, MeshBuilder& out)
     const int polygonCount = mesh->GetPolygonCount();
     if (polygonCount <= 0) return;
     const int meshVertexStart = out.VertexCount();
+    const int meshPolygonVertexStart = static_cast<int>(out.polygonVertexGlobalIndices.size());
     const auto nodeIndexFound = out.nodeToIndex.find(node);
     const int sceneNodeIndex = nodeIndexFound != out.nodeToIndex.end() ? nodeIndexFound->second : -1;
 
@@ -525,6 +539,8 @@ void AppendMesh(FbxNode* node, FbxMesh* mesh, MeshBuilder& out)
         {
             for (int vertex = 0; vertex < polygonSize; ++vertex)
             {
+                out.polygonVertexGlobalIndices.push_back(polygonCornerVertices[static_cast<size_t>(vertex)]);
+
                 const int a = polygonCornerVertices[static_cast<size_t>(vertex)];
                 const int b = polygonCornerVertices[static_cast<size_t>((vertex + 1) % polygonSize)];
                 if (a >= 0 && b >= 0 && a != b)
@@ -538,12 +554,18 @@ void AppendMesh(FbxNode* node, FbxMesh* mesh, MeshBuilder& out)
     const int meshVertexCount = out.VertexCount() - meshVertexStart;
     if (meshVertexCount > 0 && sceneNodeIndex >= 0)
     {
+        const int meshPolygonVertexCount = static_cast<int>(out.polygonVertexGlobalIndices.size()) - meshPolygonVertexStart;
         SceneNode& sceneNode = out.nodes[static_cast<size_t>(sceneNodeIndex)];
         if (sceneNode.meshVertexStart < 0)
         {
             sceneNode.meshVertexStart = meshVertexStart;
         }
+        if (sceneNode.meshPolygonVertexStart < 0)
+        {
+            sceneNode.meshPolygonVertexStart = meshPolygonVertexStart;
+        }
         sceneNode.meshVertexCount += meshVertexCount;
+        sceneNode.meshPolygonVertexCount += meshPolygonVertexCount;
         sceneNode.meshTriangleCount += meshVertexCount / 3;
         sceneNode.meshPolygonCount += importedPolygonCount;
         sceneNode.meshHadNormals = sceneNode.meshHadNormals && meshHadNormals;
@@ -1519,6 +1541,7 @@ void ApplyEditedMeshGeometry(const LoadedFbxModel& model,
 
         int globalVertex = sceneNode.meshVertexStart;
         const int globalVertexEnd = sceneNode.meshVertexStart + sceneNode.meshVertexCount;
+        int nodePolygonVertex = sceneNode.meshPolygonVertexStart;
 
         for (int attributeIndex = 0; attributeIndex < fbxNode->GetNodeAttributeCount(); ++attributeIndex)
         {
@@ -1539,11 +1562,17 @@ void ApplyEditedMeshGeometry(const LoadedFbxModel& model,
             }
 
             FbxGeometryElementNormal* normalElement = nullptr;
-            const bool canRewritePolygonVertexNormals = hasEditedNormals && rawPolygonVertexCount == sceneNode.meshVertexCount;
+            const bool canRewritePolygonVertexNormals =
+                hasEditedNormals &&
+                rawPolygonVertexCount > 0 &&
+                nodePolygonVertex >= 0 &&
+                nodePolygonVertex + rawPolygonVertexCount <= static_cast<int>(model.meshPolygonVertexGlobalIndices.size());
             FbxAMatrix worldNormalToLocal = editedMeshGlobal.Transpose();
-            if (canRewritePolygonVertexNormals && mesh->GetElementNormalCount() > 0)
+            if (canRewritePolygonVertexNormals)
             {
-                normalElement = mesh->GetElementNormal(0);
+                normalElement = mesh->GetElementNormalCount() > 0
+                    ? mesh->GetElementNormal(0)
+                    : mesh->CreateElementNormal();
                 if (normalElement)
                 {
                     normalElement->SetMappingMode(FbxGeometryElement::eByPolygonVertex);
@@ -1577,13 +1606,22 @@ void ApplyEditedMeshGeometry(const LoadedFbxModel& model,
             }
 
             globalVertex = sceneNode.meshVertexStart;
+            int polygonVertex = nodePolygonVertex;
             const int polygonCount = mesh->GetPolygonCount();
             for (int polygon = 0; polygon < polygonCount; ++polygon)
             {
                 const int polygonSize = mesh->GetPolygonSize(polygon);
-                for (int vertex = 0; vertex < polygonSize && globalVertex < globalVertexEnd; ++vertex, ++globalVertex)
+                for (int vertex = 0; vertex < polygonSize; ++vertex)
                 {
-                    const int currentGlobalVertex = globalVertex;
+                    const int currentGlobalVertex = canRewritePolygonVertexNormals
+                        ? model.meshPolygonVertexGlobalIndices[static_cast<size_t>(polygonVertex)]
+                        : globalVertex;
+                    ++polygonVertex;
+                    if (globalVertex < globalVertexEnd)
+                    {
+                        ++globalVertex;
+                    }
+
                     if (normalElement)
                     {
                         const size_t normalBase = static_cast<size_t>(currentGlobalVertex) * 3;
@@ -1612,6 +1650,10 @@ void ApplyEditedMeshGeometry(const LoadedFbxModel& model,
                         normalElement->GetDirectArray().Add(editedLocalNormal);
                     }
                 }
+            }
+            if (nodePolygonVertex >= 0)
+            {
+                nodePolygonVertex += rawPolygonVertexCount;
             }
 
             for (int controlPoint = 0; controlPoint < controlPointCount; ++controlPoint)
@@ -1670,6 +1712,495 @@ void ApplyDeletedNodes(FbxScene* scene,
             parent->RemoveChild(node);
         }
         node->Destroy(true);
+    }
+}
+
+const char* GetTextureUsagePropertyName(FbxTextureUsage usage)
+{
+    switch (usage)
+    {
+    case FbxTextureUsage::Diffuse: return "DiffuseColor";
+    case FbxTextureUsage::Normal: return "NormalMap";
+    case FbxTextureUsage::Roughness: return "Maya|roughness";
+    case FbxTextureUsage::Metallic: return "Maya|metalness";
+    case FbxTextureUsage::AmbientOcclusion: return "Maya|ambientOcclusion";
+    case FbxTextureUsage::Emissive: return "EmissiveColor";
+    case FbxTextureUsage::Opacity: return "TransparencyFactor";
+    }
+    return "DiffuseColor";
+}
+
+const char* GetTextureUsageLabel(FbxTextureUsage usage)
+{
+    switch (usage)
+    {
+    case FbxTextureUsage::Diffuse: return "Diffuse";
+    case FbxTextureUsage::Normal: return "Normal";
+    case FbxTextureUsage::Roughness: return "Roughness";
+    case FbxTextureUsage::Metallic: return "Metallic";
+    case FbxTextureUsage::AmbientOcclusion: return "AmbientOcclusion";
+    case FbxTextureUsage::Emissive: return "Emissive";
+    case FbxTextureUsage::Opacity: return "Opacity";
+    }
+    return "Texture";
+}
+
+bool IsScalarTextureUsage(FbxTextureUsage usage)
+{
+    return usage == FbxTextureUsage::Roughness ||
+           usage == FbxTextureUsage::Metallic ||
+           usage == FbxTextureUsage::AmbientOcclusion ||
+           usage == FbxTextureUsage::Opacity;
+}
+
+FbxProperty GetOrCreateTextureProperty(FbxSurfaceMaterial* material, FbxTextureUsage usage)
+{
+    if (!material) return FbxProperty();
+
+    const char* propertyName = GetTextureUsagePropertyName(usage);
+    FbxProperty property = material->FindProperty(propertyName);
+    if (property.IsValid()) return property;
+
+    property = FbxProperty::Create(material, IsScalarTextureUsage(usage) ? FbxDoubleDT : FbxDouble3DT, propertyName);
+    if (property.IsValid())
+    {
+        property.ModifyFlag(FbxPropertyFlags::eUserDefined, true);
+    }
+    return property;
+}
+
+void DisconnectTextureSources(FbxProperty& property, bool destroyDisconnectedTextures)
+{
+    if (!property.IsValid()) return;
+
+    for (int textureIndex = property.GetSrcObjectCount<FbxTexture>() - 1; textureIndex >= 0; --textureIndex)
+    {
+        FbxTexture* texture = property.GetSrcObject<FbxTexture>(textureIndex);
+        if (texture)
+        {
+            property.DisconnectSrcObject(texture);
+            if (destroyDisconnectedTextures)
+            {
+                texture->Destroy(true);
+            }
+        }
+    }
+}
+
+void CollectMaterialsByName(FbxNode* node,
+                            std::unordered_map<std::string, std::vector<FbxSurfaceMaterial*>>& materialsByName,
+                            std::unordered_set<FbxSurfaceMaterial*>& seenMaterials)
+{
+    if (!node) return;
+
+    for (int materialIndex = 0; materialIndex < node->GetMaterialCount(); ++materialIndex)
+    {
+        FbxSurfaceMaterial* material = node->GetMaterial(materialIndex);
+        if (!material || !seenMaterials.insert(material).second) continue;
+
+        const std::string name = material->GetName() && material->GetName()[0] ? material->GetName() : "Default";
+        materialsByName[name].push_back(material);
+    }
+
+    for (int childIndex = 0; childIndex < node->GetChildCount(); ++childIndex)
+    {
+        CollectMaterialsByName(node->GetChild(childIndex), materialsByName, seenMaterials);
+    }
+}
+
+std::string MakeSafeDirectoryName(std::string value)
+{
+    if (value.empty()) return "fbx";
+
+    for (char& c : value)
+    {
+        const unsigned char ch = static_cast<unsigned char>(c);
+        if (!std::isalnum(ch) && c != '-' && c != '_')
+        {
+            c = '_';
+        }
+    }
+    return value;
+}
+
+std::filesystem::path MakeEmbeddedTextureExtractionDirectory(const std::string& modelPath)
+{
+    std::error_code pathError;
+    std::filesystem::path base = std::filesystem::temp_directory_path(pathError);
+    if (pathError)
+    {
+        base = std::filesystem::current_path(pathError);
+    }
+    if (base.empty())
+    {
+        base = ".";
+    }
+
+    const std::filesystem::path absoluteModel = std::filesystem::absolute(modelPath, pathError);
+    const std::string hashSource = pathError ? modelPath : absoluteModel.string();
+    const std::string folderName = MakeSafeDirectoryName(std::filesystem::path(modelPath).stem().string()) +
+                                   "_" +
+                                   std::to_string(std::hash<std::string>{}(hashSource));
+    return base / "openfbx_embedded_media" / folderName;
+}
+
+std::filesystem::path MakeUniqueEmbeddedTextureExtractionDirectory(const std::string& modelPath)
+{
+    const std::filesystem::path base = MakeEmbeddedTextureExtractionDirectory(modelPath);
+    for (int suffix = 0; suffix < 10000; ++suffix)
+    {
+        std::filesystem::path candidate = base;
+        if (suffix > 0)
+        {
+            candidate += "_";
+            candidate += std::to_string(suffix + 1);
+        }
+
+        std::error_code existsError;
+        if (!std::filesystem::exists(candidate, existsError) && !existsError)
+        {
+            return candidate;
+        }
+    }
+
+    std::filesystem::path fallback = base;
+    fallback += "_copy";
+    return fallback;
+}
+
+std::filesystem::path MakeSaveEmbeddedTextureExtractionDirectory(const std::string& modelPath)
+{
+    return MakeEmbeddedTextureExtractionDirectory(modelPath) / "save_import";
+}
+
+std::filesystem::path AbsoluteNormalizedPathForFbxLoader(const std::filesystem::path& path)
+{
+    std::error_code pathError;
+    std::filesystem::path result = std::filesystem::weakly_canonical(path, pathError);
+    if (!pathError) return result.lexically_normal();
+
+    result = std::filesystem::absolute(path, pathError);
+    if (!pathError) return result.lexically_normal();
+
+    return path.lexically_normal();
+}
+
+std::string ToLowerAsciiForFbxLoader(std::string value)
+{
+    for (char& c : value)
+    {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    return value;
+}
+
+bool IsOwnedEmbeddedTextureExtractionDirectory(const std::filesystem::path& directory)
+{
+    if (directory.empty()) return false;
+
+    std::error_code pathError;
+    std::filesystem::path base = std::filesystem::temp_directory_path(pathError);
+    if (pathError)
+    {
+        base = std::filesystem::current_path(pathError);
+    }
+    if (base.empty())
+    {
+        base = ".";
+    }
+
+    const std::filesystem::path root = AbsoluteNormalizedPathForFbxLoader(base / "openfbx_embedded_media");
+    const std::filesystem::path target = AbsoluteNormalizedPathForFbxLoader(directory);
+    std::string rootText = ToLowerAsciiForFbxLoader(root.string());
+    std::string targetText = ToLowerAsciiForFbxLoader(target.string());
+
+    if (!rootText.empty() && rootText.back() != '\\' && rootText.back() != '/')
+    {
+        rootText += std::filesystem::path::preferred_separator;
+    }
+    return targetText.rfind(rootText, 0) == 0 && targetText.size() > rootText.size();
+}
+
+void RemoveEmbeddedTextureExtractionDirectory(const std::filesystem::path& directory)
+{
+    if (!IsOwnedEmbeddedTextureExtractionDirectory(directory)) return;
+
+    std::error_code removeError;
+    std::filesystem::remove_all(directory, removeError);
+}
+
+FbxCallback::State MarkEmbeddedFileRead(void* userData,
+                                        FbxClassId,
+                                        const char*,
+                                        const void*,
+                                        size_t)
+{
+    bool* hasEmbeddedMedia = static_cast<bool*>(userData);
+    if (hasEmbeddedMedia)
+    {
+        *hasEmbeddedMedia = true;
+    }
+    return FbxCallback::eNotHandled;
+}
+
+bool ExistingFile(const std::filesystem::path& path)
+{
+    std::error_code existsError;
+    return !path.empty() && std::filesystem::is_regular_file(path, existsError) && !existsError;
+}
+
+std::filesystem::path AbsoluteExistingFile(const std::filesystem::path& path)
+{
+    std::error_code pathError;
+    std::filesystem::path result = std::filesystem::weakly_canonical(path, pathError);
+    if (!pathError) return result.lexically_normal();
+
+    result = std::filesystem::absolute(path, pathError);
+    if (!pathError) return result.lexically_normal();
+
+    return path.lexically_normal();
+}
+
+std::filesystem::path FindFileBelowDirectory(const std::filesystem::path& directory, const std::filesystem::path& filename)
+{
+    if (directory.empty() || filename.empty()) return {};
+
+    std::error_code existsError;
+    if (!std::filesystem::exists(directory, existsError) || existsError) return {};
+
+    std::error_code iterateError;
+    for (std::filesystem::recursive_directory_iterator it(directory, iterateError), end; it != end && !iterateError; it.increment(iterateError))
+    {
+        if (!it->is_regular_file()) continue;
+        if (it->path().filename() == filename)
+        {
+            return it->path();
+        }
+    }
+
+    return {};
+}
+
+std::string ResolveFbxTexturePath(const FbxFileTexture* texture,
+                                  const std::string& modelPath,
+                                  const std::filesystem::path& extractionDirectory)
+{
+    if (!texture) return {};
+
+    const std::filesystem::path modelDirectory = std::filesystem::path(modelPath).parent_path();
+    const std::filesystem::path fileName = texture->GetFileName() ? texture->GetFileName() : "";
+    const std::filesystem::path relativeName = texture->GetRelativeFileName() ? texture->GetRelativeFileName() : "";
+
+    std::vector<std::filesystem::path> candidates;
+    if (!fileName.empty())
+    {
+        candidates.push_back(fileName);
+        candidates.push_back(modelDirectory / fileName);
+        candidates.push_back(extractionDirectory / fileName.filename());
+    }
+    if (!relativeName.empty())
+    {
+        candidates.push_back(relativeName);
+        candidates.push_back(modelDirectory / relativeName);
+        candidates.push_back(extractionDirectory / relativeName);
+        candidates.push_back(extractionDirectory / relativeName.filename());
+    }
+
+    for (const std::filesystem::path& candidate : candidates)
+    {
+        if (ExistingFile(candidate))
+        {
+            return AbsoluteExistingFile(candidate).string();
+        }
+    }
+
+    const std::filesystem::path searchName = !relativeName.filename().empty() ? relativeName.filename() : fileName.filename();
+    const std::filesystem::path foundExtractedFile = FindFileBelowDirectory(extractionDirectory, searchName);
+    if (!foundExtractedFile.empty())
+    {
+        return AbsoluteExistingFile(foundExtractedFile).string();
+    }
+
+    if (!fileName.empty()) return fileName.string();
+    return relativeName.string();
+}
+
+std::string GetTextureRelativeName(const FbxFileTexture* texture)
+{
+    if (!texture) return {};
+
+    std::filesystem::path relativeName = texture->GetRelativeFileName() ? texture->GetRelativeFileName() : "";
+    if (!relativeName.empty()) return relativeName.generic_string();
+
+    std::filesystem::path fileName = texture->GetFileName() ? texture->GetFileName() : "";
+    return fileName.filename().generic_string();
+}
+
+void AddImportedTextureReference(FbxSurfaceMaterial* material,
+                                 FbxTextureUsage usage,
+                                 FbxFileTexture* texture,
+                                 const std::string& modelPath,
+                                 const std::filesystem::path& extractionDirectory,
+                                 std::unordered_set<std::string>& seenReferences,
+                                 MeshBuilder& out)
+{
+    if (!material || !texture) return;
+
+    const std::string materialName = material->GetName() && material->GetName()[0] ? material->GetName() : "Default";
+    const std::string texturePath = ResolveFbxTexturePath(texture, modelPath, extractionDirectory);
+    if (texturePath.empty()) return;
+
+    const std::string key = materialName + "|" + std::to_string(static_cast<int>(usage)) + "|" + texturePath;
+    if (!seenReferences.insert(key).second) return;
+
+    FbxTextureReference reference;
+    reference.materialName = materialName;
+    reference.usage = usage;
+    reference.filePath = texturePath;
+    reference.relativePath = GetTextureRelativeName(texture);
+    out.textureReferences.push_back(reference);
+}
+
+void CollectTextureReferencesFromProperty(FbxSurfaceMaterial* material,
+                                          FbxTextureUsage usage,
+                                          FbxProperty property,
+                                          const std::string& modelPath,
+                                          const std::filesystem::path& extractionDirectory,
+                                          std::unordered_set<std::string>& seenReferences,
+                                          MeshBuilder& out)
+{
+    if (!property.IsValid()) return;
+
+    for (int layeredIndex = 0; layeredIndex < property.GetSrcObjectCount<FbxLayeredTexture>(); ++layeredIndex)
+    {
+        FbxLayeredTexture* layeredTexture = property.GetSrcObject<FbxLayeredTexture>(layeredIndex);
+        if (!layeredTexture) continue;
+
+        for (int textureIndex = 0; textureIndex < layeredTexture->GetSrcObjectCount<FbxFileTexture>(); ++textureIndex)
+        {
+            AddImportedTextureReference(material,
+                                        usage,
+                                        layeredTexture->GetSrcObject<FbxFileTexture>(textureIndex),
+                                        modelPath,
+                                        extractionDirectory,
+                                        seenReferences,
+                                        out);
+        }
+    }
+
+    for (int textureIndex = 0; textureIndex < property.GetSrcObjectCount<FbxFileTexture>(); ++textureIndex)
+    {
+        AddImportedTextureReference(material,
+                                    usage,
+                                    property.GetSrcObject<FbxFileTexture>(textureIndex),
+                                    modelPath,
+                                    extractionDirectory,
+                                    seenReferences,
+                                    out);
+    }
+}
+
+void CollectImportedTextureReferences(FbxScene* scene,
+                                      const std::string& modelPath,
+                                      const std::filesystem::path& extractionDirectory,
+                                      MeshBuilder& out)
+{
+    if (!scene) return;
+
+    std::unordered_map<std::string, std::vector<FbxSurfaceMaterial*>> materialsByName;
+    std::unordered_set<FbxSurfaceMaterial*> seenMaterials;
+    CollectMaterialsByName(scene->GetRootNode(), materialsByName, seenMaterials);
+
+    std::unordered_set<std::string> seenReferences;
+    const FbxTextureUsage usages[] = {
+        FbxTextureUsage::Diffuse,
+        FbxTextureUsage::Normal,
+        FbxTextureUsage::Roughness,
+        FbxTextureUsage::Metallic,
+        FbxTextureUsage::AmbientOcclusion,
+        FbxTextureUsage::Emissive,
+        FbxTextureUsage::Opacity
+    };
+
+    for (const auto& entry : materialsByName)
+    {
+        for (FbxSurfaceMaterial* material : entry.second)
+        {
+            if (!material) continue;
+
+            for (FbxTextureUsage usage : usages)
+            {
+                const char* propertyName = GetTextureUsagePropertyName(usage);
+                FbxProperty property = material->FindProperty(propertyName);
+                if (!property.IsValid())
+                {
+                    property = material->FindPropertyHierarchical(propertyName);
+                }
+                CollectTextureReferencesFromProperty(material, usage, property, modelPath, extractionDirectory, seenReferences, out);
+            }
+
+            CollectTextureReferencesFromProperty(material,
+                                                 FbxTextureUsage::Normal,
+                                                 material->FindProperty(FbxSurfaceMaterial::sBump),
+                                                 modelPath,
+                                                 extractionDirectory,
+                                                 seenReferences,
+                                                 out);
+            CollectTextureReferencesFromProperty(material,
+                                                 FbxTextureUsage::Opacity,
+                                                 material->FindProperty(FbxSurfaceMaterial::sTransparentColor),
+                                                 modelPath,
+                                                 extractionDirectory,
+                                                 seenReferences,
+                                                 out);
+        }
+    }
+}
+
+void ApplyTextureReferencesToScene(FbxScene* scene, const std::vector<FbxTextureReference>& textureReferences)
+{
+    if (!scene || textureReferences.empty()) return;
+
+    std::unordered_map<std::string, std::vector<FbxSurfaceMaterial*>> materialsByName;
+    std::unordered_set<FbxSurfaceMaterial*> seenMaterials;
+    CollectMaterialsByName(scene->GetRootNode(), materialsByName, seenMaterials);
+
+    int textureObjectIndex = 0;
+    for (const FbxTextureReference& reference : textureReferences)
+    {
+        if (reference.materialName.empty() || reference.relativePath.empty()) continue;
+
+        const auto found = materialsByName.find(reference.materialName);
+        if (found == materialsByName.end()) continue;
+
+        for (FbxSurfaceMaterial* material : found->second)
+        {
+            FbxProperty property = GetOrCreateTextureProperty(material, reference.usage);
+            if (!property.IsValid()) continue;
+
+            DisconnectTextureSources(property, true);
+
+            std::string textureName = reference.materialName;
+            textureName += "_";
+            textureName += GetTextureUsageLabel(reference.usage);
+            textureName += "_openfbx_";
+            textureName += std::to_string(++textureObjectIndex);
+
+            FbxFileTexture* texture = FbxFileTexture::Create(scene, textureName.c_str());
+            if (!texture) continue;
+
+            texture->SetFileName(reference.filePath.empty() ? reference.relativePath.c_str() : reference.filePath.c_str());
+            texture->SetRelativeFileName(reference.relativePath.c_str());
+            texture->SetTextureUse(FbxTexture::eStandard);
+            texture->SetMappingType(FbxTexture::eUV);
+            texture->SetMaterialUse(FbxFileTexture::eModelMaterial);
+            texture->SetSwapUV(false);
+            texture->SetTranslation(0.0, 0.0);
+            texture->SetScale(1.0, 1.0);
+            texture->SetRotation(0.0, 0.0);
+
+            property.ConnectSrcObject(texture);
+        }
     }
 }
 
@@ -1968,10 +2499,12 @@ bool BuildRaylibModel(const MeshBuilder& builder, LoadedFbxModel& outModel, std:
     {
         outModel.meshControlPointIndices.push_back(ref.controlPointIndex);
     }
+    outModel.meshPolygonVertexGlobalIndices = builder.polygonVertexGlobalIndices;
     outModel.meshPolygonEdges = builder.polygonEdges;
     outModel.uvSetNames = builder.uvSetNames;
     outModel.uvSets = builder.uvSets;
     outModel.materialNames = builder.materialNames.empty() ? std::vector<std::string>{ "Default" } : builder.materialNames;
+    outModel.textureReferences = builder.textureReferences;
     outModel.bounds = builder.hasBounds ? builder.bounds : BoundingBox{ { -1.0f, -1.0f, -1.0f }, { 1.0f, 1.0f, 1.0f } };
     outModel.valid = true;
 
@@ -2075,6 +2608,9 @@ bool LoadFbxModel(const std::string& path, LoadedFbxModel& outModel, std::string
 
     FbxIOSettings* ioSettings = FbxIOSettings::Create(manager.get(), IOSROOT);
     manager->SetIOSettings(ioSettings);
+    ioSettings->SetBoolProp(IMP_FBX_MATERIAL, true);
+    ioSettings->SetBoolProp(IMP_FBX_TEXTURE, true);
+    ioSettings->SetBoolProp(IMP_FBX_EXTRACT_EMBEDDED_DATA, true);
 
     FbxImporter* importer = FbxImporter::Create(manager.get(), "");
     if (!importer->Initialize(path.c_str(), -1, manager->GetIOSettings()))
@@ -2083,12 +2619,29 @@ bool LoadFbxModel(const std::string& path, LoadedFbxModel& outModel, std::string
         importer->Destroy();
         return false;
     }
+    bool hasEmbeddedMedia = false;
+    FbxEmbeddedFileCallback* embeddedFileCallback = FbxEmbeddedFileCallback::Create(manager.get(), "embedded-file-read");
+    if (embeddedFileCallback)
+    {
+        embeddedFileCallback->RegisterReadFunction(MarkEmbeddedFileRead, &hasEmbeddedMedia);
+        importer->SetEmbeddedFileReadCallback(embeddedFileCallback);
+    }
+
+    const std::filesystem::path embeddedExtractionDirectory = MakeUniqueEmbeddedTextureExtractionDirectory(path);
+    std::error_code extractionDirectoryError;
+    std::filesystem::create_directories(embeddedExtractionDirectory, extractionDirectoryError);
+    if (!extractionDirectoryError)
+    {
+        const std::string extractionDirectoryString = embeddedExtractionDirectory.string();
+        importer->SetEmbeddingExtractionFolder(extractionDirectoryString.c_str());
+    }
 
     FbxScene* scene = FbxScene::Create(manager.get(), "scene");
     if (!importer->Import(scene))
     {
         error = std::string("Failed to import FBX scene: ") + importer->GetStatus().GetErrorString();
         importer->Destroy();
+        RemoveEmbeddedTextureExtractionDirectory(embeddedExtractionDirectory);
         return false;
     }
     importer->Destroy();
@@ -2108,14 +2661,45 @@ bool LoadFbxModel(const std::string& path, LoadedFbxModel& outModel, std::string
     RebuildSkinBindDataForAppPose(builder);
 
     SampleAnimations(scene, builder);
+    CollectImportedTextureReferences(scene, path, embeddedExtractionDirectory, builder);
 
-    return BuildRaylibModel(builder, outModel, error);
+    if (!BuildRaylibModel(builder, outModel, error))
+    {
+        RemoveEmbeddedTextureExtractionDirectory(embeddedExtractionDirectory);
+        return false;
+    }
+
+    outModel.sourceHasEmbeddedMedia = hasEmbeddedMedia;
+    if (hasEmbeddedMedia && !extractionDirectoryError)
+    {
+        outModel.embeddedMediaExtractionDirectory = embeddedExtractionDirectory.string();
+    }
+    else
+    {
+        RemoveEmbeddedTextureExtractionDirectory(embeddedExtractionDirectory);
+    }
+    return true;
 }
 
 bool SaveFbxModelAnimations(const std::string& sourcePath,
                             const std::string& outputPath,
                             const LoadedFbxModel& model,
                             const std::vector<bool>& deletedNodes,
+                            std::string& error)
+{
+    static const std::vector<FbxTextureReference> noTextureReferences;
+    return model.sourceHasEmbeddedMedia
+        ? SaveFbxModelAnimations(sourcePath, outputPath, model, deletedNodes, noTextureReferences, true, false, error)
+        : SaveFbxModelAnimations(sourcePath, outputPath, model, deletedNodes, noTextureReferences, false, false, error);
+}
+
+bool SaveFbxModelAnimations(const std::string& sourcePath,
+                            const std::string& outputPath,
+                            const LoadedFbxModel& model,
+                            const std::vector<bool>& deletedNodes,
+                            const std::vector<FbxTextureReference>& textureReferences,
+                            bool embedMedia,
+                            bool replaceTextureReferences,
                             std::string& error)
 {
     error.clear();
@@ -2167,6 +2751,14 @@ bool SaveFbxModelAnimations(const std::string& sourcePath,
 
     FbxIOSettings* ioSettings = FbxIOSettings::Create(manager.get(), IOSROOT);
     manager->SetIOSettings(ioSettings);
+    ioSettings->SetBoolProp(IMP_FBX_MATERIAL, true);
+    ioSettings->SetBoolProp(IMP_FBX_TEXTURE, true);
+    const bool importEmbeddedMedia = embedMedia || model.sourceHasEmbeddedMedia;
+    ioSettings->SetBoolProp(IMP_FBX_EXTRACT_EMBEDDED_DATA, importEmbeddedMedia);
+    ioSettings->SetBoolProp(EXP_FBX_MATERIAL, true);
+    ioSettings->SetBoolProp(EXP_FBX_TEXTURE, true);
+    ioSettings->SetBoolProp(EXP_FBX_EMBEDDED, embedMedia);
+    ioSettings->SetBoolProp(EXP_EMBEDTEXTURE, embedMedia);
 
     FbxImporter* importer = FbxImporter::Create(manager.get(), "");
     if (!importer->Initialize(sourcePath.c_str(), -1, manager->GetIOSettings()))
@@ -2175,12 +2767,26 @@ bool SaveFbxModelAnimations(const std::string& sourcePath,
         importer->Destroy();
         return false;
     }
+    const std::filesystem::path saveExtractionDirectory = importEmbeddedMedia
+        ? MakeSaveEmbeddedTextureExtractionDirectory(sourcePath)
+        : std::filesystem::path{};
+    if (!saveExtractionDirectory.empty())
+    {
+        std::error_code extractionDirectoryError;
+        std::filesystem::create_directories(saveExtractionDirectory, extractionDirectoryError);
+        if (!extractionDirectoryError)
+        {
+            const std::string extractionDirectoryString = saveExtractionDirectory.string();
+            importer->SetEmbeddingExtractionFolder(extractionDirectoryString.c_str());
+        }
+    }
 
     FbxScene* scene = FbxScene::Create(manager.get(), "scene");
     if (!importer->Import(scene))
     {
         error = std::string("Failed to import source FBX: ") + importer->GetStatus().GetErrorString();
         importer->Destroy();
+        RemoveEmbeddedTextureExtractionDirectory(saveExtractionDirectory);
         return false;
     }
     importer->Destroy();
@@ -2191,12 +2797,18 @@ bool SaveFbxModelAnimations(const std::string& sourcePath,
     const std::vector<FbxNode*> sceneNodes = BuildMappedSceneNodes(model, BuildSceneNodeIndex(scene));
     if (!WriteAnimationStacks(scene, model, sceneNodes, error))
     {
+        RemoveEmbeddedTextureExtractionDirectory(saveExtractionDirectory);
         return false;
     }
 
     if (!ApplyEditedModelToScene(scene, model, deletedNodes, error))
     {
+        RemoveEmbeddedTextureExtractionDirectory(saveExtractionDirectory);
         return false;
+    }
+    if (replaceTextureReferences)
+    {
+        ApplyTextureReferencesToScene(scene, textureReferences);
     }
 
     FbxExporter* exporter = FbxExporter::Create(manager.get(), "");
@@ -2205,6 +2817,7 @@ bool SaveFbxModelAnimations(const std::string& sourcePath,
     {
         error = std::string("Failed to initialize FBX exporter: ") + exporter->GetStatus().GetErrorString();
         exporter->Destroy();
+        RemoveEmbeddedTextureExtractionDirectory(saveExtractionDirectory);
         return false;
     }
 
@@ -2213,9 +2826,11 @@ bool SaveFbxModelAnimations(const std::string& sourcePath,
     {
         error = std::string("Failed to export FBX: ") + exporter->GetStatus().GetErrorString();
         exporter->Destroy();
+        RemoveEmbeddedTextureExtractionDirectory(saveExtractionDirectory);
         return false;
     }
     exporter->Destroy();
+    RemoveEmbeddedTextureExtractionDirectory(saveExtractionDirectory);
 
     if (savingInPlace)
     {
@@ -2235,6 +2850,8 @@ bool SaveFbxModelAnimations(const std::string& sourcePath,
 
 void UnloadFbxModel(LoadedFbxModel& model)
 {
+    RemoveEmbeddedTextureExtractionDirectory(model.embeddedMediaExtractionDirectory);
+
     if (model.hasMesh)
     {
         UnloadModel(model.model);

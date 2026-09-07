@@ -349,6 +349,18 @@ std::vector<int> GetReparentDragRoots(const ModelTab& tab, int sourceNode)
     return { sourceNode };
 }
 
+int GetSceneRootNodeIndex(const LoadedFbxModel& loaded)
+{
+    for (int nodeIndex = 0; nodeIndex < static_cast<int>(loaded.nodes.size()); ++nodeIndex)
+    {
+        if (IsSceneRootNode(loaded, nodeIndex))
+        {
+            return nodeIndex;
+        }
+    }
+    return -1;
+}
+
 bool CanReparentNodeRoots(const ModelTab& tab, const std::vector<int>& roots, int newParent)
 {
     if (!IsValidSelectableNode(tab, newParent)) return false;
@@ -386,6 +398,29 @@ int ReparentNodeRoots(ModelTab& tab, const std::vector<int>& roots, int newParen
     return changedCount;
 }
 
+int UnparentNodeRoots(ModelTab& tab, const std::vector<int>& roots)
+{
+    const int sceneRoot = GetSceneRootNodeIndex(tab.loaded);
+    if (sceneRoot < 0 || roots.empty()) return 0;
+
+    int changedCount = 0;
+    for (int root : roots)
+    {
+        if (!IsValidSelectableNode(tab, root)) continue;
+        SceneNode& node = tab.loaded.nodes[static_cast<size_t>(root)];
+        if (node.parent == sceneRoot) continue;
+        node.parent = sceneRoot;
+        ++changedCount;
+    }
+
+    if (changedCount <= 0) return 0;
+
+    RecomputeSceneNodeDepths(tab.loaded);
+    RebuildBoneSegmentsAfterReparent(tab);
+    RefreshDisplayedMesh(tab);
+    return changedCount;
+}
+
 bool HasBoneNode(const ModelTab& tab, const std::vector<int>& nodeIndices)
 {
     for (int nodeIndex : nodeIndices)
@@ -397,6 +432,38 @@ bool HasBoneNode(const ModelTab& tab, const std::vector<int>& nodeIndices)
         }
     }
     return false;
+}
+
+bool HasMeshNode(const ModelTab& tab, const std::vector<int>& nodeIndices)
+{
+    for (int nodeIndex : nodeIndices)
+    {
+        if (!IsValidSelectableNode(tab, nodeIndex)) continue;
+        if (tab.loaded.nodes[static_cast<size_t>(nodeIndex)].type == SceneNodeType::Mesh)
+        {
+            return true;
+        }
+    }
+    return false;
+}
+
+float GetNodeContextMenuHeight(const ModelTab& tab, const std::vector<int>& contextNodes)
+{
+    float height = kNodeContextMenuBaseH;
+    if (HasMeshNode(tab, contextNodes))
+    {
+        height += 90.0f;
+    }
+    if (HasBoneNode(tab, contextNodes))
+    {
+        height += 30.0f;
+    }
+    return height;
+}
+
+float GetNodeContextMenuHeight(const ModelTab& tab, int contextNodeIndex, const std::vector<int>& contextNodeIndices)
+{
+    return GetNodeContextMenuHeight(tab, GetContextActionNodes(tab, contextNodeIndex, contextNodeIndices));
 }
 
 int DeleteContextNodeSubtrees(ModelTab& tab, const std::vector<int>& contextRoots)
@@ -415,6 +482,45 @@ int ApplyScaleToContextNodes(ModelTab& tab, const std::vector<int>& contextNodes
     for (int nodeIndex : contextNodes)
     {
         if (ApplyScaleToNode(tab, nodeIndex))
+        {
+            ++changedCount;
+        }
+    }
+    return changedCount;
+}
+
+int SetMeshPivotsToBoundsCenterForContextNodes(ModelTab& tab, const std::vector<int>& contextNodes)
+{
+    int changedCount = 0;
+    for (int nodeIndex : contextNodes)
+    {
+        if (SetMeshPivotToBoundsCenter(tab, nodeIndex))
+        {
+            ++changedCount;
+        }
+    }
+    return changedCount;
+}
+
+int SetMeshPivotsToBoundsBottomForContextNodes(ModelTab& tab, const std::vector<int>& contextNodes)
+{
+    int changedCount = 0;
+    for (int nodeIndex : contextNodes)
+    {
+        if (SetMeshPivotToBoundsBottom(tab, nodeIndex))
+        {
+            ++changedCount;
+        }
+    }
+    return changedCount;
+}
+
+int FlipMeshNormalsForContextNodes(ModelTab& tab, const std::vector<int>& contextNodes)
+{
+    int changedCount = 0;
+    for (int nodeIndex : contextNodes)
+    {
+        if (FlipMeshNormals(tab, nodeIndex))
         {
             ++changedCount;
         }

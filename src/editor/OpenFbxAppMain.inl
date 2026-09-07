@@ -89,11 +89,15 @@ int RunOpenFbxApp(int argc, char** argv)
         auto tab = std::make_unique<ModelTab>();
         tab->loaded = std::move(loaded);
         initializeLoadedTab(*tab, path);
+        std::string textureLoadError;
+        const int importedTextureCount = LoadImportedPbrTextures(*tab, textureLoadError);
 
         tabs.push_back(std::move(tab));
         activeTab = static_cast<int>(tabs.size()) - 1;
-        error.clear();
-        notice.clear();
+        error = textureLoadError;
+        notice = importedTextureCount > 0
+            ? "Loaded " + std::to_string(importedTextureCount) + " FBX texture" + (importedTextureCount == 1 ? "." : "s.")
+            : "";
     };
 
     auto restorePbrMaterialState = [&](ModelTab& tab,
@@ -195,6 +199,8 @@ int RunOpenFbxApp(int argc, char** argv)
         tab = ModelTab{};
         tab.loaded = std::move(reloaded);
         initializeLoadedTab(tab, path);
+        std::string importedTextureError;
+        LoadImportedPbrTextures(tab, importedTextureError);
 
         std::string restoreError;
         restorePbrMaterialState(tab, previousMaterialNames, previousState.pbrMaterials, previousState.selectedMaterial, restoreError);
@@ -204,7 +210,7 @@ int RunOpenFbxApp(int argc, char** argv)
         textureClipboard = TextureClipboard{};
         hierarchyPanel.contextMenuOpen = false;
         notice = "Reloaded FBX: " + path;
-        error = restoreError;
+        error = !restoreError.empty() ? restoreError : importedTextureError;
         return true;
     };
 
@@ -283,7 +289,10 @@ int RunOpenFbxApp(int argc, char** argv)
 
         UpdateHierarchyPanelInteraction(hierarchyPanel, active);
         const float hierarchyBlockW = GetHierarchyPanelBlockWidth(hierarchyPanel);
-        const Rectangle hierarchyContextMenuBounds{ hierarchyPanel.contextPosition.x, hierarchyPanel.contextPosition.y, kNodeContextMenuW, kNodeContextMenuBoneH };
+        const float hierarchyContextMenuH = active && hierarchyPanel.contextMenuOpen
+            ? GetNodeContextMenuHeight(*active, hierarchyPanel.contextNodeIndex, hierarchyPanel.contextNodeIndices)
+            : kNodeContextMenuBaseH;
+        const Rectangle hierarchyContextMenuBounds{ hierarchyPanel.contextPosition.x, hierarchyPanel.contextPosition.y, kNodeContextMenuW, hierarchyContextMenuH };
         const bool mouseOverHierarchyContextMenu = hierarchyPanel.contextMenuOpen && CheckCollisionPointRec(mouse, hierarchyContextMenuBounds);
         const bool mouseInViewport = mouse.x > hierarchyBlockW &&
                                      mouse.y >= 61.0f &&
@@ -457,7 +466,7 @@ int RunOpenFbxApp(int argc, char** argv)
             {
                 hierarchyPanel.contextNodeIndices = std::move(selectedContextNodes);
                 hierarchyPanel.contextNodeIndex = GetContextAnchorNode(*active, hierarchyPanel.contextNodeIndices);
-                const float nodeContextMenuH = HasBoneNode(*active, hierarchyPanel.contextNodeIndices) ? kNodeContextMenuBoneH : kNodeContextMenuBaseH;
+                const float nodeContextMenuH = GetNodeContextMenuHeight(*active, hierarchyPanel.contextNodeIndices);
                 RevealNodeInHierarchy(*active, hierarchyPanel, hierarchyPanel.contextNodeIndex);
                 hierarchyPanel.activeTab = LeftPanelTab::Hierarchy;
                 hierarchyPanel.contextPosition = Vector2{
@@ -484,7 +493,7 @@ int RunOpenFbxApp(int argc, char** argv)
                         hierarchyPanel.contextNodeIndex = contextNode;
                         hierarchyPanel.contextNodeIndices = GetContextActionNodes(*active, contextNode);
                     }
-                    const float nodeContextMenuH = HasBoneNode(*active, hierarchyPanel.contextNodeIndices) ? kNodeContextMenuBoneH : kNodeContextMenuBaseH;
+                    const float nodeContextMenuH = GetNodeContextMenuHeight(*active, hierarchyPanel.contextNodeIndices);
                     RevealNodeInHierarchy(*active, hierarchyPanel, contextNode);
                     hierarchyPanel.activeTab = LeftPanelTab::Hierarchy;
                     hierarchyPanel.contextPosition = Vector2{
@@ -681,7 +690,16 @@ int RunOpenFbxApp(int argc, char** argv)
         }
         gBottomPanelReservedHeight = animationPanelCollapsed ? kTimelineCollapsedHeight : kTimelinePanelHeight;
 
-        DrawHierarchyPanel(uiFont, active, hierarchyPanel, renameEditor, droppedPaths, droppedTextureHandled, textureClipboard, notice, error);
+        DrawHierarchyPanel(uiFont,
+                           active,
+                           hierarchyPanel,
+                           renameEditor,
+                           droppedPaths,
+                           droppedTextureHandled,
+                           textureClipboard,
+                           notice,
+                           error,
+                           openMenu != OpenMenu::None || modalOpen);
         DrawTransformToolbar(uiFont, transformTool, gizmoOrientation, editPivotMode, weightBrush, hierarchyBlockW);
         DrawOrientationGizmo(uiFont, active ? active->orbit.camera : emptyOrbit.camera);
 
@@ -695,6 +713,8 @@ int RunOpenFbxApp(int argc, char** argv)
         bool menuRedoRequested = false;
         bool menuSaveFbxRequested = false;
         bool menuSaveAsFbxRequested = false;
+        bool packageFbxRequested = false;
+        bool extractFbxTexturesRequested = false;
         bool importAnimationsRequested = false;
         bool exportJsonRequested = false;
         bool compareFbxRequested = false;
@@ -710,6 +730,8 @@ int RunOpenFbxApp(int argc, char** argv)
                         menuRedoRequested,
                         menuSaveFbxRequested,
                         menuSaveAsFbxRequested,
+                        packageFbxRequested,
+                        extractFbxTexturesRequested,
                         importAnimationsRequested,
                         exportJsonRequested,
                         compareFbxRequested,
@@ -899,6 +921,32 @@ int RunOpenFbxApp(int argc, char** argv)
                         notice.clear();
                     }
                 }
+            }
+        }
+
+        if (packageFbxRequested)
+        {
+            if (!active || !active->loaded.valid)
+            {
+                error = "No active FBX to package.";
+                notice.clear();
+            }
+            else
+            {
+                PackageFbxWithTextures(*active, notice, error);
+            }
+        }
+
+        if (extractFbxTexturesRequested)
+        {
+            if (!active || !active->loaded.valid)
+            {
+                error = "No active FBX to extract textures from.";
+                notice.clear();
+            }
+            else
+            {
+                ExtractPackagedFbxTextures(*active, notice, error);
             }
         }
 

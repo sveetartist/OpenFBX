@@ -83,6 +83,8 @@ struct SceneNode
     bool hasBounds = false;
     int meshVertexStart = -1;
     int meshVertexCount = 0;
+    int meshPolygonVertexStart = -1;
+    int meshPolygonVertexCount = 0;
     int meshTriangleCount = 0;
     int meshPolygonCount = 0;
     bool meshHadNormals = true;
@@ -103,6 +105,25 @@ struct AnimationClip
     std::vector<MeshFrame> meshFrames;
 };
 
+enum class FbxTextureUsage
+{
+    Diffuse,
+    Normal,
+    Roughness,
+    Metallic,
+    AmbientOcclusion,
+    Emissive,
+    Opacity
+};
+
+struct FbxTextureReference
+{
+    std::string materialName;
+    FbxTextureUsage usage = FbxTextureUsage::Diffuse;
+    std::string filePath;
+    std::string relativePath;
+};
+
 struct LoadedFbxModel
 {
     Model model{};
@@ -112,14 +133,18 @@ struct LoadedFbxModel
     std::vector<SkinnedVertex> skinnedVertices;
     std::vector<std::vector<int>> meshGlobalVertexIndices;
     std::vector<int> meshControlPointIndices;
+    std::vector<int> meshPolygonVertexGlobalIndices;
     std::vector<MeshEdge> meshPolygonEdges;
     std::vector<std::string> uvSetNames;
     std::vector<std::vector<float>> uvSets;
     std::vector<std::string> materialNames;
+    std::vector<FbxTextureReference> textureReferences;
+    std::string embeddedMediaExtractionDirectory;
     std::vector<BoneSegment> bones;
     std::vector<BonePose> bonePoses;
     std::vector<SceneNode> nodes;
     std::vector<AnimationClip> animations;
+    bool sourceHasEmbeddedMedia = false;
     bool hasMesh = false;
     bool valid = false;
 };
@@ -129,5 +154,13 @@ bool SaveFbxModelAnimations(const std::string& sourcePath,
                             const std::string& outputPath,
                             const LoadedFbxModel& model,
                             const std::vector<bool>& deletedNodes,
+                            std::string& error);
+bool SaveFbxModelAnimations(const std::string& sourcePath,
+                            const std::string& outputPath,
+                            const LoadedFbxModel& model,
+                            const std::vector<bool>& deletedNodes,
+                            const std::vector<FbxTextureReference>& textureReferences,
+                            bool embedMedia,
+                            bool replaceTextureReferences,
                             std::string& error);
 void UnloadFbxModel(LoadedFbxModel& model);

@@ -229,7 +229,8 @@ void DrawHierarchyPanel(Font font,
                         bool& droppedTextureHandled,
                         TextureClipboard& textureClipboard,
                         std::string& notice,
-                        std::string& error)
+                        std::string& error,
+                        bool inputBlocked)
 {
     constexpr float panelX = 0.0f;
     constexpr float panelY = 61.0f;
@@ -258,27 +259,27 @@ void DrawHierarchyPanel(Font font,
     const Rectangle uvTab{ materialsTab.x + materialsTab.width + 4.0f, panelY + 34.0f, tabW, 24.0f };
     const Rectangle skinTab{ uvTab.x + uvTab.width + 4.0f, panelY + 34.0f, tabW, 24.0f };
     const Rectangle validatorTab{ skinTab.x + skinTab.width + 4.0f, panelY + 34.0f, tabW, 24.0f };
-    if (DrawPanelTab(font, hierarchyTab, "Tree", panel.activeTab == LeftPanelTab::Hierarchy))
+    if (!inputBlocked && DrawPanelTab(font, hierarchyTab, "Tree", panel.activeTab == LeftPanelTab::Hierarchy))
     {
         panel.activeTab = LeftPanelTab::Hierarchy;
     }
-    if (DrawPanelTab(font, statsTab, "Stats", panel.activeTab == LeftPanelTab::Stats))
+    if (!inputBlocked && DrawPanelTab(font, statsTab, "Stats", panel.activeTab == LeftPanelTab::Stats))
     {
         panel.activeTab = LeftPanelTab::Stats;
     }
-    if (DrawPanelTab(font, materialsTab, "Mats", panel.activeTab == LeftPanelTab::Materials))
+    if (!inputBlocked && DrawPanelTab(font, materialsTab, "Mats", panel.activeTab == LeftPanelTab::Materials))
     {
         panel.activeTab = LeftPanelTab::Materials;
     }
-    if (DrawPanelTab(font, uvTab, "UV", panel.activeTab == LeftPanelTab::UV))
+    if (!inputBlocked && DrawPanelTab(font, uvTab, "UV", panel.activeTab == LeftPanelTab::UV))
     {
         panel.activeTab = LeftPanelTab::UV;
     }
-    if (DrawPanelTab(font, skinTab, "Skin", panel.activeTab == LeftPanelTab::SkinWeights))
+    if (!inputBlocked && DrawPanelTab(font, skinTab, "Skin", panel.activeTab == LeftPanelTab::SkinWeights))
     {
         panel.activeTab = LeftPanelTab::SkinWeights;
     }
-    if (DrawPanelTab(font, validatorTab, "Valid", panel.activeTab == LeftPanelTab::Validator))
+    if (!inputBlocked && DrawPanelTab(font, validatorTab, "Valid", panel.activeTab == LeftPanelTab::Validator))
     {
         panel.activeTab = LeftPanelTab::Validator;
     }
@@ -297,7 +298,7 @@ void DrawHierarchyPanel(Font font,
 
     if (panel.activeTab == LeftPanelTab::Materials)
     {
-        DrawMaterialsPanel(font, *active, panelX, GetHierarchyContentStartY() + 10.0f, panelW, droppedPaths, droppedTextureHandled, textureClipboard, notice, error);
+        DrawMaterialsPanel(font, *active, panelX, GetHierarchyContentStartY() + 10.0f, panelW, droppedPaths, droppedTextureHandled, textureClipboard, notice, error, inputBlocked);
         return;
     }
     if (panel.activeTab == LeftPanelTab::UV)
@@ -323,9 +324,9 @@ void DrawHierarchyPanel(Font font,
 
     const Vector2 mouse = GetMousePosition();
     const bool additiveSelection = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
-    const bool leftPressed = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
-    const bool leftDown = IsMouseButtonDown(MOUSE_BUTTON_LEFT);
-    const bool leftReleased = IsMouseButtonReleased(MOUSE_BUTTON_LEFT);
+    const bool leftPressed = !inputBlocked && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    const bool leftDown = !inputBlocked && IsMouseButtonDown(MOUSE_BUTTON_LEFT);
+    const bool leftReleased = !inputBlocked && IsMouseButtonReleased(MOUSE_BUTTON_LEFT);
     if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT) || !additiveSelection)
     {
         panel.shiftDragSelecting = false;
@@ -361,11 +362,7 @@ void DrawHierarchyPanel(Font font,
 
     auto getContextMenuHeight = [&]()
     {
-        if (HasBoneNode(*active, GetContextActionNodes(*active, panel.contextNodeIndex, panel.contextNodeIndices)))
-        {
-            return kNodeContextMenuBoneH;
-        }
-        return kNodeContextMenuBaseH;
+        return GetNodeContextMenuHeight(*active, panel.contextNodeIndex, panel.contextNodeIndices);
     };
     float rowY = GetHierarchyContentStartY();
     int visibleRow = 0;
@@ -562,6 +559,7 @@ void DrawHierarchyPanel(Font font,
         const std::vector<int> contextNodes = GetContextActionNodes(*active, panel.contextNodeIndex, panel.contextNodeIndices);
         const std::vector<int> contextRoots = GetContextActionRoots(*active, contextNodes);
         const bool validContextBone = validContextNode && HasBoneNode(*active, contextNodes);
+        const bool validContextMesh = validContextNode && HasMeshNode(*active, contextNodes);
         const bool multiContext = contextNodes.size() > 1;
         if (panel.contextMenuJustOpened)
         {
@@ -569,11 +567,16 @@ void DrawHierarchyPanel(Font font,
         }
         else
         {
-            const Rectangle renameItem{ menu.x, menu.y, menu.width, 30.0f };
-            const Rectangle deleteItem{ menu.x, menu.y + 30.0f, menu.width, 30.0f };
-            const Rectangle applyScaleItem{ menu.x, menu.y + 60.0f, menu.width, 30.0f };
-            const Rectangle resetBindPoseItem{ menu.x, menu.y + 90.0f, menu.width, 30.0f };
-            if (DrawPanelButton(font, renameItem, "Rename"))
+            float itemY = menu.y;
+            const Rectangle renameItem{ menu.x, itemY, menu.width, 30.0f };
+            itemY += 30.0f;
+            const Rectangle deleteItem{ menu.x, itemY, menu.width, 30.0f };
+            itemY += 30.0f;
+            const Rectangle unparentItem{ menu.x, itemY, menu.width, 30.0f };
+            itemY += 30.0f;
+            const Rectangle applyScaleItem{ menu.x, itemY, menu.width, 30.0f };
+            itemY += 30.0f;
+            if (!inputBlocked && DrawPanelButton(font, renameItem, "Rename"))
             {
                 if (validContextNode)
                 {
@@ -581,7 +584,7 @@ void DrawHierarchyPanel(Font font,
                 }
                 panel.contextMenuOpen = false;
             }
-            if (DrawPanelButton(font, deleteItem, "Delete"))
+            if (!inputBlocked && DrawPanelButton(font, deleteItem, "Delete"))
             {
                 if (validContextNode && !contextRoots.empty())
                 {
@@ -592,7 +595,33 @@ void DrawHierarchyPanel(Font font,
                 }
                 panel.contextMenuOpen = false;
             }
-            if (DrawPanelButton(font, applyScaleItem, "Apply Scale"))
+            if (!inputBlocked && DrawPanelButton(font, unparentItem, "Unparent"))
+            {
+                if (validContextNode && !contextRoots.empty())
+                {
+                    EditSnapshot before = CaptureEditSnapshot(*active);
+                    const int changedCount = UnparentNodeRoots(*active, contextRoots);
+                    if (changedCount > 0)
+                    {
+                        PushUndoSnapshot(*active, std::move(before));
+                        if (multiContext)
+                        {
+                            notice = "Unparented " + std::to_string(changedCount) + " object" + std::string(changedCount == 1 ? "." : "s.");
+                        }
+                        else
+                        {
+                            notice = "Unparented object.";
+                        }
+                    }
+                    else
+                    {
+                        notice = "Object already at scene root.";
+                    }
+                    error.clear();
+                }
+                panel.contextMenuOpen = false;
+            }
+            if (!inputBlocked && DrawPanelButton(font, applyScaleItem, "Apply Scale"))
             {
                 if (validContextNode)
                 {
@@ -618,30 +647,115 @@ void DrawHierarchyPanel(Font font,
                 }
                 panel.contextMenuOpen = false;
             }
-            if (validContextBone && DrawPanelButton(font, resetBindPoseItem, "Reset Bind Pose"))
+            if (validContextMesh)
             {
-                EditSnapshot before = CaptureEditSnapshot(*active);
-                const int changedCount = ResetContextBoneSubtreesToOriginalBindPose(*active, contextNodes);
-                if (changedCount > 0)
+                const Rectangle pivotCenterItem{ menu.x, itemY, menu.width, 30.0f };
+                itemY += 30.0f;
+                if (!inputBlocked && DrawPanelButton(font, pivotCenterItem, "Pivot to Center"))
                 {
-                    PushUndoSnapshot(*active, std::move(before));
-                    if (multiContext)
+                    EditSnapshot before = CaptureEditSnapshot(*active);
+                    const int changedCount = SetMeshPivotsToBoundsCenterForContextNodes(*active, contextNodes);
+                    if (changedCount > 0)
                     {
-                        notice = "Reset " + std::to_string(changedCount) + " bone subtree" + std::string(changedCount == 1 ? " to bind pose." : "s to bind pose.");
+                        PushUndoSnapshot(*active, std::move(before));
+                        if (multiContext)
+                        {
+                            notice = "Moved pivot to center on " + std::to_string(changedCount) + " mesh" + std::string(changedCount == 1 ? "." : "es.");
+                        }
+                        else
+                        {
+                            notice = "Moved pivot to center.";
+                        }
                     }
                     else
                     {
-                        notice = "Bone subtree reset to bind pose.";
+                        notice = "Mesh pivot already at center.";
                     }
+                    error.clear();
+                    panel.contextMenuOpen = false;
                 }
-                else
+
+                const Rectangle pivotBottomItem{ menu.x, itemY, menu.width, 30.0f };
+                itemY += 30.0f;
+                if (!inputBlocked && DrawPanelButton(font, pivotBottomItem, "Pivot to Bottom"))
                 {
-                    notice = "Bone subtree already at bind pose.";
+                    EditSnapshot before = CaptureEditSnapshot(*active);
+                    const int changedCount = SetMeshPivotsToBoundsBottomForContextNodes(*active, contextNodes);
+                    if (changedCount > 0)
+                    {
+                        PushUndoSnapshot(*active, std::move(before));
+                        if (multiContext)
+                        {
+                            notice = "Moved pivot to bottom on " + std::to_string(changedCount) + " mesh" + std::string(changedCount == 1 ? "." : "es.");
+                        }
+                        else
+                        {
+                            notice = "Moved pivot to bottom.";
+                        }
+                    }
+                    else
+                    {
+                        notice = "Mesh pivot already at bottom.";
+                    }
+                    error.clear();
+                    panel.contextMenuOpen = false;
                 }
-                error.clear();
-                panel.contextMenuOpen = false;
+
+                const Rectangle flipNormalsItem{ menu.x, itemY, menu.width, 30.0f };
+                itemY += 30.0f;
+                if (!inputBlocked && DrawPanelButton(font, flipNormalsItem, "Flip Normals"))
+                {
+                    EditSnapshot before = CaptureEditSnapshot(*active);
+                    const int changedCount = FlipMeshNormalsForContextNodes(*active, contextNodes);
+                    if (changedCount > 0)
+                    {
+                        PushUndoSnapshot(*active, std::move(before));
+                        if (multiContext)
+                        {
+                            notice = "Flipped normals on " + std::to_string(changedCount) + " mesh" + std::string(changedCount == 1 ? "." : "es.");
+                        }
+                        else
+                        {
+                            notice = "Flipped normals.";
+                        }
+                    }
+                    else
+                    {
+                        notice = "No mesh normals to flip.";
+                    }
+                    error.clear();
+                    panel.contextMenuOpen = false;
+                }
             }
-            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !CheckCollisionPointRec(mouse, menu))
+            if (validContextBone)
+            {
+                const Rectangle resetBindPoseItem{ menu.x, itemY, menu.width, 30.0f };
+                itemY += 30.0f;
+                if (!inputBlocked && DrawPanelButton(font, resetBindPoseItem, "Reset Bind Pose"))
+                {
+                    EditSnapshot before = CaptureEditSnapshot(*active);
+                    const int changedCount = ResetContextBoneSubtreesToOriginalBindPose(*active, contextNodes);
+                    if (changedCount > 0)
+                    {
+                        PushUndoSnapshot(*active, std::move(before));
+                        if (multiContext)
+                        {
+                            notice = "Reset " + std::to_string(changedCount) + " bone subtree" + std::string(changedCount == 1 ? " to bind pose." : "s to bind pose.");
+                        }
+                        else
+                        {
+                            notice = "Bone subtree reset to bind pose.";
+                        }
+                    }
+                    else
+                    {
+                        notice = "Bone subtree already at bind pose.";
+                    }
+                    error.clear();
+                    panel.contextMenuOpen = false;
+                }
+            }
+            if (!inputBlocked && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !CheckCollisionPointRec(mouse, menu))
             {
                 panel.contextMenuOpen = false;
             }
