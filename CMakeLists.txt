@@ -30,6 +30,8 @@ set(OPENFBX_SOURCES
     src/FbxLoader.cpp
     src/FbxLoader.h
     src/geometry/MeshTangents.cpp
+    src/geometry/DeferredSkinning.cpp
+    src/geometry/DeferredSkinning.h
     src/geometry/MeshTangents.h
     src/platform/FileDialogs.cpp
     src/platform/FileDialogs.h
@@ -172,6 +174,19 @@ if(NOT raylib_FOUND)
 endif()
 
 target_link_libraries(openfbx PRIVATE raylib)
+
+option(OPENFBX_BUILD_TESTS "Build headless editor regression tests" OFF)
+if(OPENFBX_BUILD_TESTS)
+    enable_testing()
+    set(OPENFBX_TEST_SOURCES ${OPENFBX_SOURCES})
+    list(REMOVE_ITEM OPENFBX_TEST_SOURCES src/main.cpp src/editor/OpenFbxApp.cpp src/openfbx.rc)
+    add_executable(openfbx_transform_tests tests/TransformPerformance.cpp ${OPENFBX_TEST_SOURCES})
+    target_include_directories(openfbx_transform_tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src" "${FBXSDK_INCLUDE_DIR}")
+    get_target_property(OPENFBX_TEST_LIBRARIES openfbx LINK_LIBRARIES)
+    target_link_libraries(openfbx_transform_tests PRIVATE ${OPENFBX_TEST_LIBRARIES})
+    add_test(NAME transform_regression COMMAND openfbx_transform_tests)
+endif()
 
 if(MSVC)
     target_compile_options(openfbx PRIVATE /W4 /permissive-)

@@ -328,11 +328,13 @@ bool FlipMeshNormals(ModelTab& tab, int nodeIndex)
     }
 
     FlipNormalBufferRange(tab.loaded.bindNormals, node.meshVertexStart, node.meshVertexCount);
+    tab.skinningGeometry.reset();
     FlipNormalBufferRange(tab.currentNormals, node.meshVertexStart, node.meshVertexCount);
     for (AnimationClip& clip : tab.loaded.animations)
     {
         for (MeshFrame& frame : clip.meshFrames)
         {
+            ResolveMeshFrame(frame);
             FlipNormalBufferRange(frame.normals, node.meshVertexStart, node.meshVertexCount);
         }
     }
@@ -404,6 +406,7 @@ bool SetMeshPivotToBoundsBottom(ModelTab& tab, int nodeIndex)
 template <typename PointTransform, typename DirectionTransform>
 void TransformMeshNodeRange(ModelTab& tab, SceneNode& node, PointTransform transformPoint, DirectionTransform transformDirection)
 {
+    tab.skinningGeometry.reset();
     TransformPositionBuffer(tab.loaded.bindVertices, node.meshVertexStart, node.meshVertexCount, transformPoint);
     TransformDirectionBuffer(tab.loaded.bindNormals, node.meshVertexStart, node.meshVertexCount, transformDirection);
     TransformPositionBuffer(tab.currentVertices, node.meshVertexStart, node.meshVertexCount, transformPoint);
@@ -422,6 +425,7 @@ void TransformMeshNodeRange(ModelTab& tab, SceneNode& node, PointTransform trans
     {
         for (MeshFrame& frame : clip.meshFrames)
         {
+            ResolveMeshFrame(frame);
             TransformPositionBuffer(frame.vertices, node.meshVertexStart, node.meshVertexCount, transformPoint);
             TransformDirectionBuffer(frame.normals, node.meshVertexStart, node.meshVertexCount, transformDirection);
         }
@@ -439,20 +443,29 @@ void TransformBoneData(ModelTab& tab,
                        TransformAxis axis,
                        float amount)
 {
+    std::vector<unsigned char> inScope(tab.loaded.nodes.size());
+    for (int node = 0; node < static_cast<int>(inScope.size()); ++node)
+    {
+        inScope[static_cast<size_t>(node)] = IsNodeInTransformScope(tab.loaded, node, rootNode);
+    }
+    auto containsNode = [&](int node)
+    {
+        return node >= 0 && node < static_cast<int>(inScope.size()) && inScope[static_cast<size_t>(node)] != 0;
+    };
     auto transformBoneSegment = [&](BoneSegment& bone)
     {
-        if (IsNodeInTransformScope(tab.loaded, bone.startNode, rootNode))
+        if (containsNode(bone.startNode))
         {
             bone.start = transformPoint(bone.start);
         }
-        if (IsNodeInTransformScope(tab.loaded, bone.endNode, rootNode))
+        if (containsNode(bone.endNode))
         {
             bone.end = transformPoint(bone.end);
         }
     };
     auto transformBonePose = [&](BonePose& pose)
     {
-        if (!IsNodeInTransformScope(tab.loaded, pose.node, rootNode)) return;
+        if (!containsNode(pose.node)) return;
         pose.position = transformPoint(pose.position);
         pose.axisX = NormalizeOrFallback(transformDirection(pose.axisX), pose.axisX);
         pose.axisY = NormalizeOrFallback(transformDirection(pose.axisY), pose.axisY);
@@ -502,6 +515,20 @@ BoneFrame BuildBindBoneFrame(const LoadedFbxModel& loaded)
     return frame;
 }
 
+std::shared_ptr<const SkinningGeometry> GetSkinningGeometry(ModelTab& tab)
+{
+    if (!tab.skinningGeometry) tab.skinningGeometry = CaptureSkinningGeometry(tab.loaded);
+    return tab.skinningGeometry;
+}
+
+MeshFrame BuildCurrentBindSkin(ModelTab& tab)
+{
+    MeshFrame frame;
+    frame.deferred = CaptureSkinningFrame(GetSkinningGeometry(tab), BuildBindBoneFrame(tab.loaded));
+    ResolveMeshFrame(frame);
+    return frame;
+}
+
 void RecomputeAllMeshNodeBounds(ModelTab& tab)
 {
     for (SceneNode& node : tab.loaded.nodes)
@@ -544,6 +571,16 @@ bool StoreMeshFrameAsBindMesh(ModelTab& tab, const MeshFrame& meshFrame)
         }, skinned.bindNormal);
     }
 
+    if (tab.skinningGeometry)
+    {
+        auto refreshed = std::make_shared<SkinningGeometry>(*tab.skinningGeometry);
+        for (size_t vertex = 0; vertex < refreshed->vertices.size(); ++vertex)
+        {
+            refreshed->vertices[vertex].position = tab.loaded.skinnedVertices[vertex].bindPosition;
+            refreshed->vertices[vertex].normal = tab.loaded.skinnedVertices[vertex].bindNormal;
+        }
+        tab.skinningGeometry = std::move(refreshed);
+    }
     return true;
 }
 
@@ -553,19 +590,20 @@ bool BakeSkinnedBindMeshFromBones(ModelTab& tab, bool updateDisplayedMesh)
 
     // The FBX writer rebuilds control points from bindVertices, so keep that
     // buffer aligned with the CPU-skinned bind pose after bone transform edits.
-    const MeshFrame meshFrame = BuildSkinnedMeshFrame(tab.loaded, BuildBindBoneFrame(tab.loaded));
+    const MeshFrame meshFrame = BuildCurrentBindSkin(tab);
     if (!StoreMeshFrameAsBindMesh(tab, meshFrame)) return false;
 
+    InvalidateDisplayedAnimationCaches(tab);
     if (updateDisplayedMesh)
     {
         tab.currentVertices = meshFrame.vertices;
         tab.currentNormals = meshFrame.normals;
         tab.manualSkinnedMeshPose = true;
         RefreshDisplayedMesh(tab);
+        if (tab.animation.clipIndex < 0) tab.appliedClipIndex = -1;
     }
 
     RecomputeAllMeshNodeBounds(tab);
-    InvalidateDisplayedAnimationCaches(tab);
     return true;
 }
 
@@ -573,7 +611,7 @@ bool RebuildCurrentSkinnedMeshFromBones(ModelTab& tab)
 {
     if (!HasCpuSkinnedMesh(tab.loaded) || tab.loaded.bonePoses.empty()) return false;
 
-    const MeshFrame meshFrame = BuildSkinnedMeshFrame(tab.loaded, BuildBindBoneFrame(tab.loaded));
+    const MeshFrame meshFrame = BuildCurrentBindSkin(tab);
     if (meshFrame.vertices.size() != tab.loaded.bindVertices.size() ||
         meshFrame.normals.size() != tab.loaded.bindNormals.size())
     {
@@ -586,6 +624,7 @@ bool RebuildCurrentSkinnedMeshFromBones(ModelTab& tab)
     RecomputeAllMeshNodeBounds(tab);
     InvalidateDisplayedAnimationCaches(tab);
     RefreshDisplayedMesh(tab);
+    if (tab.animation.clipIndex < 0) tab.appliedClipIndex = -1;
     return true;
 }
 
@@ -594,20 +633,25 @@ bool RebuildSkinnedAnimationMeshFrames(ModelTab& tab)
     if (!HasCpuSkinnedMesh(tab.loaded)) return false;
 
     bool rebuilt = false;
+    std::shared_ptr<const SkinningGeometry> geometry;
     for (AnimationClip& clip : tab.loaded.animations)
     {
         if (clip.frames.empty()) continue;
-        clip.meshFrames.clear();
-        clip.meshFrames.reserve(clip.frames.size());
-        for (const BoneFrame& frame : clip.frames)
+        if (!geometry) geometry = GetSkinningGeometry(tab);
+        clip.meshFrames.resize(clip.frames.size());
+        for (size_t index = 0; index < clip.frames.size(); ++index)
         {
-            clip.meshFrames.push_back(BuildSkinnedMeshFrame(tab.loaded, frame));
+            MeshFrame pending;
+            pending.deferred = CaptureSkinningFrame(geometry, clip.frames[index]);
+            clip.meshFrames[index] = std::move(pending);
         }
         rebuilt = true;
     }
     if (rebuilt)
     {
+        const bool bindMeshDisplayed = tab.animation.clipIndex < 0 && tab.appliedClipIndex == -1;
         InvalidateDisplayedAnimationCaches(tab);
+        if (bindMeshDisplayed) tab.appliedClipIndex = -1;
     }
     return rebuilt;
 }
@@ -732,6 +776,7 @@ void PreserveAppliedMeshScaleGeometry(ModelTab& tab, SceneNode& node)
     }
 
     SyncMeshRangeToSkinnedBindFallbacks(tab.loaded, node);
+    tab.skinningGeometry.reset();
     RecomputeMeshNodeBounds(tab, node);
 }
 
@@ -743,6 +788,7 @@ Vector3 MultiplyComponents(Vector3 a, Vector3 b)
 void BakeBoneScaleIntoSkinBindData(ModelTab& tab, const SceneNode& node, Vector3 scale)
 {
     if (!HasCpuSkinnedMesh(tab.loaded) || IsScaleApproximatelyApplied(scale)) return;
+    tab.skinningGeometry.reset();
 
     for (SkinnedVertex& vertex : tab.loaded.skinnedVertices)
     {

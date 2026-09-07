@@ -1,6 +1,7 @@
 #pragma once
 
 #include <string>
+#include <memory>
 #include <vector>
 
 #include "raylib.h"
@@ -31,10 +32,20 @@ struct BoneFrame
     std::vector<BonePose> poses;
 };
 
+struct DeferredSkinningFrame;
+
+struct MeshFrameData
+{
+    std::vector<float> vertices;
+    std::vector<float> normals;
+};
+
 struct MeshFrame
 {
     std::vector<float> vertices;
     std::vector<float> normals;
+    std::shared_ptr<const DeferredSkinningFrame> deferred;
+    std::shared_ptr<const MeshFrameData> shared;
 };
 
 struct SkinnedVertexInfluence

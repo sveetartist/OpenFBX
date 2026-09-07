@@ -17,6 +17,7 @@
 #include "core/MathUtils.h"
 #include "FbxLoader.h"
 #include "geometry/MeshTangents.h"
+#include "geometry/DeferredSkinning.h"
 #include "platform/FileDialogs.h"
 #include "raylib.h"
 #include "raymath.h"
@@ -349,6 +350,7 @@ struct ViewportUvIslandCache
 struct ModelTab
 {
     LoadedFbxModel loaded;
+    std::shared_ptr<const SkinningGeometry> skinningGeometry;
     OrbitCamera orbit;
     AnimationState animation;
     std::vector<bool> collapsedNodes;
@@ -830,6 +832,7 @@ const BonePose* FindBonePoseByNode(const std::vector<BonePose>& poses, int nodeI
 bool RebuildCurrentSkinnedMeshFromBones(ModelTab& tab);
 bool RebuildSkinnedAnimationMeshFrames(ModelTab& tab);
 MeshFrame BuildSkinnedMeshFrame(const LoadedFbxModel& target, const BoneFrame& boneFrame);
+void BuildSkinnedMeshFrameInto(const LoadedFbxModel& target, const BoneFrame& boneFrame, MeshFrame& meshFrame);
 
 Color GetDebugIndexColor(int index, unsigned char alpha = 255)
 {
@@ -1441,8 +1444,11 @@ bool PackageFbxWithTextures(ModelTab& tab, std::string& notice, std::string& err
     return true;
 }
 
-EditSnapshot CaptureEditSnapshot(const ModelTab& tab)
+EditSnapshot CaptureEditSnapshot(ModelTab& tab)
 {
+    // Undo shares immutable animation caches; only subsequently used frames are copied.
+    for (AnimationClip& clip : tab.loaded.animations)
+        for (MeshFrame& frame : clip.meshFrames) ShareMeshFrame(frame);
     EditSnapshot snapshot;
     snapshot.bounds = tab.loaded.bounds;
     snapshot.nodes = tab.loaded.nodes;

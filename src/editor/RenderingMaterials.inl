@@ -21,6 +21,7 @@ void PushUndoSnapshot(ModelTab& tab)
 
 void RestoreEditSnapshot(ModelTab& tab, const EditSnapshot& snapshot)
 {
+    tab.skinningGeometry.reset();
     tab.loaded.bounds = snapshot.bounds;
     tab.loaded.nodes = snapshot.nodes;
     tab.loaded.bones = snapshot.bones;
@@ -353,11 +354,35 @@ bool IsViewportNodeVisible(const ModelTab& tab, int nodeIndex)
     return !IsDeletedNode(tab, nodeIndex) && IsNodeVisibleInIsolation(tab, nodeIndex);
 }
 
+std::vector<int> BuildHiddenMeshNodes(const ModelTab& tab, size_t vertexCount)
+{
+    // Resolve ownership once, preserving the first matching mesh for overlapping ranges.
+    std::vector<int> hiddenMeshNodes;
+    if (!tab.deletedNodes.empty() || tab.isolatedNode >= 0)
+    {
+        hiddenMeshNodes.assign(vertexCount, -2);
+        for (int nodeIndex = 0; nodeIndex < static_cast<int>(tab.loaded.nodes.size()); ++nodeIndex)
+        {
+            const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(nodeIndex)];
+            if (node.type != SceneNodeType::Mesh || node.meshVertexStart < 0 || node.meshVertexCount <= 0) continue;
+            const size_t start = static_cast<size_t>(node.meshVertexStart);
+            const size_t end = std::min(start + static_cast<size_t>(node.meshVertexCount), hiddenMeshNodes.size());
+            const int hiddenNode = IsViewportNodeVisible(tab, nodeIndex) ? -1 : nodeIndex;
+            for (size_t vertex = start; vertex < end; ++vertex)
+            {
+                if (hiddenMeshNodes[vertex] == -2) hiddenMeshNodes[vertex] = hiddenNode;
+            }
+        }
+    }
+    return hiddenMeshNodes;
+}
+
 void UploadGlobalMeshFrame(ModelTab& tab, const float* vertices, const float* normals, size_t expectedFloats)
 {
     if (!vertices || !normals || !tab.loaded.hasMesh) return;
-    tab.currentVertices.assign(vertices, vertices + expectedFloats);
-    tab.currentNormals.assign(normals, normals + expectedFloats);
+    if (vertices != tab.currentVertices.data()) tab.currentVertices.assign(vertices, vertices + expectedFloats);
+    if (normals != tab.currentNormals.data()) tab.currentNormals.assign(normals, normals + expectedFloats);
+    const std::vector<int> hiddenMeshNodes = BuildHiddenMeshNodes(tab, expectedFloats / 3);
 
     for (int meshIndex = 0; meshIndex < tab.loaded.model.meshCount; ++meshIndex)
     {
@@ -376,24 +401,7 @@ void UploadGlobalMeshFrame(ModelTab& tab, const float* vertices, const float* no
             const size_t localBase = localVertex * 3;
             if (globalBase + 2 >= expectedFloats) continue;
 
-            int hiddenMeshNode = -1;
-            const int globalVertex = globalIndices[localVertex];
-            if (!tab.deletedNodes.empty() || tab.isolatedNode >= 0)
-            {
-                for (int nodeIndex = 0; nodeIndex < static_cast<int>(tab.loaded.nodes.size()); ++nodeIndex)
-                {
-                    const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(nodeIndex)];
-                    if (node.type != SceneNodeType::Mesh || node.meshVertexStart < 0 || node.meshVertexCount <= 0) continue;
-                    if (globalVertex >= node.meshVertexStart && globalVertex < node.meshVertexStart + node.meshVertexCount)
-                    {
-                        if (!IsViewportNodeVisible(tab, nodeIndex))
-                        {
-                            hiddenMeshNode = nodeIndex;
-                        }
-                        break;
-                    }
-                }
-            }
+            const int hiddenMeshNode = hiddenMeshNodes.empty() ? -1 : hiddenMeshNodes[globalBase / 3];
 
             if (hiddenMeshNode >= 0)
             {

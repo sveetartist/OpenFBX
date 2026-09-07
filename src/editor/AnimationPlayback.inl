@@ -32,7 +32,7 @@ void ApplyAnimatedMeshFrame(ModelTab& tab)
         return;
     }
 
-    const AnimationClip& clip = tab.loaded.animations[static_cast<size_t>(tab.animation.clipIndex)];
+    AnimationClip& clip = tab.loaded.animations[static_cast<size_t>(tab.animation.clipIndex)];
     const MeshFrameSample sample = GetMeshFrameSample(clip, tab.animation.time);
     if (sample.first < 0 || sample.second < 0 ||
         sample.first >= static_cast<int>(clip.meshFrames.size()) ||
@@ -41,6 +41,8 @@ void ApplyAnimatedMeshFrame(ModelTab& tab)
         return;
     }
 
+    ResolveMeshFrame(clip.meshFrames[static_cast<size_t>(sample.first)]);
+    ResolveMeshFrame(clip.meshFrames[static_cast<size_t>(sample.second)]);
     const MeshFrame& firstFrame = clip.meshFrames[static_cast<size_t>(sample.first)];
     const MeshFrame& secondFrame = clip.meshFrames[static_cast<size_t>(sample.second)];
     const size_t expectedFloats = tab.loaded.bindVertices.size();

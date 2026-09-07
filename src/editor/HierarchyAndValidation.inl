@@ -658,14 +658,15 @@ Vector3 TransformPoseVector(const BonePose& pose, Vector3 vector)
                                  Vector3Scale(pose.axisZ, vector.z * pose.scale.z)));
 }
 
-MeshFrame BuildSkinnedMeshFrame(const LoadedFbxModel& target, const BoneFrame& boneFrame)
+void BuildSkinnedMeshFrameInto(const LoadedFbxModel& target, const BoneFrame& boneFrame, MeshFrame& meshFrame)
 {
-    MeshFrame meshFrame;
+    meshFrame.deferred.reset();
+    meshFrame.shared.reset();
     if (target.skinnedVertices.size() != target.bindVertices.size() / 3)
     {
         meshFrame.vertices = target.bindVertices;
         meshFrame.normals = target.bindNormals;
-        return meshFrame;
+        return;
     }
 
     std::unordered_map<std::string, const BonePose*> posesByName;
@@ -677,8 +678,9 @@ MeshFrame BuildSkinnedMeshFrame(const LoadedFbxModel& target, const BoneFrame& b
         }
     }
 
-    meshFrame.vertices.reserve(target.bindVertices.size());
-    meshFrame.normals.reserve(target.bindNormals.size());
+    meshFrame.vertices.resize(target.skinnedVertices.size() * 3);
+    meshFrame.normals.resize(target.skinnedVertices.size() * 3);
+    size_t base = 0;
     for (const SkinnedVertex& vertex : target.skinnedVertices)
     {
         Vector3 position{};
@@ -705,14 +707,20 @@ MeshFrame BuildSkinnedMeshFrame(const LoadedFbxModel& target, const BoneFrame& b
             normal = vertex.bindNormal;
         }
 
-        meshFrame.vertices.push_back(position.x);
-        meshFrame.vertices.push_back(position.y);
-        meshFrame.vertices.push_back(position.z);
-        meshFrame.normals.push_back(normal.x);
-        meshFrame.normals.push_back(normal.y);
-        meshFrame.normals.push_back(normal.z);
+        meshFrame.vertices[base] = position.x;
+        meshFrame.vertices[base + 1] = position.y;
+        meshFrame.vertices[base + 2] = position.z;
+        meshFrame.normals[base] = normal.x;
+        meshFrame.normals[base + 1] = normal.y;
+        meshFrame.normals[base + 2] = normal.z;
+        base += 3;
     }
+}
 
+MeshFrame BuildSkinnedMeshFrame(const LoadedFbxModel& target, const BoneFrame& boneFrame)
+{
+    MeshFrame meshFrame;
+    BuildSkinnedMeshFrameInto(target, boneFrame, meshFrame);
     return meshFrame;
 }
 

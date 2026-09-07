@@ -602,6 +602,7 @@ void RenameSceneNode(ModelTab& tab, int nodeIndex, const std::string& newName)
     const std::string oldName = node.name;
     if (oldName == newName) return;
     node.name = newName;
+    tab.skinningGeometry.reset();
 
     if (node.type == SceneNodeType::Bone)
     {

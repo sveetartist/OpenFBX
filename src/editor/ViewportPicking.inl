@@ -355,6 +355,7 @@ bool PaintSkinWeightsAtMouse(ModelTab& tab,
     }
 
     if (brushVertices.empty()) return false;
+    tab.skinningGeometry.reset();
 
     const float smoothTargetWeight = smoothFalloffSum > 0.000001f ? smoothWeightSum / smoothFalloffSum : 0.0f;
     for (const BrushVertex& brushVertex : brushVertices)
