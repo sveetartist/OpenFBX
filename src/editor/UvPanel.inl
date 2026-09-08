@@ -728,7 +728,64 @@ void ValidateTexelDensityConsistency(const ModelTab& tab, std::vector<ValidatorI
     }
 }
 
-void DrawUvPanel(Font font, ModelTab& tab, float panelX, float panelY, float panelW)
+void RefreshUvMeshBuffers(ModelTab& tab)
+{
+    if (tab.loaded.uvSets.empty()) return;
+    const auto& uv = tab.loaded.uvSets.front();
+    for (int m = 0; m < tab.loaded.model.meshCount; ++m)
+    {
+        if (m >= static_cast<int>(tab.loaded.meshGlobalVertexIndices.size())) continue;
+        Mesh& mesh = tab.loaded.model.meshes[m];
+        if (!mesh.texcoords) continue;
+        const auto& indices = tab.loaded.meshGlobalVertexIndices[m];
+        for (size_t v = 0; v < indices.size() && v < static_cast<size_t>(mesh.vertexCount); ++v)
+        {
+            const size_t base = static_cast<size_t>(indices[v]) * 2;
+            mesh.texcoords[v * 2] = base + 1 < uv.size() ? uv[base] : 0.0f;
+            mesh.texcoords[v * 2 + 1] = base + 1 < uv.size() ? uv[base + 1] : 0.0f;
+        }
+        UpdateMeshBuffer(mesh, 1, mesh.texcoords, mesh.vertexCount * 2 * sizeof(float), 0);
+    }
+}
+
+void CombineAllUvSets(ModelTab& tab, int preferred)
+{
+    auto& loaded = tab.loaded;
+    if (loaded.uvSets.size() < 2 || preferred < 0 || preferred >= static_cast<int>(loaded.uvSets.size())) return;
+    PushUndoSnapshot(tab);
+    const size_t count = loaded.bindVertices.size() / 3;
+    std::vector<float> combined(count * 2, 0.0f);
+    std::vector<unsigned char> presence(count, 0);
+    for (size_t v = 0; v < count; ++v)
+    {
+        for (int candidate = -1; candidate < static_cast<int>(loaded.uvSets.size()); ++candidate)
+        {
+            const int set = candidate < 0 ? preferred : candidate;
+            if (loaded.uvSets[set].size() < v * 2 + 2) continue;
+            if (set < static_cast<int>(loaded.uvSetPresence.size()) &&
+                (v >= loaded.uvSetPresence[set].size() || !loaded.uvSetPresence[set][v])) continue;
+            combined[v * 2] = loaded.uvSets[set][v * 2];
+            combined[v * 2 + 1] = loaded.uvSets[set][v * 2 + 1];
+            presence[v] = 1;
+            break;
+        }
+    }
+    const std::string name = loaded.uvSetNames[preferred];
+    loaded.uvSets = { std::move(combined) };
+    loaded.uvSetPresence = { std::move(presence) };
+    loaded.uvSetNames = { name };
+    loaded.uvSetsEdited = true;
+    tab.selectedUvSet = 0;
+    tab.uvSetScroll = 0;
+    tab.uvContextSet = -1;
+    tab.selectedUvIslands.clear();
+    tab.uvIslandMarqueeSelecting = false;
+    tab.viewportUvIslandCache = ViewportUvIslandCache{};
+    RefreshUvMeshBuffers(tab);
+    RefreshDisplayedMesh(tab);
+}
+
+void DrawUvPanel(Font font, ModelTab& tab, RenameEditor& renameEditor, float panelX, float panelY, float panelW)
 {
     const float contentX = panelX + 12.0f;
     float y = panelY;
@@ -778,9 +835,14 @@ void DrawUvPanel(Font font, ModelTab& tab, float panelX, float panelY, float pan
         const bool selected = uvSetIndex == tab.selectedUvSet;
         const bool hovered = CheckCollisionPointRec(mouse, row);
         DrawRectangleRec(row, selected ? Color{ 50, 70, 88, 255 } : hovered ? Color{ 36, 42, 48, 255 } : Color{ 14, 16, 19, 245 });
-        if (hovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+        if (!renameEditor.active && hovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
         {
             tab.selectedUvSet = uvSetIndex;
+        }
+        if (!renameEditor.active && hovered && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT))
+        {
+            tab.selectedUvSet = uvSetIndex;
+            tab.uvContextSet = uvSetIndex;
         }
 
         char rowText[256] = {};
@@ -800,6 +862,28 @@ void DrawUvPanel(Font font, ModelTab& tab, float panelX, float panelY, float pan
         DrawRectangleRec(Rectangle{ track.x, thumbY, track.width, thumbHeight }, Color{ 130, 145, 158, 255 });
     }
     y += listBounds.height + 14.0f;
+    if (tab.uvContextSet >= 0 && tab.uvContextSet < uvSetCount && !renameEditor.active)
+    {
+        const Rectangle menu{ contentX, y, panelW - 24.0f, 60.0f };
+        DrawRectangleRec(menu, Color{ 25, 30, 36, 255 });
+        if (DrawPanelButton(font, Rectangle{ contentX + 4, y + 3, menu.width - 8, 24 }, "Rename UV Set"))
+        {
+            renameEditor = RenameEditor{};
+            renameEditor.target = RenameTarget::UvSet;
+            renameEditor.uvSetIndex = tab.uvContextSet;
+            renameEditor.active = true;
+            renameEditor.justOpened = true;
+            std::snprintf(renameEditor.text, sizeof(renameEditor.text), "%s", tab.loaded.uvSetNames[tab.uvContextSet].c_str());
+            renameEditor.cursor = static_cast<int>(std::strlen(renameEditor.text));
+            renameEditor.textSelected = true;
+            tab.uvContextSet = -1;
+        }
+        if (uvSetCount > 1 && DrawPanelButton(font, Rectangle{ contentX + 4, y + 31, menu.width - 8, 24 }, "Combine All UV Sets"))
+            CombineAllUvSets(tab, tab.uvContextSet);
+        if (IsKeyPressed(KEY_ESCAPE) || (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !CheckCollisionPointRec(mouse, menu)))
+            tab.uvContextSet = -1;
+        return;
+    }
 
     if (tab.selectedNode < 0 || tab.selectedNode >= static_cast<int>(tab.loaded.nodes.size()) ||
         tab.loaded.nodes[static_cast<size_t>(tab.selectedNode)].type != SceneNodeType::Mesh)

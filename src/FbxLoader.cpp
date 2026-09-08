@@ -43,6 +43,7 @@ struct MeshBuilder
     std::vector<float> texcoords;
     std::vector<std::string> uvSetNames;
     std::vector<std::vector<float>> uvSets;
+    std::vector<std::vector<unsigned char>> uvSetPresence;
     std::vector<FbxTextureReference> textureReferences;
     std::vector<SkinnedVertex> skinnedVertices;
     std::vector<unsigned int> indices;
@@ -552,6 +553,13 @@ void AppendMesh(FbxNode* node, FbxMesh* mesh, MeshBuilder& out)
     }
 
     const int meshVertexCount = out.VertexCount() - meshVertexStart;
+    out.uvSetPresence.resize(out.uvSets.size());
+    for (size_t set = 0; set < out.uvSets.size(); ++set)
+    {
+        out.uvSetPresence[set].resize(out.VertexCount(), 0);
+        if (std::find(meshUvSetIndices.begin(), meshUvSetIndices.end(), static_cast<int>(set)) != meshUvSetIndices.end())
+            std::fill(out.uvSetPresence[set].begin() + meshVertexStart, out.uvSetPresence[set].end(), 1);
+    }
     if (meshVertexCount > 0 && sceneNodeIndex >= 0)
     {
         const int meshPolygonVertexCount = static_cast<int>(out.polygonVertexGlobalIndices.size()) - meshPolygonVertexStart;
@@ -1491,7 +1499,7 @@ bool CreateGeneratedMeshSceneNode(FbxScene* scene,
             if (uvElement)
             {
                 const size_t uvBase = static_cast<size_t>(currentGlobalVertex) * 2;
-                uvElement->GetDirectArray().Add(FbxVector2((*uvSet)[uvBase], (*uvSet)[uvBase + 1]));
+                uvElement->GetDirectArray().Add(FbxVector2((*uvSet)[uvBase], 1.0f - (*uvSet)[uvBase + 1]));
             }
         }
         mesh->EndPolygon();
@@ -1850,6 +1858,27 @@ void ApplyEditedMeshGeometry(const LoadedFbxModel& model,
 
             globalVertex = sceneNode.meshVertexStart;
             int polygonVertex = nodePolygonVertex;
+            std::vector<std::pair<size_t, FbxGeometryElementUV*>> editedUvElements;
+            if (model.uvSetsEdited && nodePolygonVertex >= 0 &&
+                nodePolygonVertex + rawPolygonVertexCount <= static_cast<int>(model.meshPolygonVertexGlobalIndices.size()))
+            {
+                while (mesh->GetElementUVCount() > 0) mesh->RemoveElementUV(mesh->GetElementUV(0));
+                for (size_t set = 0; set < model.uvSets.size(); ++set)
+                {
+                    bool present = set >= model.uvSetPresence.size();
+                    for (int p = 0; !present && p < rawPolygonVertexCount; ++p)
+                    {
+                        const int v = model.meshPolygonVertexGlobalIndices[nodePolygonVertex + p];
+                        present = v >= 0 && v < static_cast<int>(model.uvSetPresence[set].size()) && model.uvSetPresence[set][v];
+                    }
+                    if (!present) continue;
+                    const char* name = set < model.uvSetNames.size() ? model.uvSetNames[set].c_str() : "UVSet";
+                    auto* element = mesh->CreateElementUV(name);
+                    element->SetMappingMode(FbxGeometryElement::eByPolygonVertex);
+                    element->SetReferenceMode(FbxGeometryElement::eDirect);
+                    editedUvElements.emplace_back(set, element);
+                }
+            }
             const int polygonCount = mesh->GetPolygonCount();
             for (int polygon = 0; polygon < polygonCount; ++polygon)
             {
@@ -1860,6 +1889,13 @@ void ApplyEditedMeshGeometry(const LoadedFbxModel& model,
                         ? model.meshPolygonVertexGlobalIndices[static_cast<size_t>(polygonVertex)]
                         : globalVertex;
                     ++polygonVertex;
+                    for (const auto& entry : editedUvElements)
+                    {
+                        const auto& uv = model.uvSets[entry.first];
+                        const size_t base = static_cast<size_t>(currentGlobalVertex) * 2;
+                        entry.second->GetDirectArray().Add(base + 1 < uv.size()
+                            ? FbxVector2(uv[base], 1.0f - uv[base + 1]) : FbxVector2(0, 0));
+                    }
                     if (globalVertex < globalVertexEnd)
                     {
                         ++globalVertex;
@@ -2750,6 +2786,7 @@ bool BuildRaylibModel(const MeshBuilder& builder, LoadedFbxModel& outModel, std:
     outModel.meshPolygonEdges = builder.polygonEdges;
     outModel.uvSetNames = builder.uvSetNames;
     outModel.uvSets = builder.uvSets;
+    outModel.uvSetPresence = builder.uvSetPresence;
     outModel.materialNames = builder.materialNames.empty() ? std::vector<std::string>{ "Default" } : builder.materialNames;
     outModel.textureReferences = builder.textureReferences;
     outModel.bounds = builder.hasBounds ? builder.bounds : BoundingBox{ { -1.0f, -1.0f, -1.0f }, { 1.0f, 1.0f, 1.0f } };

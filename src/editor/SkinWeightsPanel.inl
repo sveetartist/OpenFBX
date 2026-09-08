@@ -303,7 +303,7 @@ void DrawHierarchyPanel(Font font,
     }
     if (panel.activeTab == LeftPanelTab::UV)
     {
-        DrawUvPanel(font, *active, panelX, GetHierarchyContentStartY() + 10.0f, panelW);
+        DrawUvPanel(font, *active, renameEditor, panelX, GetHierarchyContentStartY() + 10.0f, panelW);
         return;
     }
     if (panel.activeTab == LeftPanelTab::SkinWeights)

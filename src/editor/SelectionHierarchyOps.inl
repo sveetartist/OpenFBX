@@ -296,31 +296,29 @@ bool RebuildRaylibModelFromGlobalGeometry(ModelTab& tab, std::string& error)
     }
 
     Model rebuilt{};
-    rebuilt.transform = MatrixIdentity();
     rebuilt.meshCount = static_cast<int>(meshes.size());
-    rebuilt.materialCount = materialCount;
     rebuilt.meshes = CopyEditorVectorToRaylibBuffer(meshes);
     rebuilt.meshMaterial = CopyEditorVectorToRaylibBuffer(meshMaterials);
-    rebuilt.materials = static_cast<Material*>(MemAlloc(static_cast<unsigned int>(sizeof(Material) * materialCount)));
-    if (!rebuilt.meshes || !rebuilt.meshMaterial || !rebuilt.materials)
+    if (!rebuilt.meshes || !rebuilt.meshMaterial)
     {
         if (rebuilt.meshes) MemFree(rebuilt.meshes);
         if (rebuilt.meshMaterial) MemFree(rebuilt.meshMaterial);
-        if (rebuilt.materials) MemFree(rebuilt.materials);
         for (Mesh& mesh : meshes) UnloadMesh(mesh);
         error = "Failed to allocate merged model.";
         return false;
     }
 
-    for (int materialIndex = 0; materialIndex < materialCount; ++materialIndex)
+    // Only geometry changes: retain material maps, the lighting shader and model transform.
+    for (int meshIndex = 0; meshIndex < loaded.model.meshCount; ++meshIndex)
     {
-        rebuilt.materials[materialIndex] = LoadMaterialDefault();
+        UnloadMesh(loaded.model.meshes[meshIndex]);
     }
-
-    UnloadModel(loaded.model);
-    loaded.model = rebuilt;
+    MemFree(loaded.model.meshes);
+    MemFree(loaded.model.meshMaterial);
+    loaded.model.meshCount = rebuilt.meshCount;
+    loaded.model.meshes = rebuilt.meshes;
+    loaded.model.meshMaterial = rebuilt.meshMaterial;
     loaded.meshGlobalVertexIndices = std::move(meshGlobalIndices);
-    ApplyNeutralMaterial(loaded);
     return true;
 }
 
@@ -426,6 +424,8 @@ int MergeSelectedGeometry(ModelTab& tab, const std::vector<int>& contextNodes, s
             newVerticesByMaterial.push_back(sourceVertex < static_cast<int>(materialForVertex.size()) ? materialForVertex[static_cast<size_t>(sourceVertex)] : 0);
 
             const size_t uvBase = static_cast<size_t>(sourceVertex) * 2;
+            for (auto& presence : tab.loaded.uvSetPresence)
+                presence.push_back(sourceVertex < static_cast<int>(presence.size()) ? presence[sourceVertex] : 0);
             for (std::vector<float>& uvSet : tab.loaded.uvSets)
             {
                 if (uvBase + 1 < uvSet.size())
@@ -1215,7 +1215,7 @@ void DrawRenameEditor(Font font, ModelTab* active, RenameEditor& editor, std::st
     DrawRectangleRec(Rectangle{ 0.0f, 0.0f, static_cast<float>(GetScreenWidth()), static_cast<float>(GetScreenHeight()) }, Color{ 0, 0, 0, 80 });
     DrawRectangleRec(dialog, Color{ 24, 27, 31, 250 });
     DrawRectangleLinesEx(dialog, 1.0f, Color{ 86, 96, 108, 255 });
-    DrawUiText(font, editor.target == RenameTarget::AnimationClip ? "Rename Animation" : "Rename Object", dialog.x + 16.0f, dialog.y + 16.0f, 16.0f, Color{ 205, 213, 220, 255 });
+    DrawUiText(font, editor.target == RenameTarget::UvSet ? "Rename UV Set" : editor.target == RenameTarget::AnimationClip ? "Rename Animation" : "Rename Object", dialog.x + 16.0f, dialog.y + 16.0f, 16.0f, Color{ 205, 213, 220, 255 });
     DrawRectangleRec(input, Color{ 14, 16, 19, 255 });
     DrawRectangleLinesEx(input, 1.0f, Color{ 94, 156, 214, 255 });
     if (editor.textSelected && editor.text[0] != '\0')
@@ -1245,6 +1245,30 @@ void DrawRenameEditor(Font font, ModelTab* active, RenameEditor& editor, std::st
         {
             error = "Name cannot be empty.";
             notice.clear();
+        }
+        else if (editor.target == RenameTarget::UvSet && editor.uvSetIndex >= 0 &&
+                 editor.uvSetIndex < static_cast<int>(active->loaded.uvSetNames.size()))
+        {
+            auto& names = active->loaded.uvSetNames;
+            const auto existing = std::find(names.begin(), names.end(), newName);
+            if (newName.find_first_not_of(" \t\r\n") == std::string::npos ||
+                (existing != names.end() && existing - names.begin() != editor.uvSetIndex))
+            {
+                error = "UV set names must be nonblank and unique.";
+                notice.clear();
+            }
+            else
+            {
+                if (names[editor.uvSetIndex] != newName)
+                {
+                    PushUndoSnapshot(*active);
+                    names[editor.uvSetIndex] = newName;
+                    active->loaded.uvSetsEdited = true;
+                }
+                notice = "Renamed UV set.";
+                error.clear();
+                editor = RenameEditor{};
+            }
         }
         else if (editor.target == RenameTarget::SceneNode)
         {

@@ -10,6 +10,21 @@ bool DrawChannelButton(Font font, Rectangle bounds, PackedChannel channel)
     return hovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
 }
 
+bool DrawNormalModeButton(Font font, Rectangle bounds, bool directX)
+{
+    const Vector2 mouse = GetMousePosition();
+    const bool hovered = CheckCollisionPointRec(mouse, bounds);
+    const Color fill = directX
+        ? (hovered ? Color{ 68, 114, 205, 255 } : Color{ 50, 84, 156, 255 })
+        : (hovered ? Color{ 62, 160, 76, 255 } : Color{ 45, 118, 58, 255 });
+    DrawRectangleRec(bounds, fill);
+    DrawRectangleLinesEx(bounds, 1.0f, Color{ 205, 213, 220, 120 });
+    const char* label = directX ? "DX" : "GL";
+    const Vector2 size = MeasureTextEx(font, label, 14.0f, 1.0f);
+    DrawUiText(font, label, bounds.x + (bounds.width - size.x) * 0.5f, bounds.y + 4.0f, 14.0f, RAYWHITE);
+    return hovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+}
+
 void DrawTextureThumbnail(Font font, Rectangle bounds, const PbrTexture& texture, bool dropTarget)
 {
     DrawRectangleRec(bounds, dropTarget ? Color{ 42, 62, 74, 255 } : Color{ 18, 21, 25, 255 });
@@ -611,6 +626,16 @@ void DrawPbrTextureRow(Font font,
         }
         buttonRight -= 44.0f;
     }
+    else if (slot == PbrTextureSlot::Normal)
+    {
+        const Rectangle normalModeButton{ buttonRight - 38.0f, y - 2.0f, 34.0f, 22.0f };
+        if (!inputBlocked && DrawNormalModeButton(font, normalModeButton, material.normalDirectX))
+        {
+            PushUndoSnapshot(tab);
+            material.normalDirectX = !material.normalDirectX;
+        }
+        buttonRight -= 44.0f;
+    }
     else if (slot == PbrTextureSlot::Opacity)
     {
         const Rectangle channelButton{ buttonRight - 48.0f, y - 2.0f, 44.0f, 22.0f };
@@ -699,8 +724,6 @@ void DrawMaterialsPanel(Font font,
         }
         y += 24.0f;
     }
-    PbrMaterialState& material = tab.pbrMaterials[static_cast<size_t>(tab.selectedMaterial)];
-
     const float clearAllW = 74.0f;
     const Rectangle loadFolderButton{ contentX, y, panelW - 30.0f - clearAllW, 24.0f };
     const Rectangle clearAllButton{ contentX + loadFolderButton.width + 6.0f, y, clearAllW, 24.0f };
@@ -753,15 +776,6 @@ void DrawMaterialsPanel(Font font,
 
     DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Diffuse, panelX, panelW, y, droppedPaths, droppedTextureHandled, clipboard, notice, error, inputBlocked);
     DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Normal, panelX, panelW, y, droppedPaths, droppedTextureHandled, clipboard, notice, error, inputBlocked);
-
-    const Rectangle normalModeButton{ contentX + 112.0f, y - 2.0f, panelW - 136.0f, 22.0f };
-    DrawUiText(font, "Normal mode", contentX, y, 14.0f, Color{ 190, 200, 210, 255 });
-    if (!inputBlocked && DrawPanelButton(font, normalModeButton, material.normalDirectX ? "DirectX" : "OpenGL"))
-    {
-        PushUndoSnapshot(tab);
-        material.normalDirectX = !material.normalDirectX;
-    }
-    y += 32.0f;
 
     DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Roughness, panelX, panelW, y, droppedPaths, droppedTextureHandled, clipboard, notice, error, inputBlocked);
     DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Metallic, panelX, panelW, y, droppedPaths, droppedTextureHandled, clipboard, notice, error, inputBlocked);

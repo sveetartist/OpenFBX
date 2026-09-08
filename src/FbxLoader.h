@@ -148,6 +148,8 @@ struct LoadedFbxModel
     std::vector<MeshEdge> meshPolygonEdges;
     std::vector<std::string> uvSetNames;
     std::vector<std::vector<float>> uvSets;
+    std::vector<std::vector<unsigned char>> uvSetPresence;
+    bool uvSetsEdited = false;
     std::vector<std::string> materialNames;
     std::vector<FbxTextureReference> textureReferences;
     std::string embeddedMediaExtractionDirectory;

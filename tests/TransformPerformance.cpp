@@ -127,6 +127,9 @@ static void TestTangents()
 
 static void TestMergeSelectedGeometryPreservesSkinning()
 {
+    SetConfigFlags(FLAG_WINDOW_HIDDEN);
+    InitWindow(64, 64, "Merge regression");
+    Require(IsWindowReady(), "Could not create merge test rendering context");
     ModelTab tab;
     tab.loaded.valid = true;
     tab.loaded.hasMesh = true;
@@ -199,8 +202,19 @@ static void TestMergeSelectedGeometryPreservesSkinning()
         tab.loaded.skinnedVertices.push_back(skinned);
     }
 
+    tab.loaded.model = LoadModelFromMesh(GenMeshCube(1, 1, 1));
+    LitShader lit = LoadBasicLitShader();
+    Require(lit.valid, "Could not create merge test lighting shader");
+    ApplyLitShader(tab.loaded, lit);
+    Material* originalMaterials = tab.loaded.model.materials;
+    MaterialMap* originalMaps = originalMaterials[0].maps;
+    originalMaps[MATERIAL_MAP_DIFFUSE].color = Color{ 61, 112, 193, 255 };
     std::string error;
     const int mergedCount = MergeSelectedGeometry(tab, { 1, 2 }, error);
+    Require(tab.loaded.model.materials == originalMaterials, "Merge replaced existing materials");
+    Require(tab.loaded.model.materials[0].shader.id == lit.shader.id, "Merge lost the lighting shader");
+    Require(tab.loaded.model.materials[0].maps == originalMaps, "Merge replaced material maps");
+    Require(originalMaps[MATERIAL_MAP_DIFFUSE].color.r == 61, "Merge reset the material color");
     Require(mergedCount == 2, "Expected two meshes to merge");
     Require(error.empty(), "Merge reported an unexpected error");
     Require(tab.loaded.nodes.size() == 4, "Merge did not add a mesh node");
@@ -212,6 +226,28 @@ static void TestMergeSelectedGeometryPreservesSkinning()
     Require(tab.loaded.skinnedVertices[6].influences.size() == 1, "Merged vertex lost its skin influence");
     Require(tab.loaded.skinnedVertices[6].influences[0].boneName == "Bone", "Merged vertex changed its skin bone");
     Equal(ReferenceSkin(tab.loaded, BuildBindBoneFrame(tab.loaded)), MeshFrame{ tab.currentVertices, tab.currentNormals });
+    const size_t uvVertexCount = tab.loaded.bindVertices.size() / 3;
+    tab.loaded.uvSetNames = { "First", "Preferred" };
+    tab.loaded.uvSets = { std::vector<float>(uvVertexCount * 2, 0.25f), std::vector<float>(uvVertexCount * 2, 0.75f) };
+    tab.loaded.uvSetPresence = { std::vector<unsigned char>(uvVertexCount, 1), std::vector<unsigned char>(uvVertexCount, 1) };
+    tab.loaded.uvSetPresence[1][0] = 0;
+    tab.loaded.uvSets[1][2] = 0.0f;
+    tab.loaded.uvSets[1][3] = 0.0f;
+    const auto originalUvSets = tab.loaded.uvSets;
+    CombineAllUvSets(tab, 1);
+    Require(tab.loaded.uvSetNames == std::vector<std::string>{ "Preferred" }, "Combine did not retain preferred name");
+    Require(tab.loaded.uvSets.size() == 1, "Combine did not collapse UV sets");
+    Require(tab.loaded.uvSets[0][0] == 0.25f, "Combine did not fill missing UVs");
+    Require(tab.loaded.uvSets[0][2] == 0.0f && tab.loaded.uvSets[0][3] == 0.0f, "Combine overwrote valid zero UVs");
+    Require(tab.loaded.uvSets[0][4] == 0.75f, "Combine did not prefer chosen set");
+    Require(tab.loaded.model.meshes[0].texcoords[4] == 0.75f, "Combine did not update render UVs");
+    Require(UndoEdit(tab) && tab.loaded.uvSets == originalUvSets, "Undo did not restore UV sets");
+    Require(!tab.loaded.uvSetsEdited, "Undo did not restore UV export state");
+    Require(RedoEdit(tab) && tab.loaded.uvSets.size() == 1, "Redo did not combine UV sets");
+    Equal(ReferenceSkin(tab.loaded, BuildBindBoneFrame(tab.loaded)), MeshFrame{ tab.currentVertices, tab.currentNormals });
+    UnloadFbxModel(tab.loaded);
+    UnloadShader(lit.shader);
+    CloseWindow();
 }
 
 static int BenchmarkFbx(const char* path)

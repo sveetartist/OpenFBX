@@ -21,6 +21,15 @@ void PushUndoSnapshot(ModelTab& tab)
 
 void RestoreEditSnapshot(ModelTab& tab, const EditSnapshot& snapshot)
 {
+    tab.loaded.uvSetNames = snapshot.uvSetNames;
+    tab.loaded.uvSets = snapshot.uvSets;
+    tab.loaded.uvSetPresence = snapshot.uvSetPresence;
+    tab.loaded.uvSetsEdited = snapshot.uvSetsEdited;
+    tab.selectedUvSet = snapshot.selectedUvSet;
+    tab.uvContextSet = -1;
+    tab.viewportUvIslandCache = ViewportUvIslandCache{};
+    tab.selectedUvIslands.clear();
+    RefreshUvMeshBuffers(tab);
     tab.skinningGeometry.reset();
     tab.loaded.bounds = snapshot.bounds;
     tab.loaded.nodes = snapshot.nodes;

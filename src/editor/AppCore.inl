@@ -92,7 +92,8 @@ enum class RenameTarget
 {
     None,
     SceneNode,
-    AnimationClip
+    AnimationClip,
+    UvSet
 };
 
 struct RenameEditor
@@ -100,6 +101,7 @@ struct RenameEditor
     RenameTarget target = RenameTarget::None;
     int nodeIndex = -1;
     int clipIndex = -1;
+    int uvSetIndex = -1;
     char text[256]{};
     int cursor = 0;
     bool textSelected = false;
@@ -250,6 +252,11 @@ struct PbrMaterialSnapshot
 
 struct EditSnapshot
 {
+    std::vector<std::string> uvSetNames;
+    std::vector<std::vector<float>> uvSets;
+    std::vector<std::vector<unsigned char>> uvSetPresence;
+    bool uvSetsEdited = false;
+    int selectedUvSet = 0;
     BoundingBox bounds{};
     std::vector<SceneNode> nodes;
     std::vector<BoneSegment> bones;
@@ -368,6 +375,7 @@ struct ModelTab
     std::vector<EditSnapshot> redoStack;
     int selectedMaterial = 0;
     int selectedUvSet = 0;
+    int uvContextSet = -1;
     int uvSetScroll = 0;
     bool showUvTexelDensity = false;
     bool showUvSameMaterialMeshes = false;
@@ -837,6 +845,7 @@ void InvalidateDisplayedAnimationCaches(ModelTab& tab);
 void RecomputeMeshNodeBounds(ModelTab& tab, SceneNode& node);
 void RecomputeSceneBounds(ModelTab& tab);
 void RefreshDisplayedMesh(ModelTab& tab);
+void RefreshUvMeshBuffers(ModelTab& tab);
 bool HasCpuSkinnedMesh(const LoadedFbxModel& loaded);
 const BonePose* FindBonePoseByNode(const std::vector<BonePose>& poses, int nodeIndex);
 bool RebuildCurrentSkinnedMeshFromBones(ModelTab& tab);
@@ -1460,6 +1469,11 @@ EditSnapshot CaptureEditSnapshot(ModelTab& tab)
     for (AnimationClip& clip : tab.loaded.animations)
         for (MeshFrame& frame : clip.meshFrames) ShareMeshFrame(frame);
     EditSnapshot snapshot;
+    snapshot.uvSetNames = tab.loaded.uvSetNames;
+    snapshot.uvSets = tab.loaded.uvSets;
+    snapshot.uvSetPresence = tab.loaded.uvSetPresence;
+    snapshot.uvSetsEdited = tab.loaded.uvSetsEdited;
+    snapshot.selectedUvSet = tab.selectedUvSet;
     snapshot.bounds = tab.loaded.bounds;
     snapshot.nodes = tab.loaded.nodes;
     snapshot.bones = tab.loaded.bones;
