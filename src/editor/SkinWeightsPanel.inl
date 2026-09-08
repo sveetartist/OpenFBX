@@ -655,6 +655,32 @@ void DrawHierarchyPanel(Font font,
             }
             if (validContextMesh)
             {
+                const std::vector<int> mergeableMeshNodes = GetMergeableMeshNodes(*active, contextNodes);
+                if (mergeableMeshNodes.size() >= 2)
+                {
+                    const Rectangle mergeGeometryItem{ menu.x, itemY, menu.width, 30.0f };
+                    itemY += 30.0f;
+                    if (!inputBlocked && DrawPanelButton(font, mergeGeometryItem, "Merge Geometry"))
+                    {
+                        EditSnapshot before = CaptureEditSnapshot(*active);
+                        std::string mergeError;
+                        const int changedCount = MergeSelectedGeometry(*active, contextNodes, mergeError);
+                        if (changedCount > 0)
+                        {
+                            PushUndoSnapshot(*active, std::move(before));
+                            notice = "Merged " + std::to_string(changedCount) + " meshes.";
+                            error.clear();
+                        }
+                        else
+                        {
+                            RestoreEditSnapshot(*active, before);
+                            error = mergeError.empty() ? "Could not merge selected geometry." : mergeError;
+                            notice.clear();
+                        }
+                        panel.contextMenuOpen = false;
+                    }
+                }
+
                 const Rectangle pivotCenterItem{ menu.x, itemY, menu.width, 30.0f };
                 itemY += 30.0f;
                 if (!inputBlocked && DrawPanelButton(font, pivotCenterItem, "Pivot to Center"))

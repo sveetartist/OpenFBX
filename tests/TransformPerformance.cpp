@@ -125,6 +125,95 @@ static void TestTangents()
     Require(parallel == sequential, "Parallel tangents differ from sequential output");
 }
 
+static void TestMergeSelectedGeometryPreservesSkinning()
+{
+    ModelTab tab;
+    tab.loaded.valid = true;
+    tab.loaded.hasMesh = true;
+    tab.loaded.materialNames = { "Default" };
+    tab.loaded.uvSetNames = { "UVSet" };
+    tab.loaded.uvSets.resize(1);
+    tab.loaded.nodes.resize(3);
+    tab.loaded.nodes[0].name = "Bone";
+    tab.loaded.nodes[0].parent = -1;
+    tab.loaded.nodes[0].type = SceneNodeType::Bone;
+    tab.loaded.nodes[1].name = "MeshA";
+    tab.loaded.nodes[1].parent = 0;
+    tab.loaded.nodes[1].type = SceneNodeType::Mesh;
+    tab.loaded.nodes[1].meshVertexStart = 0;
+    tab.loaded.nodes[1].meshVertexCount = 3;
+    tab.loaded.nodes[1].meshTriangleCount = 1;
+    tab.loaded.nodes[1].meshPolygonCount = 1;
+    tab.loaded.nodes[1].meshHasSkin = true;
+    tab.loaded.nodes[2].name = "MeshB";
+    tab.loaded.nodes[2].parent = 0;
+    tab.loaded.nodes[2].type = SceneNodeType::Mesh;
+    tab.loaded.nodes[2].meshVertexStart = 3;
+    tab.loaded.nodes[2].meshVertexCount = 3;
+    tab.loaded.nodes[2].meshTriangleCount = 1;
+    tab.loaded.nodes[2].meshPolygonCount = 1;
+    tab.loaded.nodes[2].meshHasSkin = true;
+    tab.deletedNodes.assign(tab.loaded.nodes.size(), false);
+    tab.collapsedNodes.assign(tab.loaded.nodes.size(), false);
+
+    tab.loaded.bindVertices = {
+        0.0f, 0.0f, 0.0f,
+        1.0f, 0.0f, 0.0f,
+        0.0f, 1.0f, 0.0f,
+        2.0f, 0.0f, 0.0f,
+        3.0f, 0.0f, 0.0f,
+        2.0f, 1.0f, 0.0f
+    };
+    tab.loaded.bindNormals.assign(tab.loaded.bindVertices.size(), 0.0f);
+    for (size_t normal = 1; normal < tab.loaded.bindNormals.size(); normal += 3)
+    {
+        tab.loaded.bindNormals[normal] = 1.0f;
+    }
+    tab.loaded.uvSets[0] = {
+        0.0f, 0.0f,
+        1.0f, 0.0f,
+        0.0f, 1.0f,
+        0.0f, 0.0f,
+        1.0f, 0.0f,
+        0.0f, 1.0f
+    };
+    tab.loaded.meshGlobalVertexIndices = { { 0, 1, 2, 3, 4, 5 } };
+    tab.loaded.meshControlPointIndices = { 0, 1, 2, 0, 1, 2 };
+    tab.loaded.meshPolygonVertexGlobalIndices = { 0, 1, 2, 3, 4, 5 };
+    tab.loaded.meshPolygonEdges = {
+        MeshEdge{ 0, 1, 1 }, MeshEdge{ 1, 2, 1 }, MeshEdge{ 2, 0, 1 },
+        MeshEdge{ 3, 4, 2 }, MeshEdge{ 4, 5, 2 }, MeshEdge{ 5, 3, 2 }
+    };
+
+    BonePose pose;
+    pose.node = 0;
+    pose.position = Vector3Zero();
+    tab.loaded.bonePoses = { pose };
+    for (int vertex = 0; vertex < 6; ++vertex)
+    {
+        const size_t base = static_cast<size_t>(vertex) * 3;
+        SkinnedVertex skinned;
+        skinned.bindPosition = Vector3{ tab.loaded.bindVertices[base], tab.loaded.bindVertices[base + 1], tab.loaded.bindVertices[base + 2] };
+        skinned.bindNormal = Vector3{ 0.0f, 1.0f, 0.0f };
+        skinned.influences.push_back(SkinnedVertexInfluence{ "Bone", 1.0f, skinned.bindPosition, skinned.bindNormal });
+        tab.loaded.skinnedVertices.push_back(skinned);
+    }
+
+    std::string error;
+    const int mergedCount = MergeSelectedGeometry(tab, { 1, 2 }, error);
+    Require(mergedCount == 2, "Expected two meshes to merge");
+    Require(error.empty(), "Merge reported an unexpected error");
+    Require(tab.loaded.nodes.size() == 4, "Merge did not add a mesh node");
+    Require(tab.deletedNodes[1] && tab.deletedNodes[2], "Merge did not delete source mesh nodes");
+    const SceneNode& merged = tab.loaded.nodes.back();
+    Require(merged.type == SceneNodeType::Mesh, "Merged node is not a mesh");
+    Require(merged.meshVertexStart == 6 && merged.meshVertexCount == 6, "Merged mesh range is wrong");
+    Require(tab.loaded.skinnedVertices.size() == tab.loaded.bindVertices.size() / 3, "Merged skinning vertex count is out of sync");
+    Require(tab.loaded.skinnedVertices[6].influences.size() == 1, "Merged vertex lost its skin influence");
+    Require(tab.loaded.skinnedVertices[6].influences[0].boneName == "Bone", "Merged vertex changed its skin bone");
+    Equal(ReferenceSkin(tab.loaded, BuildBindBoneFrame(tab.loaded)), MeshFrame{ tab.currentVertices, tab.currentNormals });
+}
+
 static int BenchmarkFbx(const char* path)
 {
     SetTraceLogLevel(LOG_WARNING);
@@ -190,6 +279,7 @@ int main(int argc, char** argv)
         if (argc > 1) return BenchmarkFbx(argv[1]);
         TestVisibility();
         TestTangents();
+        TestMergeSelectedGeometryPreservesSkinning();
         ModelTab tab;
         auto& loaded = tab.loaded;
         loaded.hasMesh = true;

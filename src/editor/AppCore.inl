@@ -826,6 +826,7 @@ void SetVisibleNodeRangeSelection(ModelTab& tab,
                                   int anchorNode,
                                   int targetNode,
                                   const std::vector<int>& baseSelection);
+int MergeSelectedGeometry(ModelTab& tab, const std::vector<int>& contextNodes, std::string& error);
 bool ApplyScaleToNode(ModelTab& tab, int nodeIndex);
 bool FlipMeshNormals(ModelTab& tab, int nodeIndex);
 bool SetMeshPivotToBoundsCenter(ModelTab& tab, int nodeIndex);
@@ -833,6 +834,8 @@ bool SetMeshPivotToBoundsBottom(ModelTab& tab, int nodeIndex);
 bool ResetBoneSubtreeToOriginalBindPose(ModelTab& tab, int rootNodeIndex);
 std::vector<int> GetSelectedTransformRoots(const ModelTab& tab);
 void InvalidateDisplayedAnimationCaches(ModelTab& tab);
+void RecomputeMeshNodeBounds(ModelTab& tab, SceneNode& node);
+void RecomputeSceneBounds(ModelTab& tab);
 void RefreshDisplayedMesh(ModelTab& tab);
 bool HasCpuSkinnedMesh(const LoadedFbxModel& loaded);
 const BonePose* FindBonePoseByNode(const std::vector<BonePose>& poses, int nodeIndex);

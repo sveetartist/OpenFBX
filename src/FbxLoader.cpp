@@ -1297,6 +1297,25 @@ bool IsDeletedModelNode(const std::vector<bool>& deletedNodes, int nodeIndex)
            deletedNodes[static_cast<size_t>(nodeIndex)];
 }
 
+std::vector<int> BuildGlobalVertexMaterialMap(const LoadedFbxModel& model)
+{
+    const int vertexCount = static_cast<int>(model.bindVertices.size() / 3);
+    std::vector<int> materialForVertex(static_cast<size_t>(vertexCount), 0);
+    for (int meshIndex = 0; meshIndex < static_cast<int>(model.meshGlobalVertexIndices.size()); ++meshIndex)
+    {
+        int materialIndex = model.model.meshMaterial && meshIndex < model.model.meshCount ? model.model.meshMaterial[meshIndex] : meshIndex;
+        materialIndex = std::max(0, std::min(materialIndex, std::max(0, static_cast<int>(model.materialNames.size()) - 1)));
+        for (int globalVertex : model.meshGlobalVertexIndices[static_cast<size_t>(meshIndex)])
+        {
+            if (globalVertex >= 0 && globalVertex < vertexCount)
+            {
+                materialForVertex[static_cast<size_t>(globalVertex)] = materialIndex;
+            }
+        }
+    }
+    return materialForVertex;
+}
+
 bool IsDeletedModelSubtreeRoot(const LoadedFbxModel& model, const std::vector<bool>& deletedNodes, int nodeIndex)
 {
     if (!IsDeletedModelNode(deletedNodes, nodeIndex)) return false;
@@ -1339,6 +1358,230 @@ FbxAMatrix GetEditedBindGlobalMatrix(const LoadedFbxModel& model, int nodeIndex)
     }
 
     return GetEditedGlobalMatrix(model, nodeIndex);
+}
+
+FbxSurfaceMaterial* FindOrCreateSceneMaterial(FbxScene* scene, const std::string& name)
+{
+    if (!scene) return nullptr;
+
+    const std::string materialName = name.empty() ? "Default" : name;
+    if (FbxSurfaceMaterial* existing = scene->FindMember<FbxSurfaceMaterial>(materialName.c_str()))
+    {
+        return existing;
+    }
+
+    FbxSurfacePhong* material = FbxSurfacePhong::Create(scene, materialName.c_str());
+    if (!material) return nullptr;
+    material->Diffuse.Set(FbxDouble3(0.66, 0.66, 0.66));
+    return material;
+}
+
+bool CreateGeneratedMeshSceneNode(FbxScene* scene,
+                                  const LoadedFbxModel& model,
+                                  int nodeIndex,
+                                  const std::vector<int>& materialForVertex,
+                                  std::vector<FbxNode*>& sceneNodes)
+{
+    if (!scene || nodeIndex < 0 || nodeIndex >= static_cast<int>(model.nodes.size())) return false;
+    if (nodeIndex < static_cast<int>(sceneNodes.size()) && sceneNodes[static_cast<size_t>(nodeIndex)]) return true;
+
+    const SceneNode& sceneNode = model.nodes[static_cast<size_t>(nodeIndex)];
+    if (sceneNode.type != SceneNodeType::Mesh ||
+        !sceneNode.sourceName.empty() ||
+        sceneNode.meshVertexStart < 0 ||
+        sceneNode.meshVertexCount < 3)
+    {
+        return true;
+    }
+
+    const int start = sceneNode.meshVertexStart;
+    const int count = sceneNode.meshVertexCount;
+    const int end = start + count;
+    if (end * 3 > static_cast<int>(model.bindVertices.size())) return false;
+
+    FbxNode* node = FbxNode::Create(scene, sceneNode.name.empty() ? "Merged Geometry" : sceneNode.name.c_str());
+    FbxMesh* mesh = FbxMesh::Create(scene, (sceneNode.name.empty() ? std::string("MergedGeometryMesh") : sceneNode.name + "Mesh").c_str());
+    if (!node || !mesh) return false;
+
+    const FbxAMatrix global = MatrixFromSceneNode(sceneNode);
+    const FbxAMatrix worldToLocal = global.Inverse();
+    mesh->InitControlPoints(count);
+    for (int vertex = 0; vertex < count; ++vertex)
+    {
+        const size_t base = static_cast<size_t>(start + vertex) * 3;
+        const FbxVector4 world(model.bindVertices[base], model.bindVertices[base + 1], model.bindVertices[base + 2], 1.0);
+        mesh->SetControlPointAt(worldToLocal.MultT(world), vertex);
+    }
+
+    FbxGeometryElementNormal* normalElement = nullptr;
+    if (model.bindNormals.size() == model.bindVertices.size())
+    {
+        normalElement = mesh->CreateElementNormal();
+        if (normalElement)
+        {
+            normalElement->SetMappingMode(FbxGeometryElement::eByPolygonVertex);
+            normalElement->SetReferenceMode(FbxGeometryElement::eDirect);
+        }
+    }
+
+    FbxGeometryElementUV* uvElement = nullptr;
+    const std::vector<float>* uvSet = model.uvSets.empty() ? nullptr : &model.uvSets.front();
+    if (uvSet && uvSet->size() >= static_cast<size_t>(end) * 2)
+    {
+        const char* uvName = model.uvSetNames.empty() ? "UVSet" : model.uvSetNames.front().c_str();
+        uvElement = mesh->CreateElementUV(uvName);
+        if (uvElement)
+        {
+            uvElement->SetMappingMode(FbxGeometryElement::eByPolygonVertex);
+            uvElement->SetReferenceMode(FbxGeometryElement::eDirect);
+        }
+    }
+
+    std::unordered_map<int, int> nodeMaterialByGlobalMaterial;
+    auto getNodeMaterialIndex = [&](int globalMaterialIndex)
+    {
+        globalMaterialIndex = std::max(0, std::min(globalMaterialIndex, std::max(0, static_cast<int>(model.materialNames.size()) - 1)));
+        const auto found = nodeMaterialByGlobalMaterial.find(globalMaterialIndex);
+        if (found != nodeMaterialByGlobalMaterial.end()) return found->second;
+
+        const std::string materialName = globalMaterialIndex < static_cast<int>(model.materialNames.size()) ? model.materialNames[static_cast<size_t>(globalMaterialIndex)] : "Default";
+        if (FbxSurfaceMaterial* material = FindOrCreateSceneMaterial(scene, materialName))
+        {
+            node->AddMaterial(material);
+        }
+        const int localMaterialIndex = node->GetMaterialCount() - 1;
+        nodeMaterialByGlobalMaterial.emplace(globalMaterialIndex, localMaterialIndex);
+        return localMaterialIndex;
+    };
+
+    FbxGeometryElementMaterial* materialElement = mesh->CreateElementMaterial();
+    if (materialElement)
+    {
+        materialElement->SetMappingMode(FbxGeometryElement::eByPolygon);
+        materialElement->SetReferenceMode(FbxGeometryElement::eIndexToDirect);
+    }
+
+    const FbxAMatrix worldNormalToLocal = global.Transpose();
+    for (int vertex = 0; vertex + 2 < count; vertex += 3)
+    {
+        const int globalVertex = start + vertex;
+        const int materialIndex = globalVertex < static_cast<int>(materialForVertex.size()) ? materialForVertex[static_cast<size_t>(globalVertex)] : 0;
+        const int localMaterialIndex = getNodeMaterialIndex(materialIndex);
+        mesh->BeginPolygon(localMaterialIndex);
+        for (int corner = 0; corner < 3; ++corner)
+        {
+            const int localVertex = vertex + corner;
+            const int currentGlobalVertex = start + localVertex;
+            mesh->AddPolygon(localVertex);
+
+            if (normalElement)
+            {
+                const size_t normalBase = static_cast<size_t>(currentGlobalVertex) * 3;
+                FbxVector4 normal(model.bindNormals[normalBase], model.bindNormals[normalBase + 1], model.bindNormals[normalBase + 2], 0.0);
+                normal = TransformVector(worldNormalToLocal, normal);
+                const double length = std::sqrt(normal[0] * normal[0] + normal[1] * normal[1] + normal[2] * normal[2]);
+                if (length > 0.000001)
+                {
+                    normal[0] /= length;
+                    normal[1] /= length;
+                    normal[2] /= length;
+                }
+                normalElement->GetDirectArray().Add(normal);
+            }
+            if (uvElement)
+            {
+                const size_t uvBase = static_cast<size_t>(currentGlobalVertex) * 2;
+                uvElement->GetDirectArray().Add(FbxVector2((*uvSet)[uvBase], (*uvSet)[uvBase + 1]));
+            }
+        }
+        mesh->EndPolygon();
+        if (materialElement)
+        {
+            materialElement->GetIndexArray().Add(localMaterialIndex);
+        }
+    }
+
+    if (sceneNode.meshHasSkin &&
+        model.skinnedVertices.size() >= static_cast<size_t>(end) &&
+        !model.bonePoses.empty())
+    {
+        std::unordered_map<std::string, FbxCluster*> clustersByBoneName;
+        FbxSkin* skin = FbxSkin::Create(scene, (sceneNode.name + "Skin").c_str());
+        if (skin)
+        {
+            auto findBoneNode = [&](const std::string& boneName) -> std::pair<FbxNode*, int>
+            {
+                for (int boneIndex = 0; boneIndex < static_cast<int>(model.nodes.size()) && boneIndex < static_cast<int>(sceneNodes.size()); ++boneIndex)
+                {
+                    const SceneNode& bone = model.nodes[static_cast<size_t>(boneIndex)];
+                    if (bone.type != SceneNodeType::Bone) continue;
+                    if (bone.name == boneName || (!bone.sourceName.empty() && bone.sourceName == boneName))
+                    {
+                        return { sceneNodes[static_cast<size_t>(boneIndex)], boneIndex };
+                    }
+                }
+                return { nullptr, -1 };
+            };
+
+            for (int localVertex = 0; localVertex < count; ++localVertex)
+            {
+                const SkinnedVertex& skinned = model.skinnedVertices[static_cast<size_t>(start + localVertex)];
+                for (const SkinnedVertexInfluence& influence : skinned.influences)
+                {
+                    auto foundCluster = clustersByBoneName.find(influence.boneName);
+                    if (foundCluster == clustersByBoneName.end())
+                    {
+                        const auto [boneNode, boneIndex] = findBoneNode(influence.boneName);
+                        if (!boneNode || boneIndex < 0) continue;
+
+                        FbxCluster* cluster = FbxCluster::Create(scene, (sceneNode.name + "_" + influence.boneName).c_str());
+                        if (!cluster) continue;
+                        cluster->SetLink(boneNode);
+                        cluster->SetLinkMode(FbxCluster::eNormalize);
+                        cluster->SetTransformMatrix(global);
+                        cluster->SetTransformLinkMatrix(GetEditedBindGlobalMatrix(model, boneIndex));
+                        skin->AddCluster(cluster);
+                        foundCluster = clustersByBoneName.emplace(influence.boneName, cluster).first;
+                    }
+                    foundCluster->second->AddControlPointIndex(localVertex, static_cast<double>(influence.weight));
+                }
+            }
+            if (skin->GetClusterCount() > 0)
+            {
+                mesh->AddDeformer(skin);
+            }
+        }
+    }
+
+    node->SetNodeAttribute(mesh);
+    FbxNode* parent = scene->GetRootNode();
+    if (sceneNode.parent >= 0 && sceneNode.parent < static_cast<int>(sceneNodes.size()) && sceneNodes[static_cast<size_t>(sceneNode.parent)])
+    {
+        parent = sceneNodes[static_cast<size_t>(sceneNode.parent)];
+    }
+    if (parent) parent->AddChild(node);
+    if (nodeIndex >= static_cast<int>(sceneNodes.size())) sceneNodes.resize(static_cast<size_t>(nodeIndex + 1), nullptr);
+    sceneNodes[static_cast<size_t>(nodeIndex)] = node;
+    return true;
+}
+
+bool CreateGeneratedMeshSceneNodes(FbxScene* scene,
+                                   const LoadedFbxModel& model,
+                                   const std::vector<bool>& deletedNodes,
+                                   std::vector<FbxNode*>& sceneNodes,
+                                   std::string& error)
+{
+    const std::vector<int> materialForVertex = BuildGlobalVertexMaterialMap(model);
+    for (int nodeIndex = 0; nodeIndex < static_cast<int>(model.nodes.size()); ++nodeIndex)
+    {
+        if (IsDeletedModelNode(deletedNodes, nodeIndex)) continue;
+        if (!CreateGeneratedMeshSceneNode(scene, model, nodeIndex, materialForVertex, sceneNodes))
+        {
+            error = "Failed to create merged geometry for export.";
+            return false;
+        }
+    }
+    return true;
 }
 
 void ApplyEditedNodeTransforms(const LoadedFbxModel& model,
@@ -2216,7 +2459,11 @@ bool ApplyEditedModelToScene(FbxScene* scene,
         return false;
     }
 
-    const std::vector<FbxNode*> mappedSceneNodes = BuildMappedSceneNodes(model, sceneNodes);
+    std::vector<FbxNode*> mappedSceneNodes = BuildMappedSceneNodes(model, sceneNodes);
+    if (!CreateGeneratedMeshSceneNodes(scene, model, deletedNodes, mappedSceneNodes, error))
+    {
+        return false;
+    }
     ApplyEditedNodeParents(scene, model, deletedNodes, mappedSceneNodes);
     ApplyEditedNodeTransforms(model, deletedNodes, mappedSceneNodes);
     ApplyEditedSkinBindMatrices(model, deletedNodes, mappedSceneNodes);

@@ -141,6 +141,394 @@ void SetVisibleNodeRangeSelection(ModelTab& tab, const std::vector<bool>& collap
     SetVisibleNodeRangeSelection(tab, collapsed, anchorNode, targetNode, {});
 }
 
+std::string MakeUniqueSceneNodeName(const LoadedFbxModel& loaded, const char* baseName)
+{
+    const std::string base = baseName && baseName[0] ? baseName : "Merged Geometry";
+    auto nameExists = [&](const std::string& name)
+    {
+        for (const SceneNode& node : loaded.nodes)
+        {
+            if (node.name == name) return true;
+        }
+        return false;
+    };
+
+    if (!nameExists(base)) return base;
+
+    for (int suffix = 2; suffix < 10000; ++suffix)
+    {
+        const std::string candidate = base + " " + std::to_string(suffix);
+        if (!nameExists(candidate)) return candidate;
+    }
+    return base + " Copy";
+}
+
+std::vector<int> BuildGlobalVertexMaterialMap(const LoadedFbxModel& loaded)
+{
+    const int vertexCount = static_cast<int>(loaded.bindVertices.size() / 3);
+    std::vector<int> materialForVertex(static_cast<size_t>(vertexCount), 0);
+    for (int meshIndex = 0; meshIndex < static_cast<int>(loaded.meshGlobalVertexIndices.size()); ++meshIndex)
+    {
+        int materialIndex = loaded.model.meshMaterial && meshIndex < loaded.model.meshCount ? loaded.model.meshMaterial[meshIndex] : meshIndex;
+        materialIndex = ClampInt(materialIndex, 0, std::max(0, static_cast<int>(loaded.materialNames.size()) - 1));
+        for (int globalVertex : loaded.meshGlobalVertexIndices[static_cast<size_t>(meshIndex)])
+        {
+            if (globalVertex >= 0 && globalVertex < vertexCount)
+            {
+                materialForVertex[static_cast<size_t>(globalVertex)] = materialIndex;
+            }
+        }
+    }
+    return materialForVertex;
+}
+
+template <typename T>
+T* CopyEditorVectorToRaylibBuffer(const std::vector<T>& values)
+{
+    if (values.empty()) return nullptr;
+
+    const size_t byteCount = values.size() * sizeof(T);
+    void* memory = MemAlloc(static_cast<unsigned int>(byteCount));
+    if (!memory) return nullptr;
+
+    std::memcpy(memory, values.data(), byteCount);
+    return static_cast<T*>(memory);
+}
+
+void FreeUnuploadedMeshBuffers(Mesh& mesh)
+{
+    if (mesh.vertices) MemFree(mesh.vertices);
+    if (mesh.normals) MemFree(mesh.normals);
+    if (mesh.texcoords) MemFree(mesh.texcoords);
+    if (mesh.tangents) MemFree(mesh.tangents);
+    mesh = Mesh{};
+}
+
+bool RebuildRaylibModelFromGlobalGeometry(ModelTab& tab, std::string& error)
+{
+    LoadedFbxModel& loaded = tab.loaded;
+    if (!loaded.hasMesh || loaded.model.meshCount <= 0 || !loaded.model.meshes) return true;
+
+    const int materialCount = std::max(1, static_cast<int>(loaded.materialNames.size()));
+    std::vector<std::vector<int>> verticesByMaterial(static_cast<size_t>(materialCount));
+    for (int meshIndex = 0; meshIndex < static_cast<int>(loaded.meshGlobalVertexIndices.size()); ++meshIndex)
+    {
+        int materialIndex = loaded.model.meshMaterial && meshIndex < loaded.model.meshCount ? loaded.model.meshMaterial[meshIndex] : meshIndex;
+        materialIndex = ClampInt(materialIndex, 0, materialCount - 1);
+        std::vector<int>& target = verticesByMaterial[static_cast<size_t>(materialIndex)];
+        const std::vector<int>& source = loaded.meshGlobalVertexIndices[static_cast<size_t>(meshIndex)];
+        target.insert(target.end(), source.begin(), source.end());
+    }
+
+    const std::vector<float>& verticesSource = tab.currentVertices.size() == loaded.bindVertices.size() ? tab.currentVertices : loaded.bindVertices;
+    const std::vector<float>& normalsSource = tab.currentNormals.size() == loaded.bindNormals.size() ? tab.currentNormals : loaded.bindNormals;
+    const std::vector<float>* uvSource = loaded.uvSets.empty() ? nullptr : &loaded.uvSets.front();
+
+    std::vector<Mesh> meshes;
+    std::vector<int> meshMaterials;
+    std::vector<std::vector<int>> meshGlobalIndices;
+    for (int materialIndex = 0; materialIndex < materialCount; ++materialIndex)
+    {
+        const std::vector<int>& globalIndices = verticesByMaterial[static_cast<size_t>(materialIndex)];
+        if (globalIndices.empty()) continue;
+
+        std::vector<float> vertices;
+        std::vector<float> normals;
+        std::vector<float> texcoords;
+        vertices.reserve(globalIndices.size() * 3);
+        normals.reserve(globalIndices.size() * 3);
+        texcoords.reserve(globalIndices.size() * 2);
+
+        for (int globalVertex : globalIndices)
+        {
+            const size_t vertexBase = static_cast<size_t>(globalVertex) * 3;
+            const size_t uvBase = static_cast<size_t>(globalVertex) * 2;
+            if (vertexBase + 2 >= verticesSource.size() || vertexBase + 2 >= normalsSource.size()) continue;
+
+            vertices.push_back(verticesSource[vertexBase]);
+            vertices.push_back(verticesSource[vertexBase + 1]);
+            vertices.push_back(verticesSource[vertexBase + 2]);
+            normals.push_back(normalsSource[vertexBase]);
+            normals.push_back(normalsSource[vertexBase + 1]);
+            normals.push_back(normalsSource[vertexBase + 2]);
+            if (uvSource && uvBase + 1 < uvSource->size())
+            {
+                texcoords.push_back((*uvSource)[uvBase]);
+                texcoords.push_back((*uvSource)[uvBase + 1]);
+            }
+            else
+            {
+                texcoords.push_back(0.0f);
+                texcoords.push_back(0.0f);
+            }
+        }
+
+        if (vertices.empty()) continue;
+
+        std::vector<float> tangents;
+        BuildMeshTangents(vertices, normals, texcoords.data(), tangents);
+
+        Mesh mesh{};
+        mesh.vertexCount = static_cast<int>(vertices.size() / 3);
+        mesh.triangleCount = mesh.vertexCount / 3;
+        mesh.vertices = CopyEditorVectorToRaylibBuffer(vertices);
+        mesh.normals = CopyEditorVectorToRaylibBuffer(normals);
+        mesh.texcoords = CopyEditorVectorToRaylibBuffer(texcoords);
+        mesh.tangents = CopyEditorVectorToRaylibBuffer(tangents);
+        if (!mesh.vertices || !mesh.normals || !mesh.texcoords || !mesh.tangents)
+        {
+            FreeUnuploadedMeshBuffers(mesh);
+            for (Mesh& created : meshes) UnloadMesh(created);
+            error = "Failed to allocate merged mesh buffers.";
+            return false;
+        }
+
+        UploadMesh(&mesh, true);
+        meshes.push_back(mesh);
+        meshMaterials.push_back(materialIndex);
+        meshGlobalIndices.push_back(globalIndices);
+    }
+
+    if (meshes.empty())
+    {
+        error = "Merged geometry produced no renderable triangles.";
+        return false;
+    }
+
+    Model rebuilt{};
+    rebuilt.transform = MatrixIdentity();
+    rebuilt.meshCount = static_cast<int>(meshes.size());
+    rebuilt.materialCount = materialCount;
+    rebuilt.meshes = CopyEditorVectorToRaylibBuffer(meshes);
+    rebuilt.meshMaterial = CopyEditorVectorToRaylibBuffer(meshMaterials);
+    rebuilt.materials = static_cast<Material*>(MemAlloc(static_cast<unsigned int>(sizeof(Material) * materialCount)));
+    if (!rebuilt.meshes || !rebuilt.meshMaterial || !rebuilt.materials)
+    {
+        if (rebuilt.meshes) MemFree(rebuilt.meshes);
+        if (rebuilt.meshMaterial) MemFree(rebuilt.meshMaterial);
+        if (rebuilt.materials) MemFree(rebuilt.materials);
+        for (Mesh& mesh : meshes) UnloadMesh(mesh);
+        error = "Failed to allocate merged model.";
+        return false;
+    }
+
+    for (int materialIndex = 0; materialIndex < materialCount; ++materialIndex)
+    {
+        rebuilt.materials[materialIndex] = LoadMaterialDefault();
+    }
+
+    UnloadModel(loaded.model);
+    loaded.model = rebuilt;
+    loaded.meshGlobalVertexIndices = std::move(meshGlobalIndices);
+    ApplyNeutralMaterial(loaded);
+    return true;
+}
+
+std::vector<int> GetMergeableMeshNodes(const ModelTab& tab, const std::vector<int>& contextNodes)
+{
+    std::vector<int> meshNodes;
+    for (int nodeIndex : contextNodes)
+    {
+        if (!IsValidSelectableNode(tab, nodeIndex)) continue;
+        const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(nodeIndex)];
+        if (node.type != SceneNodeType::Mesh || node.meshVertexStart < 0 || node.meshVertexCount < 3) continue;
+        if (std::find(meshNodes.begin(), meshNodes.end(), nodeIndex) == meshNodes.end())
+        {
+            meshNodes.push_back(nodeIndex);
+        }
+    }
+    return meshNodes;
+}
+
+int MergeSelectedGeometry(ModelTab& tab, const std::vector<int>& contextNodes, std::string& error)
+{
+    error.clear();
+    const std::vector<int> meshNodes = GetMergeableMeshNodes(tab, contextNodes);
+    if (meshNodes.size() < 2)
+    {
+        error = "Select at least two mesh objects to merge.";
+        return 0;
+    }
+    if (tab.loaded.bindVertices.size() != tab.loaded.bindNormals.size())
+    {
+        error = "Cannot merge geometry with inconsistent vertex and normal buffers.";
+        return 0;
+    }
+
+    const int oldVertexCount = static_cast<int>(tab.loaded.bindVertices.size() / 3);
+    const bool hadCurrentMesh = tab.currentVertices.size() == tab.loaded.bindVertices.size() &&
+                                tab.currentNormals.size() == tab.loaded.bindNormals.size();
+    const std::vector<int> materialForVertex = BuildGlobalVertexMaterialMap(tab.loaded);
+    std::vector<int> newVerticesByMaterial;
+    newVerticesByMaterial.reserve(static_cast<size_t>(oldVertexCount));
+
+    SceneNode merged{};
+    merged.name = MakeUniqueSceneNodeName(tab.loaded, "Merged Geometry");
+    merged.type = SceneNodeType::Mesh;
+    merged.parent = tab.loaded.nodes[static_cast<size_t>(meshNodes.front())].parent;
+    merged.meshVertexStart = oldVertexCount;
+    merged.meshPolygonVertexStart = static_cast<int>(tab.loaded.meshPolygonVertexGlobalIndices.size());
+    merged.meshHadNormals = true;
+    merged.meshHadUvs = !tab.loaded.uvSets.empty();
+
+    int missingSkinWeights = 0;
+    int badSkinWeights = 0;
+    int degenerateTriangles = 0;
+    int sourcePolygonCount = 0;
+    for (int nodeIndex : meshNodes)
+    {
+        const SceneNode& sourceNode = tab.loaded.nodes[static_cast<size_t>(nodeIndex)];
+        merged.meshHasSkin = merged.meshHasSkin || sourceNode.meshHasSkin;
+        merged.hasSkinBindPose = merged.hasSkinBindPose || sourceNode.hasSkinBindPose;
+        missingSkinWeights += sourceNode.missingSkinWeightCount;
+        badSkinWeights += sourceNode.badSkinWeightCount;
+        degenerateTriangles += sourceNode.degenerateTriangleCount;
+        sourcePolygonCount += sourceNode.meshPolygonCount > 0 ? sourceNode.meshPolygonCount : sourceNode.meshTriangleCount;
+
+        const int start = std::max(0, sourceNode.meshVertexStart);
+        const int end = std::min(sourceNode.meshVertexStart + sourceNode.meshVertexCount, oldVertexCount);
+        for (int sourceVertex = start; sourceVertex < end; ++sourceVertex)
+        {
+            const int newVertex = static_cast<int>(tab.loaded.bindVertices.size() / 3);
+            const size_t sourceBase = static_cast<size_t>(sourceVertex) * 3;
+            const float bindX = tab.loaded.bindVertices[sourceBase];
+            const float bindY = tab.loaded.bindVertices[sourceBase + 1];
+            const float bindZ = tab.loaded.bindVertices[sourceBase + 2];
+            const float normalX = tab.loaded.bindNormals[sourceBase];
+            const float normalY = tab.loaded.bindNormals[sourceBase + 1];
+            const float normalZ = tab.loaded.bindNormals[sourceBase + 2];
+            tab.loaded.bindVertices.insert(tab.loaded.bindVertices.end(), { bindX, bindY, bindZ });
+            tab.loaded.bindNormals.insert(tab.loaded.bindNormals.end(), { normalX, normalY, normalZ });
+            if (hadCurrentMesh)
+            {
+                const float currentX = tab.currentVertices[sourceBase];
+                const float currentY = tab.currentVertices[sourceBase + 1];
+                const float currentZ = tab.currentVertices[sourceBase + 2];
+                const float currentNormalX = tab.currentNormals[sourceBase];
+                const float currentNormalY = tab.currentNormals[sourceBase + 1];
+                const float currentNormalZ = tab.currentNormals[sourceBase + 2];
+                tab.currentVertices.insert(tab.currentVertices.end(), { currentX, currentY, currentZ });
+                tab.currentNormals.insert(tab.currentNormals.end(), { currentNormalX, currentNormalY, currentNormalZ });
+            }
+            if (sourceVertex < static_cast<int>(tab.loaded.skinnedVertices.size()))
+            {
+                tab.loaded.skinnedVertices.push_back(tab.loaded.skinnedVertices[static_cast<size_t>(sourceVertex)]);
+            }
+            else
+            {
+                SkinnedVertex skinned;
+                skinned.bindPosition = Vector3{ bindX, bindY, bindZ };
+                skinned.bindNormal = Vector3{ normalX, normalY, normalZ };
+                tab.loaded.skinnedVertices.push_back(skinned);
+            }
+            tab.loaded.meshControlPointIndices.push_back(newVertex - merged.meshVertexStart);
+            tab.loaded.meshPolygonVertexGlobalIndices.push_back(newVertex);
+            newVerticesByMaterial.push_back(sourceVertex < static_cast<int>(materialForVertex.size()) ? materialForVertex[static_cast<size_t>(sourceVertex)] : 0);
+
+            const size_t uvBase = static_cast<size_t>(sourceVertex) * 2;
+            for (std::vector<float>& uvSet : tab.loaded.uvSets)
+            {
+                if (uvBase + 1 < uvSet.size())
+                {
+                    uvSet.push_back(uvSet[uvBase]);
+                    uvSet.push_back(uvSet[uvBase + 1]);
+                }
+                else
+                {
+                    uvSet.push_back(0.0f);
+                    uvSet.push_back(0.0f);
+                }
+            }
+        }
+    }
+
+    merged.meshVertexCount = static_cast<int>(tab.loaded.bindVertices.size() / 3) - merged.meshVertexStart;
+    merged.meshPolygonVertexCount = merged.meshVertexCount;
+    merged.meshTriangleCount = merged.meshVertexCount / 3;
+    merged.meshPolygonCount = sourcePolygonCount > 0 ? sourcePolygonCount : merged.meshTriangleCount;
+    merged.missingSkinWeightCount = missingSkinWeights;
+    merged.badSkinWeightCount = badSkinWeights;
+    merged.degenerateTriangleCount = degenerateTriangles;
+    const int mergedNodeIndex = static_cast<int>(tab.loaded.nodes.size());
+
+    for (int vertex = merged.meshVertexStart; vertex + 2 < merged.meshVertexStart + merged.meshVertexCount; vertex += 3)
+    {
+        tab.loaded.meshPolygonEdges.push_back(MeshEdge{ vertex, vertex + 1, mergedNodeIndex });
+        tab.loaded.meshPolygonEdges.push_back(MeshEdge{ vertex + 1, vertex + 2, mergedNodeIndex });
+        tab.loaded.meshPolygonEdges.push_back(MeshEdge{ vertex + 2, vertex, mergedNodeIndex });
+    }
+
+    tab.loaded.nodes.push_back(merged);
+    tab.deletedNodes.resize(tab.loaded.nodes.size(), false);
+    tab.collapsedNodes.resize(tab.loaded.nodes.size(), false);
+
+    SceneNode& mergedNode = tab.loaded.nodes.back();
+    RecomputeMeshNodeBounds(tab, mergedNode);
+    if (mergedNode.hasBounds)
+    {
+        mergedNode.position = Vector3{
+            (mergedNode.bounds.min.x + mergedNode.bounds.max.x) * 0.5f,
+            (mergedNode.bounds.min.y + mergedNode.bounds.max.y) * 0.5f,
+            (mergedNode.bounds.min.z + mergedNode.bounds.max.z) * 0.5f
+        };
+    }
+
+    for (size_t offset = 0; offset < newVerticesByMaterial.size(); ++offset)
+    {
+        const int newVertex = merged.meshVertexStart + static_cast<int>(offset);
+        const int materialIndex = ClampInt(newVerticesByMaterial[offset], 0, std::max(0, static_cast<int>(tab.loaded.materialNames.size()) - 1));
+        bool added = false;
+        for (int meshIndex = 0; meshIndex < static_cast<int>(tab.loaded.meshGlobalVertexIndices.size()); ++meshIndex)
+        {
+            const int meshMaterial = tab.loaded.model.meshMaterial && meshIndex < tab.loaded.model.meshCount ? tab.loaded.model.meshMaterial[meshIndex] : meshIndex;
+            if (meshMaterial == materialIndex)
+            {
+                tab.loaded.meshGlobalVertexIndices[static_cast<size_t>(meshIndex)].push_back(newVertex);
+                added = true;
+                break;
+            }
+        }
+        if (!added)
+        {
+            tab.loaded.meshGlobalVertexIndices.push_back({ newVertex });
+        }
+    }
+
+    for (int nodeIndex : meshNodes)
+    {
+        tab.deletedNodes[static_cast<size_t>(nodeIndex)] = true;
+    }
+    tab.selectedNode = mergedNodeIndex;
+    tab.selectedNodes.assign(1, mergedNodeIndex);
+    tab.isolatedNode = -1;
+    tab.skinningGeometry.reset();
+    tab.viewportUvIslandCache = ViewportUvIslandCache{};
+    RecomputeSceneBounds(tab);
+
+    if (!RebuildRaylibModelFromGlobalGeometry(tab, error))
+    {
+        return 0;
+    }
+
+    if (HasCpuSkinnedMesh(tab.loaded))
+    {
+        RebuildSkinnedAnimationMeshFrames(tab);
+        if (tab.animation.clipIndex < 0)
+        {
+            RebuildCurrentSkinnedMeshFromBones(tab);
+        }
+        else
+        {
+            RefreshDisplayedMesh(tab);
+        }
+    }
+    else
+    {
+        RefreshDisplayedMesh(tab);
+    }
+    return static_cast<int>(meshNodes.size());
+}
+
 void RefreshDisplayedMesh(ModelTab& tab)
 {
     if (!tab.loaded.hasMesh || tab.loaded.bindVertices.size() != tab.loaded.bindNormals.size()) return;
@@ -473,6 +861,10 @@ float GetNodeContextMenuHeight(const ModelTab& tab, const std::vector<int>& cont
     if (HasMeshNode(tab, contextNodes))
     {
         height += 90.0f;
+        if (GetMergeableMeshNodes(tab, contextNodes).size() >= 2)
+        {
+            height += 30.0f;
+        }
     }
     if (HasBoneNode(tab, contextNodes))
     {
