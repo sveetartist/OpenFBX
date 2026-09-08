@@ -85,15 +85,26 @@ bool GetTransformPlaneBasis(const ModelTab& tab,
 Color GetTransformAxisColor(TransformAxis axis, bool active = false)
 {
     const unsigned char alpha = active ? 255 : 220;
+    auto activeColor = [active, alpha](Color color)
+    {
+        if (!active) return Color{ color.r, color.g, color.b, alpha };
+        constexpr float kActiveLighten = 0.28f;
+        return Color{
+            static_cast<unsigned char>(static_cast<float>(color.r) + (255.0f - static_cast<float>(color.r)) * kActiveLighten),
+            static_cast<unsigned char>(static_cast<float>(color.g) + (255.0f - static_cast<float>(color.g)) * kActiveLighten),
+            static_cast<unsigned char>(static_cast<float>(color.b) + (255.0f - static_cast<float>(color.b)) * kActiveLighten),
+            alpha
+        };
+    };
     switch (axis)
     {
-    case TransformAxis::X: return Color{ 235, 74, 74, alpha };
-    case TransformAxis::Y: return Color{ 92, 210, 94, alpha };
-    case TransformAxis::Z: return Color{ 86, 142, 255, alpha };
+    case TransformAxis::X: return activeColor(Color{ 235, 74, 74, 255 });
+    case TransformAxis::Y: return activeColor(Color{ 92, 210, 94, 255 });
+    case TransformAxis::Z: return activeColor(Color{ 86, 142, 255, 255 });
     case TransformAxis::Center:
     case TransformAxis::None: break;
     }
-    return Color{ 210, 218, 226, alpha };
+    return activeColor(Color{ 210, 218, 226, 255 });
 }
 
 bool IsNodeInTransformScope(const LoadedFbxModel& loaded, int nodeIndex, int rootNode)
