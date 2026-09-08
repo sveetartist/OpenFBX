@@ -332,6 +332,7 @@ void DrawHierarchyPanel(Font font,
         panel.shiftDragSelecting = false;
         panel.shiftDragAnchorNode = -1;
         panel.shiftDragLastNode = -1;
+        panel.shiftDragBaseSelection.clear();
     }
     if (!leftDown && !leftReleased)
     {
@@ -454,6 +455,7 @@ void DrawHierarchyPanel(Font font,
             else
             {
                 SelectNode(*active, i, true);
+                panel.shiftDragBaseSelection = active->selectedNodes;
             }
             panel.contextMenuOpen = false;
         }
@@ -461,7 +463,11 @@ void DrawHierarchyPanel(Font font,
                  !mouseOverContextMenu && !CheckCollisionPointRec(mouse, collapseRect) &&
                  i != panel.shiftDragLastNode)
         {
-            SetVisibleNodeRangeSelection(*active, active->collapsedNodes, panel.shiftDragAnchorNode, i);
+            SetVisibleNodeRangeSelection(*active,
+                                         active->collapsedNodes,
+                                         panel.shiftDragAnchorNode,
+                                         i,
+                                         panel.shiftDragBaseSelection);
             panel.shiftDragLastNode = i;
             panel.contextMenuOpen = false;
         }

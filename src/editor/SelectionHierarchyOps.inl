@@ -91,7 +91,11 @@ void SelectNode(ModelTab& tab, int nodeIndex, bool additive)
     }
 }
 
-void SetVisibleNodeRangeSelection(ModelTab& tab, const std::vector<bool>& collapsed, int anchorNode, int targetNode)
+void SetVisibleNodeRangeSelection(ModelTab& tab,
+                                  const std::vector<bool>& collapsed,
+                                  int anchorNode,
+                                  int targetNode,
+                                  const std::vector<int>& baseSelection)
 {
     if (!IsValidSelectableNode(tab, anchorNode) || !IsValidSelectableNode(tab, targetNode)) return;
 
@@ -110,15 +114,31 @@ void SetVisibleNodeRangeSelection(ModelTab& tab, const std::vector<bool>& collap
     const int firstRow = std::min(anchorRow, targetRow);
     const int lastRow = std::max(anchorRow, targetRow);
     tab.selectedNodes.clear();
+    for (const int selectedNode : baseSelection)
+    {
+        if (IsValidSelectableNode(tab, selectedNode) &&
+            std::find(tab.selectedNodes.begin(), tab.selectedNodes.end(), selectedNode) == tab.selectedNodes.end())
+        {
+            tab.selectedNodes.push_back(selectedNode);
+        }
+    }
     for (int visibleRow = 0; visibleRow < static_cast<int>(order.size()); ++visibleRow)
     {
         const int i = order[static_cast<size_t>(visibleRow)];
-        if (visibleRow >= firstRow && visibleRow <= lastRow && IsValidSelectableNode(tab, i))
+        if (visibleRow >= firstRow &&
+            visibleRow <= lastRow &&
+            IsValidSelectableNode(tab, i) &&
+            std::find(tab.selectedNodes.begin(), tab.selectedNodes.end(), i) == tab.selectedNodes.end())
         {
             tab.selectedNodes.push_back(i);
         }
     }
     tab.selectedNode = targetNode;
+}
+
+void SetVisibleNodeRangeSelection(ModelTab& tab, const std::vector<bool>& collapsed, int anchorNode, int targetNode)
+{
+    SetVisibleNodeRangeSelection(tab, collapsed, anchorNode, targetNode, {});
 }
 
 void RefreshDisplayedMesh(ModelTab& tab)

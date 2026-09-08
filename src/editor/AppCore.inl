@@ -416,6 +416,7 @@ struct HierarchyPanelState
     bool shiftDragSelecting = false;
     int shiftDragAnchorNode = -1;
     int shiftDragLastNode = -1;
+    std::vector<int> shiftDragBaseSelection;
     bool reparentDragArmed = false;
     bool reparentDragging = false;
     int reparentDragNode = -1;
@@ -819,6 +820,12 @@ void PruneSelectedNodes(ModelTab& tab);
 void ClearNodeSelection(ModelTab& tab);
 void SetSingleSelectedNode(ModelTab& tab, int nodeIndex);
 void SelectNode(ModelTab& tab, int nodeIndex, bool additive);
+void SetVisibleNodeRangeSelection(ModelTab& tab, const std::vector<bool>& collapsed, int anchorNode, int targetNode);
+void SetVisibleNodeRangeSelection(ModelTab& tab,
+                                  const std::vector<bool>& collapsed,
+                                  int anchorNode,
+                                  int targetNode,
+                                  const std::vector<int>& baseSelection);
 bool ApplyScaleToNode(ModelTab& tab, int nodeIndex);
 bool FlipMeshNormals(ModelTab& tab, int nodeIndex);
 bool SetMeshPivotToBoundsCenter(ModelTab& tab, int nodeIndex);
