@@ -72,12 +72,20 @@ int RunOpenFbxApp(int argc, char** argv)
         tab.title = MakeTabTitle(path);
     };
 
-    auto openPathInNewTab = [&](const std::string& path)
+    auto openPathInNewTab = [&](const std::string& sourcePath)
     {
-        DrawLoadingScreen(uiFont, path);
-
+        DrawLoadingScreen(uiFont, sourcePath);
         LoadedFbxModel loaded;
         std::string loadError;
+        std::string path;
+        if (!PrepareModelForOpening(sourcePath, path, loadError))
+        {
+            error = loadError;
+            notice.clear();
+            return;
+        }
+        const bool converted = path != sourcePath;
+        if (converted) DrawLoadingScreen(uiFont, path);
         if (!LoadFbxModel(path, loaded, loadError))
         {
             error = loadError;
@@ -98,6 +106,7 @@ int RunOpenFbxApp(int argc, char** argv)
         notice = importedTextureCount > 0
             ? "Loaded " + std::to_string(importedTextureCount) + " FBX texture" + (importedTextureCount == 1 ? "." : "s.")
             : "";
+        if (converted) notice = "Converted to FBX: " + path + (notice.empty() ? "" : ". " + notice);
     };
 
     auto restorePbrMaterialState = [&](ModelTab& tab,
@@ -245,7 +254,7 @@ int RunOpenFbxApp(int argc, char** argv)
 
         if (openRequested)
         {
-            const std::string selectedPath = OpenFbxFileDialog();
+            const std::string selectedPath = openfbx::OpenModelFileDialog();
             if (!selectedPath.empty())
             {
                 openPathInNewTab(selectedPath);
@@ -605,7 +614,7 @@ int RunOpenFbxApp(int argc, char** argv)
                 DrawBones(GetVisibleBones(*active), GetVisibleBonePoses(*active), active->selectedNode, active->selectedNodes);
                 if (visibility.boneRotations)
                 {
-                    DrawBoneRotations(GetVisibleBonePoses(*active), GetBoundsDiagonal(active->loaded.bounds), active->selectedNode);
+                    DrawBoneRotations(GetVisibleBonePoses(*active), GetBoundsDiagonal(active->loaded.bounds), active->selectedNode, active->orbit.camera);
                 }
             }
             DrawSelectedNodeOverlay(*active, visibility, transformTool);
@@ -835,7 +844,7 @@ int RunOpenFbxApp(int argc, char** argv)
 
         if (menuOpenRequested)
         {
-            const std::string selectedPath = OpenFbxFileDialog();
+            const std::string selectedPath = openfbx::OpenModelFileDialog();
             if (!selectedPath.empty())
             {
                 openPathInNewTab(selectedPath);

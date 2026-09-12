@@ -2878,6 +2878,100 @@ bool BuildRaylibModel(const MeshBuilder& builder, LoadedFbxModel& outModel, std:
 }
 }
 
+std::vector<std::string> GetSupportedModelExtensions()
+{
+    return { "fbx", "obj", "glb", "gltf", "blend", "dae", "stl" };
+}
+
+bool PrepareModelForOpening(const std::string& sourcePath, std::string& outputPath, std::string& error)
+{
+    std::string extension = std::filesystem::path(sourcePath).extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (extension == ".fbx")
+    {
+        outputPath = sourcePath;
+        error.clear();
+        return true;
+    }
+    return ConvertModelToFbx(sourcePath, outputPath, error);
+}
+
+bool ConvertModelToFbx(const std::string& sourcePath, std::string& outputPath, std::string& error)
+{
+    outputPath.clear();
+    error.clear();
+    std::unique_ptr<FbxManager, FbxManagerDestroy> manager(FbxManager::Create());
+    if (!manager)
+    {
+        error = "Failed to create FBX SDK manager.";
+        return false;
+    }
+    try
+    {
+        const auto source = std::filesystem::absolute(sourcePath);
+        std::string extension = source.extension().string();
+        std::transform(extension.begin(), extension.end(), extension.begin(),
+            [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        auto destination = source.parent_path() / (source.stem().string() + "_converted.fbx");
+        for (int suffix = 2; std::filesystem::exists(destination); ++suffix)
+            destination = source.parent_path() / (source.stem().string() + "_converted_" + std::to_string(suffix) + ".fbx");
+        if (extension == ".glb" || extension == ".gltf" || extension == ".blend" || extension == ".stl")
+        {
+            if (!RunBlenderConversion(source.string(), destination.string(), error)) return false;
+            outputPath = destination.string();
+            return true;
+        }
+        const int reader = manager->GetIOPluginRegistry()->FindReaderIDByExtension(
+            extension.empty() ? "" : extension.c_str() + 1);
+        if (reader < 0)
+        {
+            error = "Unsupported model format: " + extension + ". Supported formats:";
+            for (const auto& supported : GetSupportedModelExtensions()) error += " ." + supported;
+            return false;
+        }
+        auto* settings = FbxIOSettings::Create(manager.get(), IOSROOT);
+        manager->SetIOSettings(settings);
+        auto* importer = FbxImporter::Create(manager.get(), "conversion-import");
+        auto* scene = FbxScene::Create(manager.get(), "conversion-scene");
+        if (!importer->Initialize(source.string().c_str(), reader, settings) || !importer->Import(scene))
+        {
+            error = std::string("Failed to import model for conversion: ") + importer->GetStatus().GetErrorString();
+            return false;
+        }
+        importer->Destroy();
+
+        // Resolve source-relative textures before exporting beside the source model.
+        for (int i = 0; i < scene->GetSrcObjectCount<FbxFileTexture>(); ++i)
+        {
+            auto* texture = scene->GetSrcObject<FbxFileTexture>(i);
+            std::filesystem::path texturePath(texture->GetFileName());
+            if (texturePath.empty()) texturePath = texture->GetRelativeFileName();
+            if (!texturePath.empty() && texturePath.is_relative())
+                texture->SetFileName((source.parent_path() / texturePath).lexically_normal().string().c_str());
+        }
+        auto* exporter = FbxExporter::Create(manager.get(), "conversion-export");
+        settings->SetBoolProp(EXP_FBX_EMBEDDED, true);
+        if (!exporter->Initialize(destination.string().c_str(), manager->GetIOPluginRegistry()->GetNativeWriterFormat(), settings) ||
+            !exporter->Export(scene))
+        {
+            error = std::string("Failed to convert model to FBX: ") + exporter->GetStatus().GetErrorString();
+            exporter->Destroy();
+            std::error_code cleanupError;
+            std::filesystem::remove(destination, cleanupError);
+            return false;
+        }
+        exporter->Destroy();
+        outputPath = destination.string();
+        return true;
+    }
+    catch (const std::filesystem::filesystem_error& exception)
+    {
+        error = std::string("Failed to convert model to FBX: ") + exception.what();
+        return false;
+    }
+}
+
 bool LoadFbxModel(const std::string& path, LoadedFbxModel& outModel, std::string& error)
 {
     outModel = LoadedFbxModel{};

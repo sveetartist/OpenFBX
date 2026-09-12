@@ -1,4 +1,5 @@
 #include "FileDialogs.h"
+#include "ModelConversion.h"
 
 #include <cstdio>
 #include <filesystem>
@@ -19,6 +20,36 @@ constexpr DWORD kOfnOverwritePrompt = OFN_OVERWRITEPROMPT;
 
 namespace openfbx
 {
+std::string OpenModelFileDialog()
+{
+#ifdef _WIN32
+    std::string patterns;
+    for (const auto& extension : GetSupportedModelExtensions())
+    {
+        if (!patterns.empty()) patterns += ";";
+        patterns += "*." + extension;
+    }
+    std::string filter = "Supported models (" + patterns + ")";
+    filter.push_back('\0');
+    filter += patterns;
+    filter.push_back('\0');
+    filter += "All files (*.*)";
+    filter.push_back('\0');
+    filter += "*.*";
+    filter.append(2, '\0');
+    char filePath[4096] = {};
+    OPENFILENAMEA dialog{};
+    dialog.lStructSize = sizeof(dialog);
+    dialog.lpstrTitle = "Open model (other supported formats convert to FBX)";
+    dialog.lpstrFilter = filter.c_str();
+    dialog.lpstrFile = filePath;
+    dialog.nMaxFile = sizeof(filePath);
+    dialog.Flags = kOfnFileMustExist | kOfnPathMustExist | kOfnNoChangeDir;
+    if (GetOpenFileNameA(&dialog)) return filePath;
+#endif
+    return {};
+}
+
 std::string OpenFbxFileDialog()
 {
 #ifdef _WIN32

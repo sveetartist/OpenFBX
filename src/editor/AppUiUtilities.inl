@@ -18,9 +18,15 @@ void DrawLoadingScreen(Font font, const std::string& path)
     ClearBackground(Color{ 24, 26, 29, 255 });
 
     const char* fileName = GetFileName(path.c_str());
-    const char* title = "LOADING FBX";
+    std::string extension = std::filesystem::path(path).extension().string();
+    std::transform(extension.begin(), extension.end(), extension.begin(),
+        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    const bool converting = extension != ".fbx";
+    const char* title = converting ? "CONVERTING TO FBX" : "LOADING FBX";
     const char* detail = fileName && fileName[0] ? fileName : path.c_str();
-    const char* note = "Importing scene, sampling mesh data, skeleton, and skin deformation";
+    const char* note = converting
+        ? "Converting model; the FBX copy will be saved beside the source file"
+        : "Importing scene, sampling mesh data, skeleton, and skin deformation";
 
     const float centerX = static_cast<float>(GetScreenWidth()) * 0.5f;
     const float centerY = static_cast<float>(GetScreenHeight()) * 0.5f;

@@ -108,15 +108,28 @@ void DrawBones(const std::vector<BoneSegment>& bones, const std::vector<BonePose
     }
 }
 
-void DrawBoneRotations(const std::vector<BonePose>& poses, float sceneDiagonal, int selectedNode)
+void DrawBoneRotations(const std::vector<BonePose>& poses, float sceneDiagonal, int selectedNode, const Camera3D& camera)
 {
-    const float axisLength = ClampFloat(sceneDiagonal * 0.028f, 0.04f, 0.32f);
+    const float axisLength = ClampFloat(sceneDiagonal * 0.028f, 0.04f, 0.32f) * gBoneOrientationScale;
+    const float screenHeight = static_cast<float>(std::max(1, GetScreenHeight()));
+    const Vector3 forward = NormalizeOrFallback(Vector3Subtract(camera.target, camera.position), Vector3{ 0.0f, 0.0f, -1.0f });
     for (const BonePose& pose : poses)
     {
         const unsigned char alpha = pose.node == selectedNode ? 255 : 190;
-        DrawLine3D(pose.position, Vector3Add(pose.position, Vector3Scale(pose.axisX, axisLength)), Color{ 235, 74, 74, alpha });
-        DrawLine3D(pose.position, Vector3Add(pose.position, Vector3Scale(pose.axisY, axisLength)), Color{ 92, 210, 94, alpha });
-        DrawLine3D(pose.position, Vector3Add(pose.position, Vector3Scale(pose.axisZ, axisLength)), Color{ 86, 142, 255, alpha });
+        const auto drawAxis = [&](Vector3 axis, Color color)
+        {
+            const Vector3 end = Vector3Add(pose.position, Vector3Scale(axis, axisLength));
+            const Vector3 midpoint = Vector3Scale(Vector3Add(pose.position, end), 0.5f);
+            const float depth = std::max(0.0001f, Vector3DotProduct(Vector3Subtract(midpoint, camera.position), forward));
+            const float worldPerPixel = camera.projection == CAMERA_ORTHOGRAPHIC
+                ? camera.fovy / screenHeight
+                : 2.0f * depth * std::tan(camera.fovy * DEG2RAD * 0.5f) / screenHeight;
+            const float radius = std::max(0.000001f, worldPerPixel * gBoneOrientationLineWidth * 0.5f);
+            DrawCylinderEx(pose.position, end, radius, radius, 8, color);
+        };
+        drawAxis(pose.axisX, Color{ 235, 74, 74, alpha });
+        drawAxis(pose.axisY, Color{ 92, 210, 94, alpha });
+        drawAxis(pose.axisZ, Color{ 86, 142, 255, alpha });
     }
 }
 

@@ -35,6 +35,8 @@ set(OPENFBX_SOURCES
     src/geometry/MeshTangents.h
     src/platform/FileDialogs.cpp
     src/platform/FileDialogs.h
+    src/platform/ModelConversion.h
+    src/platform/BlenderConversion.cpp
     src/ui/UiPrimitives.cpp
     src/ui/UiPrimitives.h
     src/viewport/OrbitCamera.cpp
@@ -185,6 +187,11 @@ if(OPENFBX_BUILD_TESTS)
         "${CMAKE_CURRENT_SOURCE_DIR}/src" "${FBXSDK_INCLUDE_DIR}")
     get_target_property(OPENFBX_TEST_LIBRARIES openfbx LINK_LIBRARIES)
     target_link_libraries(openfbx_transform_tests PRIVATE ${OPENFBX_TEST_LIBRARIES})
+    add_executable(openfbx_conversion_tests tests/ModelConversion.cpp ${OPENFBX_TEST_SOURCES})
+    target_include_directories(openfbx_conversion_tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src" "${FBXSDK_INCLUDE_DIR}")
+    target_link_libraries(openfbx_conversion_tests PRIVATE ${OPENFBX_TEST_LIBRARIES})
+    add_test(NAME model_conversion_regression COMMAND openfbx_conversion_tests)
     add_test(NAME transform_regression COMMAND openfbx_transform_tests)
 endif()
 

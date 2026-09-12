@@ -74,6 +74,12 @@ constexpr float kNodeContextMenuBoneH = 152.0f;
 float gBottomPanelReservedHeight = kTimelinePanelHeight;
 float gTransformGizmoScale = 1.0f;
 float gTransformGizmoLineWidth = 6.0f;
+constexpr float kMinBoneOrientationScale = 0.25f;
+constexpr float kMaxBoneOrientationScale = 4.0f;
+constexpr float kMinBoneOrientationLineWidth = 1.0f;
+constexpr float kMaxBoneOrientationLineWidth = 10.0f;
+float gBoneOrientationScale = 1.0f;
+float gBoneOrientationLineWidth = 2.0f;
 
 struct AnimationState
 {

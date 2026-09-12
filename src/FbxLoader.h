@@ -1,5 +1,7 @@
 #pragma once
 
+#include "platform/ModelConversion.h"
+
 #include <string>
 #include <memory>
 #include <vector>
