@@ -729,10 +729,10 @@ void DrawMaterialsPanel(Font font,
     const Rectangle clearAllButton{ contentX + loadFolderButton.width + 6.0f, y, clearAllW, 24.0f };
     if (!inputBlocked && DrawPanelButton(font, loadFolderButton, "Load Textures From Folder"))
     {
-        const std::string pickedPath = OpenTextureFileDialog();
+        const std::string pickedPath = openfbx::OpenTextureFolderDialog();
         std::string autoloadError;
         EditSnapshot before = CaptureEditSnapshot(tab);
-        const int loadedCount = pickedPath.empty() ? 0 : LoadPbrTexturesFromFolder(tab, tab.selectedMaterial, std::filesystem::path(pickedPath).parent_path(), autoloadError);
+        const int loadedCount = pickedPath.empty() ? 0 : LoadPbrTexturesFromFolder(tab, tab.selectedMaterial, std::filesystem::path(pickedPath), autoloadError);
         if (loadedCount > 0)
         {
             PushUndoSnapshot(tab, std::move(before));
@@ -742,10 +742,10 @@ void DrawMaterialsPanel(Font font,
             error = autoloadError;
             notice.clear();
         }
-        else
+        else if (!pickedPath.empty())
         {
             char message[128] = {};
-            std::snprintf(message, sizeof(message), "Loaded %d texture%s from folder.", loadedCount, loadedCount == 1 ? "" : "s");
+            std::snprintf(message, sizeof(message), "Loaded %d texture%s from folder and subfolders.", loadedCount, loadedCount == 1 ? "" : "s");
             notice = message;
             error.clear();
         }

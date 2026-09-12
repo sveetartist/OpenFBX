@@ -4,49 +4,17 @@
 #include <filesystem>
 
 #ifdef _WIN32
-using WindowsBool = int;
-using WindowsDword = unsigned long;
-using WindowsHinstance = void*;
-using WindowsHwnd = void*;
-using WindowsLparam = long long;
-using WindowsLpstr = char*;
-using WindowsLpcstr = const char*;
-using WindowsWord = unsigned short;
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#include <commdlg.h>
+#include <shobjidl.h>
 
-struct WindowsOpenFileNameA
-{
-    WindowsDword lStructSize;
-    WindowsHwnd hwndOwner;
-    WindowsHinstance hInstance;
-    WindowsLpcstr lpstrFilter;
-    WindowsLpstr lpstrCustomFilter;
-    WindowsDword nMaxCustFilter;
-    WindowsDword nFilterIndex;
-    WindowsLpstr lpstrFile;
-    WindowsDword nMaxFile;
-    WindowsLpstr lpstrFileTitle;
-    WindowsDword nMaxFileTitle;
-    WindowsLpcstr lpstrInitialDir;
-    WindowsLpcstr lpstrTitle;
-    WindowsDword Flags;
-    WindowsWord nFileOffset;
-    WindowsWord nFileExtension;
-    WindowsLpcstr lpstrDefExt;
-    WindowsLparam lCustData;
-    void* lpfnHook;
-    WindowsLpcstr lpTemplateName;
-    void* pvReserved;
-    WindowsDword dwReserved;
-    WindowsDword FlagsEx;
-};
-
-extern "C" __declspec(dllimport) WindowsBool __stdcall GetOpenFileNameA(WindowsOpenFileNameA* dialog);
-extern "C" __declspec(dllimport) WindowsBool __stdcall GetSaveFileNameA(WindowsOpenFileNameA* dialog);
-
-constexpr WindowsDword kOfnFileMustExist = 0x00001000;
-constexpr WindowsDword kOfnPathMustExist = 0x00000800;
-constexpr WindowsDword kOfnNoChangeDir = 0x00000008;
-constexpr WindowsDword kOfnOverwritePrompt = 0x00000002;
+constexpr DWORD kOfnFileMustExist = OFN_FILEMUSTEXIST;
+constexpr DWORD kOfnPathMustExist = OFN_PATHMUSTEXIST;
+constexpr DWORD kOfnNoChangeDir = OFN_NOCHANGEDIR;
+constexpr DWORD kOfnOverwritePrompt = OFN_OVERWRITEPROMPT;
 #endif
 
 namespace openfbx
@@ -56,7 +24,7 @@ std::string OpenFbxFileDialog()
 #ifdef _WIN32
     char filePath[4096] = {};
 
-    WindowsOpenFileNameA dialog{};
+    OPENFILENAMEA dialog{};
     dialog.lStructSize = sizeof(dialog);
     dialog.lpstrFilter = "FBX files (*.fbx)\0*.fbx\0All files (*.*)\0*.*\0";
     dialog.lpstrFile = filePath;
@@ -85,7 +53,7 @@ std::string SaveAsFbxFileDialog(const std::string& sourcePath)
         std::snprintf(filePath, sizeof(filePath), "%s", suggested.c_str());
     }
 
-    WindowsOpenFileNameA dialog{};
+    OPENFILENAMEA dialog{};
     dialog.lStructSize = sizeof(dialog);
     dialog.lpstrFilter = "FBX files (*.fbx)\0*.fbx\0All files (*.*)\0*.*\0";
     dialog.lpstrFile = filePath;
@@ -102,12 +70,52 @@ std::string SaveAsFbxFileDialog(const std::string& sourcePath)
     return {};
 }
 
+std::string OpenTextureFolderDialog()
+{
+#ifdef _WIN32
+    const HRESULT initialized = CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE);
+    if (FAILED(initialized) && initialized != RPC_E_CHANGED_MODE) return {};
+
+    std::string selectedPath;
+    IFileOpenDialog* dialog = nullptr;
+    if (SUCCEEDED(CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+                                  IID_PPV_ARGS(&dialog))))
+    {
+        FILEOPENDIALOGOPTIONS options = 0;
+        if (SUCCEEDED(dialog->GetOptions(&options)) &&
+            SUCCEEDED(dialog->SetOptions(options | FOS_PICKFOLDERS | FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST)))
+        {
+            dialog->SetTitle(L"Select texture folder (includes subfolders)");
+            if (SUCCEEDED(dialog->Show(nullptr)))
+            {
+                IShellItem* item = nullptr;
+                if (SUCCEEDED(dialog->GetResult(&item)))
+                {
+                    PWSTR path = nullptr;
+                    if (SUCCEEDED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)))
+                    {
+                        selectedPath = std::filesystem::path(path).string();
+                        CoTaskMemFree(path);
+                    }
+                    item->Release();
+                }
+            }
+        }
+        dialog->Release();
+    }
+    if (SUCCEEDED(initialized)) CoUninitialize();
+    return selectedPath;
+#else
+    return {};
+#endif
+}
+
 std::string OpenTextureFileDialog()
 {
 #ifdef _WIN32
     char filePath[4096] = {};
 
-    WindowsOpenFileNameA dialog{};
+    OPENFILENAMEA dialog{};
     dialog.lStructSize = sizeof(dialog);
     dialog.lpstrFilter = "Image files (*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.psd;*.gif;*.hdr)\0*.png;*.jpg;*.jpeg;*.tga;*.bmp;*.psd;*.gif;*.hdr\0All files (*.*)\0*.*\0";
     dialog.lpstrFile = filePath;

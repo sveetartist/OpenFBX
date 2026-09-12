@@ -1095,16 +1095,22 @@ bool TextureNameMatchesMaterial(const std::filesystem::path& texturePath, const 
 std::string FindAutoTexturePath(const std::string& modelPath, const std::filesystem::path& directory, const std::string& materialName, PbrTextureSlot slot)
 {
     const std::filesystem::path sourcePath(modelPath);
-    if (directory.empty() || !std::filesystem::exists(directory)) return {};
+    std::error_code scanError;
+    if (directory.empty() || !std::filesystem::is_directory(directory, scanError)) return {};
 
     const std::string modelStem = ToLower(sourcePath.stem().string());
     const std::string materialStem = ToLower(materialName);
     int bestScore = 0;
     std::filesystem::path bestPath;
 
-    for (const std::filesystem::directory_entry& entry : std::filesystem::directory_iterator(directory))
+    std::filesystem::recursive_directory_iterator entries(
+        directory, std::filesystem::directory_options::skip_permission_denied, scanError);
+    const std::filesystem::recursive_directory_iterator end;
+    for (; !scanError && entries != end; entries.increment(scanError))
     {
-        if (!entry.is_regular_file() || !IsTextureExtension(entry.path())) continue;
+        const std::filesystem::directory_entry& entry = *entries;
+        std::error_code entryError;
+        if (!entry.is_regular_file(entryError) || !IsTextureExtension(entry.path())) continue;
 
         const std::string stem = ToLower(entry.path().stem().string());
         const int score = ScoreTextureCandidate(stem, modelStem, materialStem, slot);

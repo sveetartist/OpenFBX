@@ -136,7 +136,7 @@ target_link_libraries(openfbx PRIVATE
 )
 
 if(WIN32)
-    target_link_libraries(openfbx PRIVATE bcrypt winmm comdlg32)
+    target_link_libraries(openfbx PRIVATE bcrypt winmm comdlg32 ole32 uuid)
 endif()
 
 if(EXISTS "${FBXSDK_ROOT}/bin/${_fbxsdk_arch_dir}")
