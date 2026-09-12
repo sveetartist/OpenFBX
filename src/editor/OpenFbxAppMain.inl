@@ -36,6 +36,7 @@ int RunOpenFbxApp(int argc, char** argv)
     GizmoOrientation gizmoOrientation = GizmoOrientation::Global;
     bool editPivotMode = false;
     TransformGizmoState transformGizmo;
+    MarqueeSelectionState marquee;
     WeightBrushSettings weightBrush;
     WeightBrushState weightBrushState;
 
@@ -391,10 +392,8 @@ int RunOpenFbxApp(int argc, char** argv)
         if (!modalOpen && !renameEditor.active && !transformValueEditor.active && IsKeyPressed(KEY_ESCAPE))
         {
             openMenu = OpenMenu::None;
-            if (active)
-            {
-                ClearNodeSelection(*active);
-            }
+            if (marquee.tab) marquee = MarqueeSelectionState{};
+            else if (active) ClearNodeSelection(*active);
         }
 
         if (!modalOpen && !renameEditor.active && !transformValueEditor.active && active && IsKeyPressed(KEY_F) && active->loaded.valid)
@@ -437,28 +436,44 @@ int RunOpenFbxApp(int argc, char** argv)
         const bool pivotEditLocksSelection = editPivotMode &&
                                              active &&
                                              IsValidPivotNode(*active, active->selectedNode);
-        if (active &&
-            mouseInViewport &&
-            !toolbarConsumedMouse &&
-            !transformInfoConsumedMouse &&
-            !transformConsumedMouse &&
-            !weightBrushConsumedMouse &&
-            !pivotEditLocksSelection &&
-            IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
-            !IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) &&
-            !IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
+        const bool canSelectInViewport = active && mouseInViewport && !altDown &&
+            !renameEditor.active && !transformValueEditor.active &&
+            !toolbarConsumedMouse && !transformInfoConsumedMouse && !transformConsumedMouse &&
+            !weightBrushConsumedMouse && !pivotEditLocksSelection &&
+            !IsMouseButtonDown(MOUSE_BUTTON_RIGHT) && !IsMouseButtonDown(MOUSE_BUTTON_MIDDLE);
+        if (marquee.tab && (marquee.tab != active || transformTool != TransformTool::Select ||
+            editPivotMode || modalOpen || openMenu != OpenMenu::None || renameEditor.active ||
+            transformValueEditor.active || altDown || !IsWindowFocused() ||
+            IsMouseButtonDown(MOUSE_BUTTON_RIGHT) || IsMouseButtonDown(MOUSE_BUTTON_MIDDLE)))
+            marquee = MarqueeSelectionState{};
+        if (canSelectInViewport && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
         {
-            if (SelectNodeFromViewport(*active, mouse, visibility, shiftDown))
-            {
+            if (transformTool == TransformTool::Select)
+                marquee = MarqueeSelectionState{ active, mouse, mouse, false, shiftDown, controlDown };
+            else if (SelectNodeFromViewport(*active, mouse, visibility, shiftDown))
                 RevealNodeInHierarchy(*active, hierarchyPanel, active->selectedNode);
-            }
-            else
+            else if (!shiftDown) ClearNodeSelection(*active);
+        }
+        const bool marqueeConsumedMouse = marquee.tab != nullptr;
+        if (marquee.tab)
+        {
+            marquee.end = Vector2{
+                ClampFloat(mouse.x, hierarchyBlockW, static_cast<float>(GetScreenWidth())),
+                ClampFloat(mouse.y, 61.0f, static_cast<float>(GetScreenHeight()) - gBottomPanelReservedHeight)
+            };
+            marquee.dragging = marquee.dragging || Vector2Distance(marquee.start, marquee.end) >= 4.0f;
+            if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT))
             {
-                if (!shiftDown)
-                {
+                if (marquee.dragging)
+                    SelectNodesInMarquee(*active, GetMarqueeRectangle(marquee.start, marquee.end), visibility,
+                                         marquee.additive || shiftDown, GetScreenWidth(), GetScreenHeight(), marquee.subtractive || controlDown);
+                else if (!SelectNodeFromViewport(*active, marquee.start, visibility, marquee.additive || shiftDown) &&
+                         !(marquee.additive || shiftDown))
                     ClearNodeSelection(*active);
-                }
+                if (active->selectedNode >= 0) RevealNodeInHierarchy(*active, hierarchyPanel, active->selectedNode);
+                marquee = MarqueeSelectionState{};
             }
+            else if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) marquee = MarqueeSelectionState{};
         }
         if (active &&
             mouseInViewport &&
@@ -521,7 +536,7 @@ int RunOpenFbxApp(int argc, char** argv)
 
         if (active)
         {
-            if (mouseInViewport && !toolbarConsumedMouse && !transformInfoConsumedMouse && !transformConsumedMouse && !weightBrushConsumedMouse)
+            if (mouseInViewport && !marqueeConsumedMouse && !toolbarConsumedMouse && !transformInfoConsumedMouse && !transformConsumedMouse && !weightBrushConsumedMouse)
             {
                 UpdateNavigation(active->orbit, navigation);
             }
@@ -625,6 +640,13 @@ int RunOpenFbxApp(int argc, char** argv)
         EndMode3D();
 
         const WeightBrushMode drawWeightBrushMode = shiftDown ? WeightBrushMode::Smooth : controlDown ? WeightBrushMode::Subtract : WeightBrushMode::Add;
+        if (marquee.tab == active && marquee.dragging)
+        {
+            const Rectangle rectangle = GetMarqueeRectangle(marquee.start, marquee.end);
+            const bool subtractive = marquee.subtractive || controlDown;
+            DrawRectangleRec(rectangle, subtractive ? Color{ 230, 95, 80, 35 } : Color{ 80, 155, 230, 35 });
+            DrawRectangleLinesEx(rectangle, 1.5f, subtractive ? Color{ 255, 135, 110, 255 } : Color{ 110, 190, 255, 255 });
+        }
         DrawWeightBrushCursor(uiFont, active, transformTool, weightBrush, drawWeightBrushMode, mouseInViewport);
 
         char statusText[256] = {};

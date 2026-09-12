@@ -99,6 +99,85 @@ static void TestVisibility()
     Require(BuildHiddenMeshNodes(tab, 720).empty(), "Unfiltered visibility should require no lookup");
 }
 
+static void TestMarqueeSelection()
+{
+    ModelTab tab;
+    tab.loaded.valid = true;
+    tab.loaded.hasMesh = true;
+    tab.orbit.camera = Camera3D{ Vector3{ 0, 0, 10 }, Vector3{}, Vector3{ 0, 1, 0 }, 90.0f, CAMERA_PERSPECTIVE };
+    tab.loaded.nodes.resize(5);
+    for (int index = 1; index < 5; ++index) tab.loaded.nodes[index].parent = 0;
+    tab.loaded.nodes[1].type = SceneNodeType::Mesh;
+    tab.loaded.nodes[1].meshVertexStart = 0;
+    tab.loaded.nodes[1].meshVertexCount = 3;
+    tab.loaded.nodes[2].type = SceneNodeType::Empty;
+    tab.loaded.nodes[2].position = Vector3{ 3, 0, 0 };
+    tab.loaded.nodes[3].type = SceneNodeType::Bone;
+    tab.loaded.nodes[4].type = SceneNodeType::Mesh;
+    tab.loaded.nodes[4].meshVertexStart = 3;
+    tab.loaded.nodes[4].meshVertexCount = 3;
+    tab.loaded.bindVertices = { -2,-2,0, 2,-2,0, 0,2,0, -2,-2,20, 2,-2,20, 0,2,20 };
+    BonePose pose;
+    pose.node = 3;
+    tab.loaded.bonePoses.push_back(pose);
+    VisibilityState visibility;
+    visibility.geometry = true;
+    visibility.bones = false;
+    visibility.empties = false;
+    const Rectangle center = GetMarqueeRectangle(Vector2{ 410,310 }, Vector2{ 390,290 });
+    SelectNodesInMarquee(tab, center, visibility, false, 800, 600);
+    Require(tab.selectedNodes == std::vector<int>{1}, "Marquee should hit a face interior and reject geometry behind the camera");
+    visibility.geometry = false;
+    visibility.empties = true;
+    SelectNodesInMarquee(tab, Rectangle{ 480,290,20,20 }, visibility, true, 800, 600);
+    Require(tab.selectedNodes == std::vector<int>({1,2}), "Shift marquee must preserve and add selection");
+    SelectNodesInMarquee(tab, Rectangle{ 480,290,20,20 }, visibility, true, 800, 600);
+    Require(tab.selectedNodes == std::vector<int>({1,2}), "Shift marquee must not toggle or duplicate existing selection");
+    SelectNodesInMarquee(tab, Rectangle{ 0,0,5,5 }, visibility, true, 800, 600);
+    Require(tab.selectedNodes.size() == 2, "Empty additive marquee cleared selection");
+    SelectNodesInMarquee(tab, Rectangle{ 0,0,5,5 }, visibility, false, 800, 600, true);
+    Require(tab.selectedNodes.size() == 2, "Empty subtractive marquee cleared selection");
+    SelectNodesInMarquee(tab, Rectangle{ 480,290,20,20 }, visibility, true, 800, 600, true);
+    Require(tab.selectedNodes == std::vector<int>{1} && tab.selectedNode == 1, "Ctrl must subtract with precedence over Shift and update the active node");
+    SelectNodesInMarquee(tab, Rectangle{ 480,290,20,20 }, visibility, false, 800, 600, true);
+    Require(tab.selectedNodes == std::vector<int>{1}, "Repeated subtraction must not add an unselected node");
+    visibility.geometry = true;
+    SelectNodesInMarquee(tab, center, visibility, false, 800, 600, true);
+    Require(tab.selectedNodes.empty() && tab.selectedNode == -1, "Subtracting the last node left a stale active selection");
+    visibility.geometry = false;
+    SetSingleSelectedNode(tab, 2);
+    SelectNodesInMarquee(tab, Rectangle{ 0,0,5,5 }, visibility, false, 800, 600);
+    Require(tab.selectedNodes.empty() && tab.selectedNode == -1, "Empty replacement marquee must clear selection");
+    visibility.bones = true;
+    SelectNodesInMarquee(tab, center, visibility, false, 800, 600);
+    Require(tab.selectedNodes == std::vector<int>{3}, "Marquee must select displayed bone poses");
+    visibility.bones = false;
+    visibility.empties = false;
+    visibility.geometry = true;
+    tab.deletedNodes.assign(5, false);
+    tab.deletedNodes[1] = true;
+    SelectNodesInMarquee(tab, center, visibility, false, 800, 600);
+    Require(tab.selectedNodes.empty(), "Marquee selected deleted geometry");
+    tab.deletedNodes[1] = false;
+    tab.isolatedNode = 2;
+    SelectNodesInMarquee(tab, center, visibility, false, 800, 600);
+    Require(tab.selectedNodes.empty(), "Marquee selected geometry outside isolation");
+    tab.isolatedNode = -1;
+    tab.currentVertices = tab.loaded.bindVertices;
+    for (size_t index = 0; index < tab.currentVertices.size(); index += 3) tab.currentVertices[index] += 50;
+    SelectNodesInMarquee(tab, center, visibility, false, 800, 600);
+    Require(tab.selectedNodes.empty(), "Marquee used bind geometry instead of the displayed frame");
+    const Vector3 crossing[] = { {-2,0,0}, {2,0,0} };
+    Require(IntersectsMarquee(crossing, 2, tab.orbit.camera, center, 800, 600), "Marquee missed a crossing bone segment");
+    const Vector3 behind[] = { {-2,0,20}, {2,0,20} };
+    Require(!IntersectsMarquee(behind, 2, tab.orbit.camera, center, 800, 600), "Marquee selected a segment behind the camera");
+    tab.orbit.camera.projection = CAMERA_ORTHOGRAPHIC;
+    tab.orbit.camera.fovy = 10;
+    tab.currentVertices.clear();
+    SelectNodesInMarquee(tab, center, visibility, false, 800, 600);
+    Require(tab.selectedNodes == std::vector<int>{1}, "Orthographic marquee failed");
+}
+
 static void TestTangents()
 {
     std::vector<float> vertices(10002 * 3), normals(vertices.size()), uv(10002 * 2);
@@ -314,6 +393,7 @@ int main(int argc, char** argv)
     {
         if (argc > 1) return BenchmarkFbx(argv[1]);
         TestVisibility();
+        TestMarqueeSelection();
         TestTangents();
         TestMergeSelectedGeometryPreservesSkinning();
         ModelTab tab;

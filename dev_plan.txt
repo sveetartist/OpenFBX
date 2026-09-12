@@ -1,0 +1,11 @@
+Dev notes for future versions:
+
+Convert any model to fbx when loading
+preferences
+hotkeys
+
+multiple views for opened fbx
+pivot off on > rename edit pivot
+
+hide/show objects
+freeze objects

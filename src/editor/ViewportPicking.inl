@@ -224,6 +224,127 @@ int PickNodeFromViewport(const ModelTab& tab, Vector2 mouse, const VisibilitySta
     return -1;
 }
 
+struct MarqueeSelectionState
+{
+    ModelTab* tab = nullptr;
+    Vector2 start{};
+    Vector2 end{};
+    bool dragging = false;
+    bool additive = false;
+    bool subtractive = false;
+};
+
+Rectangle GetMarqueeRectangle(Vector2 start, Vector2 end)
+{
+    return Rectangle{ std::min(start.x, end.x), std::min(start.y, end.y),
+        std::fabs(end.x - start.x), std::fabs(end.y - start.y) };
+}
+
+bool IntersectsMarquee(const Vector3* points, int count, const Camera3D& camera,
+                       Rectangle rectangle, int screenWidth, int screenHeight)
+{
+    // Clip before projection so geometry behind the camera cannot select mirrored objects.
+    std::array<Vector3, 8> polygon{};
+    std::copy(points, points + count, polygon.begin());
+    const Vector3 forward = NormalizeOrFallback(Vector3Subtract(camera.target, camera.position), Vector3{ 0, 0, -1 });
+    for (int plane = 0; plane < 2; ++plane)
+    {
+        std::array<Vector3, 8> clipped{};
+        int clippedCount = 0;
+        const auto distance = [&](Vector3 point)
+        {
+            const float depth = Vector3DotProduct(Vector3Subtract(point, camera.position), forward);
+            return plane == 0 ? depth - static_cast<float>(kNearClipPlane) : static_cast<float>(kFarClipPlane) - depth;
+        };
+        for (int i = 0; i < count; ++i)
+        {
+            const Vector3 a = polygon[static_cast<size_t>(i)];
+            const Vector3 b = polygon[static_cast<size_t>((i + 1) % count)];
+            const float da = distance(a), db = distance(b);
+            if (da >= 0) clipped[static_cast<size_t>(clippedCount++)] = a;
+            if ((da >= 0) != (db >= 0))
+                clipped[static_cast<size_t>(clippedCount++)] = Vector3Lerp(a, b, da / (da - db));
+        }
+        count = clippedCount;
+        polygon = clipped;
+        if (!count) return false;
+    }
+    std::array<Vector2, 8> projected{};
+    for (int i = 0; i < count; ++i)
+    {
+        projected[static_cast<size_t>(i)] = GetWorldToScreenEx(polygon[static_cast<size_t>(i)], camera, screenWidth, screenHeight);
+        if (CheckCollisionPointRec(projected[static_cast<size_t>(i)], rectangle)) return true;
+    }
+    const Vector2 corners[] = {
+        { rectangle.x, rectangle.y }, { rectangle.x + rectangle.width, rectangle.y },
+        { rectangle.x + rectangle.width, rectangle.y + rectangle.height }, { rectangle.x, rectangle.y + rectangle.height }
+    };
+    for (int i = 0; i < count; ++i)
+        for (int edge = 0; edge < 4; ++edge)
+            if (CheckCollisionLines(projected[static_cast<size_t>(i)], projected[static_cast<size_t>((i + 1) % count)],
+                                    corners[edge], corners[(edge + 1) % 4], nullptr)) return true;
+    for (int i = 1; i + 1 < count; ++i)
+        for (Vector2 corner : corners)
+            if (CheckCollisionPointTriangle(corner, projected[0], projected[static_cast<size_t>(i)], projected[static_cast<size_t>(i + 1)])) return true;
+    return false;
+}
+
+void SelectNodesInMarquee(ModelTab& tab, Rectangle rectangle, const VisibilityState& visibility,
+                          bool additive, int screenWidth, int screenHeight, bool subtractive = false)
+{
+    if (!additive && !subtractive) ClearNodeSelection(tab);
+    const auto applyNode = [&](int nodeIndex)
+    {
+        if (!IsValidSelectableNode(tab, nodeIndex) || !IsViewportNodeVisible(tab, nodeIndex)) return;
+        if (subtractive)
+        {
+            tab.selectedNodes.erase(std::remove(tab.selectedNodes.begin(), tab.selectedNodes.end(), nodeIndex), tab.selectedNodes.end());
+            if (tab.selectedNode == nodeIndex)
+                tab.selectedNode = tab.selectedNodes.empty() ? -1 : tab.selectedNodes.back();
+            return;
+        }
+        if (!IsNodeSelected(tab, nodeIndex)) tab.selectedNodes.push_back(nodeIndex);
+        tab.selectedNode = nodeIndex;
+    };
+    const auto intersects = [&](const Vector3* points, int count)
+    {
+        return IntersectsMarquee(points, count, tab.orbit.camera, rectangle, screenWidth, screenHeight);
+    };
+    const float* vertices = GetCurrentMeshVertices(tab);
+    const int vertexCount = static_cast<int>(tab.loaded.bindVertices.size() / 3);
+    for (int index = 0; index < static_cast<int>(tab.loaded.nodes.size()); ++index)
+    {
+        if (!IsValidSelectableNode(tab, index) || !IsViewportNodeVisible(tab, index)) continue;
+        const auto& node = tab.loaded.nodes[static_cast<size_t>(index)];
+        if (node.type == SceneNodeType::Mesh && visibility.geometry && vertices && node.meshVertexStart >= 0)
+        {
+            const int end = std::min(vertexCount, node.meshVertexStart + node.meshVertexCount);
+            for (int vertex = node.meshVertexStart; vertex + 2 < end; vertex += 3)
+            {
+                Vector3 triangle[3];
+                for (int corner = 0; corner < 3; ++corner)
+                {
+                    const int offset = (vertex + corner) * 3;
+                    triangle[corner] = Vector3{ vertices[offset], vertices[offset + 1], vertices[offset + 2] };
+                }
+                if (intersects(triangle, 3)) { applyNode(index); break; }
+            }
+        }
+        else if (node.type == SceneNodeType::Empty && visibility.empties && intersects(&node.position, 1))
+            applyNode(index);
+    }
+    if (visibility.bones)
+    {
+        for (const auto& pose : GetVisibleBonePoses(tab))
+            if (intersects(&pose.position, 1)) applyNode(pose.node);
+        for (const auto& bone : GetVisibleBones(tab))
+        {
+            const Vector3 segment[] = { bone.start, bone.end };
+            if (intersects(segment, 2)) applyNode(bone.startNode);
+        }
+    }
+}
+
 bool SelectNodeFromViewport(ModelTab& tab, Vector2 mouse, const VisibilityState& visibility, bool additive = false)
 {
     const int pickedNode = PickNodeFromViewport(tab, mouse, visibility);
