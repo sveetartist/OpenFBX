@@ -78,6 +78,7 @@ constexpr float kMinBoneOrientationScale = 0.25f;
 constexpr float kMaxBoneOrientationScale = 4.0f;
 constexpr float kMinBoneOrientationLineWidth = 1.0f;
 constexpr float kMaxBoneOrientationLineWidth = 10.0f;
+int gCheckerSquares = 16;
 float gBoneOrientationScale = 1.0f;
 float gBoneOrientationLineWidth = 2.0f;
 
@@ -139,7 +140,8 @@ enum class ViewMode
     ShadedWireframe,
     Wireframe,
     MaterialColors,
-    UvIslands
+    UvIslands,
+    Checker
 };
 
 enum class OpenMenu
@@ -344,6 +346,23 @@ struct ValidatorIssue
     int node = -1;
 };
 
+struct ValidationGroup
+{
+    std::string category;
+    std::vector<size_t> issues;
+};
+
+struct ValidationCache
+{
+    bool dirty = true;
+    int uvSet = -1;
+    std::vector<ValidatorIssue> issues;
+    std::vector<ValidationGroup> groups;
+    int errors = 0;
+    int warnings = 0;
+    int infos = 0;
+};
+
 struct ViewportUvIslandTriangle
 {
     int vertex[3]{};
@@ -409,6 +428,7 @@ struct ModelTab
     bool manualSkinnedMeshPose = false;
     int selectedNode = -1;
     std::vector<int> selectedNodes;
+    ValidationCache validationCache;
     std::unordered_map<std::string, bool> expandedValidationGroups;
     std::vector<bool> hiddenNodes;
     int isolatedNode = -1;
@@ -910,6 +930,7 @@ void UnloadPbrTexture(ModelTab& tab, int materialIndex, PbrTextureSlot slot)
 
 bool LoadPbrTexture(ModelTab& tab, int materialIndex, PbrTextureSlot slot, const std::string& path, std::string& error)
 {
+    tab.validationCache.dirty = true;
     error.clear();
     if (path.empty()) return false;
     EnsurePbrMaterialStates(tab);

@@ -387,11 +387,129 @@ static int BenchmarkFbx(const char* path)
     return 0;
 }
 
+static void TestValidationCache()
+{
+    ModelTab tab;
+    tab.loaded.nodes.resize(20000);
+    for (size_t i = 0; i < tab.loaded.nodes.size(); ++i)
+    {
+        SceneNode& node = tab.loaded.nodes[i];
+        node.parent = i == 0 ? -1 : 0;
+        node.name = "Repeated name";
+        node.scale = Vector3{ 2, 2, 2 };
+    }
+    const auto start = std::chrono::steady_clock::now();
+    const auto expected = BuildValidationIssues(tab);
+    const double uncachedMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
+    const auto& cache = GetValidationCache(tab);
+    Require(cache.issues.size() == expected.size(), "Cached validation lost issues");
+    for (size_t i = 0; i < expected.size(); ++i)
+    {
+        Require(cache.issues[i].message == expected[i].message && cache.issues[i].category == expected[i].category &&
+                cache.issues[i].severity == expected[i].severity && cache.issues[i].node == expected[i].node,
+                "Cached validation differs from full validation");
+    }
+    size_t grouped = 0;
+    for (const auto& group : cache.groups) grouped += group.issues.size();
+    Require(grouped == expected.size(), "Grouping lost or duplicated issues");
+    const auto* storage = cache.issues.data();
+    const auto reuseStart = std::chrono::steady_clock::now();
+    for (int i = 0; i < 1000; ++i)
+        Require(GetValidationCache(tab).issues.data() == storage, "Unchanged validation rebuilt its results");
+    const double cachedMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - reuseStart).count() / 1000;
+    std::cout << "Validation: " << expected.size() << " issues, full scan " << uncachedMs
+              << " ms, cached lookup " << cachedMs << " ms\n";
+    RenameSceneNode(tab, 1, "Unique name");
+    Require(tab.validationCache.dirty, "Rename did not invalidate validation");
+    const auto& renamed = GetValidationCache(tab).issues;
+    Require(std::any_of(renamed.begin(), renamed.end(), [](const ValidatorIssue& issue)
+    {
+        return issue.node == 1 && issue.message.find("Unique name") != std::string::npos;
+    }), "Rename left stale validation text");
+    tab.selectedUvSet = 1;
+    Require(GetValidationCache(tab).uvSet == 1, "UV selection left stale validation");
+    PushUndoSnapshot(tab);
+    Require(tab.validationCache.dirty, "Edit did not invalidate validation");
+    GetValidationCache(tab);
+    Require(UndoEdit(tab) && tab.validationCache.dirty, "Undo did not invalidate validation");
+    GetValidationCache(tab);
+    Require(RedoEdit(tab) && tab.validationCache.dirty, "Redo did not invalidate validation");
+}
+
+static void TestUvOverlapSpatialSearch()
+{
+    for (int scenario = 0; scenario < 80; ++scenario)
+    {
+        std::vector<UvTriangleSample> triangles;
+        UvIslandStats a, b;
+        a.minU = b.minU = -100.0f;
+        a.maxU = b.maxU = 100.0f;
+        a.minV = b.minV = -100.0f;
+        a.maxV = b.maxV = 100.0f;
+        for (int side = 0; side < 2; ++side)
+        {
+            for (int i = 0; i < 48; ++i)
+            {
+                const float offset = side == 0 ? 0.0f : static_cast<float>(scenario % 10) * 0.2f;
+                const float x = static_cast<float>(i % 8) * 2.0f + offset - 8.0f;
+                const float y = static_cast<float>(i / 8) * 2.0f + (side == 0 ? 0.0f : 0.3f);
+                UvTriangleSample triangle;
+                triangle.uv[0] = Vector2{ x, y };
+                triangle.uv[1] = Vector2{ x + 0.5f, y };
+                triangle.uv[2] = Vector2{ x, y + (scenario % 7 == 0 ? 0.0f : 0.5f) };
+                if (scenario % 2) std::swap(triangle.uv[1], triangle.uv[2]);
+                (side == 0 ? a : b).triangles.push_back(static_cast<int>(triangles.size()));
+                triangles.push_back(triangle);
+            }
+        }
+        bool expected = false;
+        for (int ai : a.triangles)
+            for (int bi : b.triangles)
+                if (TriangleUvOverlapArea(triangles[static_cast<size_t>(ai)], triangles[static_cast<size_t>(bi)]) > 0.0000001f)
+                    expected = true;
+        Require(UvIslandsOverlap(a, b, triangles) == expected,
+                "Spatial UV search differs from exhaustive triangle overlap search");
+    }
+    UvIslandStats empty;
+    Require(!UvIslandsOverlap(empty, empty, {}), "Empty islands overlap");
+}
+
+static int BenchmarkValidation(const char* path)
+{
+    SetTraceLogLevel(LOG_WARNING);
+    SetConfigFlags(FLAG_WINDOW_HIDDEN);
+    InitWindow(64, 64, "Validation benchmark");
+    ModelTab tab;
+    std::string error;
+    Require(LoadFbxModel(path, tab.loaded, error), error.c_str());
+    auto stage = [&](const char* name, auto validate)
+    {
+        std::vector<ValidatorIssue> issues;
+        const auto start = std::chrono::steady_clock::now();
+        validate(issues);
+        std::cout << name << ": " << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count()
+                  << " ms, " << issues.size() << " issues" << std::endl;
+    };
+    stage("Textures", [&](auto& out) { ValidateTextures(tab, out); });
+    stage("Names", [&](auto& out) { ValidateDuplicateNames(tab.loaded, out); });
+    stage("Transforms", [&](auto& out) { ValidateTransforms(tab.loaded, out); });
+    stage("Geometry", [&](auto& out) { ValidateGeometry(tab.loaded, out); });
+    stage("Density", [&](auto& out) { ValidateTexelDensityConsistency(tab, out); });
+    stage("UV overlaps", [&](auto& out) { ValidateUvIslandOverlaps(tab, out); });
+    stage("Skin", [&](auto& out) { ValidateSkinning(tab.loaded, out); });
+    UnloadFbxModel(tab.loaded);
+    CloseWindow();
+    return 0;
+}
+
 int main(int argc, char** argv)
 {
     try
     {
+        if (argc > 2 && std::string(argv[1]) == "--validation") return BenchmarkValidation(argv[2]);
         if (argc > 1) return BenchmarkFbx(argv[1]);
+        TestUvOverlapSpatialSearch();
+        TestValidationCache();
         TestVisibility();
         TestMarqueeSelection();
         TestTangents();

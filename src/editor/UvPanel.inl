@@ -433,28 +433,105 @@ bool UvIslandBoundsOverlap(const UvIslandStats& a, const UvIslandStats& b)
            std::min(a.maxV, b.maxV) - std::max(a.minV, b.minV) > epsilon;
 }
 
-bool UvIslandsOverlap(const UvIslandStats& a,
-                      const UvIslandStats& b,
-                      const std::vector<UvTriangleSample>& triangles)
+struct UvOverlapTree
+{
+    struct Node
+    {
+        UvIslandStats bounds;
+        int begin = 0;
+        int end = 0;
+        int left = -1;
+        int right = -1;
+    };
+    std::vector<int> triangles;
+    std::vector<Node> nodes;
+};
+
+UvIslandStats GetUvTriangleBounds(const UvTriangleSample& triangle)
+{
+    UvIslandStats bounds;
+    bounds.minU = bounds.maxU = triangle.uv[0].x;
+    bounds.minV = bounds.maxV = triangle.uv[0].y;
+    for (int i = 1; i < 3; ++i)
+    {
+        bounds.minU = std::min(bounds.minU, triangle.uv[i].x);
+        bounds.maxU = std::max(bounds.maxU, triangle.uv[i].x);
+        bounds.minV = std::min(bounds.minV, triangle.uv[i].y);
+        bounds.maxV = std::max(bounds.maxV, triangle.uv[i].y);
+    }
+    return bounds;
+}
+
+int BuildUvOverlapTreeNode(UvOverlapTree& tree, const std::vector<UvTriangleSample>& triangles, int begin, int end)
+{
+    UvOverlapTree::Node node;
+    node.begin = begin;
+    node.end = end;
+    node.bounds = GetUvTriangleBounds(triangles[static_cast<size_t>(tree.triangles[static_cast<size_t>(begin)])]);
+    for (int i = begin + 1; i < end; ++i)
+    {
+        const auto bounds = GetUvTriangleBounds(triangles[static_cast<size_t>(tree.triangles[static_cast<size_t>(i)])]);
+        node.bounds.minU = std::min(node.bounds.minU, bounds.minU);
+        node.bounds.maxU = std::max(node.bounds.maxU, bounds.maxU);
+        node.bounds.minV = std::min(node.bounds.minV, bounds.minV);
+        node.bounds.maxV = std::max(node.bounds.maxV, bounds.maxV);
+    }
+    const int index = static_cast<int>(tree.nodes.size());
+    tree.nodes.push_back(node);
+    if (end - begin > 8)
+    {
+        const bool splitU = node.bounds.maxU - node.bounds.minU >= node.bounds.maxV - node.bounds.minV;
+        const int middle = begin + (end - begin) / 2;
+        std::nth_element(tree.triangles.begin() + begin, tree.triangles.begin() + middle, tree.triangles.begin() + end,
+                         [&](int a, int b)
+        {
+            const auto& ta = triangles[static_cast<size_t>(a)];
+            const auto& tb = triangles[static_cast<size_t>(b)];
+            return splitU ? ta.uv[0].x + ta.uv[1].x + ta.uv[2].x < tb.uv[0].x + tb.uv[1].x + tb.uv[2].x :
+                            ta.uv[0].y + ta.uv[1].y + ta.uv[2].y < tb.uv[0].y + tb.uv[1].y + tb.uv[2].y;
+        });
+        const int left = BuildUvOverlapTreeNode(tree, triangles, begin, middle);
+        const int right = BuildUvOverlapTreeNode(tree, triangles, middle, end);
+        tree.nodes[static_cast<size_t>(index)].left = left;
+        tree.nodes[static_cast<size_t>(index)].right = right;
+    }
+    return index;
+}
+
+UvOverlapTree BuildUvOverlapTree(const UvIslandStats& island, const std::vector<UvTriangleSample>& triangles)
+{
+    UvOverlapTree tree;
+    for (int index : island.triangles)
+        if (index >= 0 && index < static_cast<int>(triangles.size())) tree.triangles.push_back(index);
+    if (!tree.triangles.empty()) BuildUvOverlapTreeNode(tree, triangles, 0, static_cast<int>(tree.triangles.size()));
+    return tree;
+}
+
+bool UvOverlapTreeNodesIntersect(const UvOverlapTree& a, int ai, const UvOverlapTree& b, int bi,
+                                 const std::vector<UvTriangleSample>& triangles)
+{
+    const auto& an = a.nodes[static_cast<size_t>(ai)];
+    const auto& bn = b.nodes[static_cast<size_t>(bi)];
+    // Use inclusive bounds here: the exact area test below retains the original tolerance.
+    if (an.bounds.maxU < bn.bounds.minU || bn.bounds.maxU < an.bounds.minU ||
+        an.bounds.maxV < bn.bounds.minV || bn.bounds.maxV < an.bounds.minV) return false;
+    if (an.left >= 0 && (bn.left < 0 || an.end - an.begin >= bn.end - bn.begin))
+        return UvOverlapTreeNodesIntersect(a, an.left, b, bi, triangles) || UvOverlapTreeNodesIntersect(a, an.right, b, bi, triangles);
+    if (bn.left >= 0)
+        return UvOverlapTreeNodesIntersect(a, ai, b, bn.left, triangles) || UvOverlapTreeNodesIntersect(a, ai, b, bn.right, triangles);
+    for (int i = an.begin; i < an.end; ++i)
+        for (int j = bn.begin; j < bn.end; ++j)
+            if (TriangleUvOverlapArea(triangles[static_cast<size_t>(a.triangles[static_cast<size_t>(i)])],
+                                      triangles[static_cast<size_t>(b.triangles[static_cast<size_t>(j)])]) > 0.0000001f) return true;
+    return false;
+}
+
+bool UvIslandsOverlap(const UvIslandStats& a, const UvIslandStats& b, const std::vector<UvTriangleSample>& triangles)
 {
     if (!UvIslandBoundsOverlap(a, b)) return false;
-
-    constexpr float kOverlapAreaEpsilon = 0.0000001f;
-    for (int triangleAIndex : a.triangles)
-    {
-        if (triangleAIndex < 0 || triangleAIndex >= static_cast<int>(triangles.size())) continue;
-        const UvTriangleSample& triangleA = triangles[static_cast<size_t>(triangleAIndex)];
-        for (int triangleBIndex : b.triangles)
-        {
-            if (triangleBIndex < 0 || triangleBIndex >= static_cast<int>(triangles.size())) continue;
-            const UvTriangleSample& triangleB = triangles[static_cast<size_t>(triangleBIndex)];
-            if (TriangleUvOverlapArea(triangleA, triangleB) > kOverlapAreaEpsilon)
-            {
-                return true;
-            }
-        }
-    }
-    return false;
+    const auto ta = BuildUvOverlapTree(a, triangles);
+    const auto tb = BuildUvOverlapTree(b, triangles);
+    return !ta.nodes.empty() && !tb.nodes.empty() && UvOverlapTreeNodesIntersect(ta, 0, tb, 0, triangles);
 }
 
 bool IsPointInUvTriangle(Vector2 point, Vector2 a, Vector2 b, Vector2 c)
@@ -643,13 +720,29 @@ void ValidateUvIslandOverlaps(const ModelTab& tab, std::vector<ValidatorIssue>& 
             if (materialTriangles.empty()) continue;
 
             const std::vector<UvIslandStats> islands = CalculateUvIslandStats(materialTriangles, 1, 1);
+            std::vector<int> islandOrder;
+            for (int i = 0; i < static_cast<int>(islands.size()); ++i) islandOrder.push_back(i);
+            std::sort(islandOrder.begin(), islandOrder.end(), [&](int a, int b)
+            {
+                return islands[static_cast<size_t>(a)].minU < islands[static_cast<size_t>(b)].minU;
+            });
+            // Build lazily and reuse each island's spatial index across candidate pairs.
+            std::vector<UvOverlapTree> overlapTrees(islands.size());
             bool foundOverlap = false;
             int issueNode = -1;
-            for (int islandA = 0; islandA < static_cast<int>(islands.size()) && !foundOverlap; ++islandA)
+            for (int orderA = 0; orderA < static_cast<int>(islandOrder.size()) && !foundOverlap; ++orderA)
             {
-                for (int islandB = islandA + 1; islandB < static_cast<int>(islands.size()); ++islandB)
+                const int islandA = islandOrder[static_cast<size_t>(orderA)];
+                for (int orderB = orderA + 1; orderB < static_cast<int>(islandOrder.size()); ++orderB)
                 {
-                    if (UvIslandsOverlap(islands[static_cast<size_t>(islandA)], islands[static_cast<size_t>(islandB)], materialTriangles))
+                    const int islandB = islandOrder[static_cast<size_t>(orderB)];
+                    if (islands[static_cast<size_t>(islandB)].minU > islands[static_cast<size_t>(islandA)].maxU) break;
+                    if (!UvIslandBoundsOverlap(islands[static_cast<size_t>(islandA)], islands[static_cast<size_t>(islandB)])) continue;
+                    auto& treeA = overlapTrees[static_cast<size_t>(islandA)];
+                    auto& treeB = overlapTrees[static_cast<size_t>(islandB)];
+                    if (treeA.nodes.empty()) treeA = BuildUvOverlapTree(islands[static_cast<size_t>(islandA)], materialTriangles);
+                    if (treeB.nodes.empty()) treeB = BuildUvOverlapTree(islands[static_cast<size_t>(islandB)], materialTriangles);
+                    if (!treeA.nodes.empty() && !treeB.nodes.empty() && UvOverlapTreeNodesIntersect(treeA, 0, treeB, 0, materialTriangles))
                     {
                         issueNode = GetFirstUvIslandNodeIndex(islands[static_cast<size_t>(islandB)], materialTriangles);
                         if (issueNode < 0)

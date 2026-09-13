@@ -1,11 +1,21 @@
 Dev notes for future versions:
 
-Convert any model to fbx when loading
+
+Ideas:
+
 preferences
-hotkeys
+dedicated hotkey editor
+freeze objects
 
 multiple views for opened fbx
+view for every open fbx
 pivot off on > rename edit pivot
 
+
+
+
+Finished:
+
 hide/show objects
-freeze objects
+folded warning
+Convert any model to fbx when loading > converts blend, obj, glb, gltf, stl

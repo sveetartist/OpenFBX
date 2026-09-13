@@ -79,3 +79,10 @@ Press **H** to toggle visibility of selected objects or bones. Hidden entries st
 selectable in the hierarchy and use darker text. **View > Show All** (**Alt+H**) restores all
 hidden items, exits isolation, and enables geometry, bones, and empties. Visibility
 is local to each open tab and resets on reload.
+
+## Checker view
+
+Press **V** to cycle to **Checker**, or choose **View > Checker**. The bundled
+`assets/checker.png` displays a repeating UV checker without changing materials.
+In **Preferences > Checker Texture**, adjust squares per UV tile from 2 to 128
+(default 16). More squares make each checker smaller.

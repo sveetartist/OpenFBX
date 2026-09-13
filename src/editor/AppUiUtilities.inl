@@ -54,6 +54,7 @@ const char* GetViewModeName(ViewMode mode)
     case ViewMode::Wireframe: return "WIREFRAME";
     case ViewMode::MaterialColors: return "MATERIAL COLORS";
     case ViewMode::UvIslands: return "UV ISLANDS";
+    case ViewMode::Checker: return "CHECKER";
     }
 
     return "UNKNOWN";
@@ -67,7 +68,8 @@ ViewMode NextViewMode(ViewMode mode)
     case ViewMode::ShadedWireframe: return ViewMode::Wireframe;
     case ViewMode::Wireframe: return ViewMode::MaterialColors;
     case ViewMode::MaterialColors: return ViewMode::UvIslands;
-    case ViewMode::UvIslands: return ViewMode::Shaded;
+    case ViewMode::UvIslands: return ViewMode::Checker;
+    case ViewMode::Checker: return ViewMode::Shaded;
     }
 
     return ViewMode::Shaded;

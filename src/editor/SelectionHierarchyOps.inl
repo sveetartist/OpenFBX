@@ -531,6 +531,7 @@ int MergeSelectedGeometry(ModelTab& tab, const std::vector<int>& contextNodes, s
 
 void RefreshDisplayedMesh(ModelTab& tab)
 {
+    tab.validationCache.dirty = true;
     if (!tab.loaded.hasMesh || tab.loaded.bindVertices.size() != tab.loaded.bindNormals.size()) return;
 
     if (tab.currentVertices.size() == tab.loaded.bindVertices.size() &&
@@ -1028,6 +1029,7 @@ bool ToggleSelectedNodeIsolation(ModelTab& tab, std::string& notice, std::string
 
 void RenameSceneNode(ModelTab& tab, int nodeIndex, const std::string& newName)
 {
+    tab.validationCache.dirty = true;
     if (nodeIndex < 0 || nodeIndex >= static_cast<int>(tab.loaded.nodes.size()) || newName.empty()) return;
     if (IsSceneRootNode(tab.loaded, nodeIndex)) return;
 

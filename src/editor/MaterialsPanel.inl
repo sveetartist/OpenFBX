@@ -391,28 +391,44 @@ std::vector<ValidatorIssue> BuildValidationIssues(const ModelTab& tab)
     return issues;
 }
 
+const ValidationCache& GetValidationCache(ModelTab& tab)
+{
+    ValidationCache& cache = tab.validationCache;
+    if (!cache.dirty && cache.uvSet == tab.selectedUvSet) return cache;
+    cache = ValidationCache{};
+    cache.issues = BuildValidationIssues(tab);
+    std::unordered_map<std::string, size_t> groupIndices;
+    for (size_t index = 0; index < cache.issues.size(); ++index)
+    {
+        const ValidatorIssue& issue = cache.issues[index];
+        if (issue.severity == ValidatorSeverity::Error) ++cache.errors;
+        else if (issue.severity == ValidatorSeverity::Warning) ++cache.warnings;
+        else ++cache.infos;
+        auto inserted = groupIndices.emplace(issue.category, cache.groups.size());
+        if (inserted.second) cache.groups.push_back(ValidationGroup{ issue.category, {} });
+        cache.groups[inserted.first->second].issues.push_back(index);
+    }
+    cache.uvSet = tab.selectedUvSet;
+    cache.dirty = false;
+    return cache;
+}
+
 void DrawValidatorPanel(Font font, ModelTab& tab, HierarchyPanelState& panel, float panelX, float panelY, float panelW)
 {
-    std::vector<ValidatorIssue> issues = BuildValidationIssues(tab);
+    if (DrawPanelButton(font, Rectangle{ panelX + panelW - 88.0f, panelY - 3.0f, 76.0f, 24.0f }, "Refresh"))
+        tab.validationCache.dirty = true;
+    const ValidationCache& cache = GetValidationCache(tab);
+    const auto& issues = cache.issues;
+    const auto& groups = cache.groups;
     const float contentX = panelX + 12.0f;
     const float panelH = GetHierarchyPanelHeight();
     float y = panelY;
-
-    int errors = 0;
-    int warnings = 0;
-    int infos = 0;
-    for (const ValidatorIssue& issue : issues)
-    {
-        if (issue.severity == ValidatorSeverity::Error) ++errors;
-        else if (issue.severity == ValidatorSeverity::Warning) ++warnings;
-        else ++infos;
-    }
 
     DrawUiText(font, "VALIDATOR", contentX, y, 16.0f, Color{ 165, 182, 196, 255 });
     y += 28.0f;
 
     char summary[192] = {};
-    std::snprintf(summary, sizeof(summary), "%d errors    %d warnings    %d info", errors, warnings, infos);
+    std::snprintf(summary, sizeof(summary), "%d errors    %d warnings    %d info", cache.errors, cache.warnings, cache.infos);
     DrawUiTextClipped(font, summary, contentX, y, 14.0f, panelW - 24.0f, Color{ 205, 213, 220, 255 });
     y += 28.0f;
 
@@ -423,31 +439,14 @@ void DrawValidatorPanel(Font font, ModelTab& tab, HierarchyPanelState& panel, fl
         return;
     }
 
-    // Issues arrive severity-sorted, so groups and their contents retain priority.
-    struct Group
-    {
-        std::string category;
-        std::vector<const ValidatorIssue*> issues;
-    };
-    std::vector<Group> groups;
-    for (const ValidatorIssue& issue : issues)
-    {
-        auto group = std::find_if(groups.begin(), groups.end(), [&](const Group& candidate)
-        {
-            return candidate.category == issue.category;
-        });
-        if (group == groups.end()) groups.push_back(Group{ issue.category, { &issue } });
-        else group->issues.push_back(&issue);
-    }
-
     const float buttonW = (panelW - 30.0f) * 0.5f;
     if (DrawPanelButton(font, Rectangle{ contentX, y, buttonW, 24.0f }, "Expand All"))
     {
-        for (const Group& group : groups) tab.expandedValidationGroups[group.category] = true;
+        for (const ValidationGroup& group : groups) tab.expandedValidationGroups[group.category] = true;
     }
     if (DrawPanelButton(font, Rectangle{ contentX + buttonW + 6.0f, y, buttonW, 24.0f }, "Collapse All"))
     {
-        for (const Group& group : groups) tab.expandedValidationGroups[group.category] = false;
+        for (const ValidationGroup& group : groups) tab.expandedValidationGroups[group.category] = false;
         panel.validatorScroll = 0.0f;
     }
     y += 32.0f;
@@ -456,7 +455,7 @@ void DrawValidatorPanel(Font font, ModelTab& tab, HierarchyPanelState& panel, fl
     constexpr float rowH = 54.0f;
     const Rectangle listBounds{ contentX, y, panelW - 24.0f, std::max(1.0f, panelH - (y - 61.0f) - 10.0f) };
     float contentH = 0.0f;
-    for (const Group& group : groups)
+    for (const ValidationGroup& group : groups)
     {
         contentH += headerH;
         if (tab.expandedValidationGroups[group.category]) contentH += rowH * static_cast<float>(group.issues.size());
@@ -471,7 +470,7 @@ void DrawValidatorPanel(Font font, ModelTab& tab, HierarchyPanelState& panel, fl
     std::string toggledGroup;
 
     BeginScissorMode(static_cast<int>(listBounds.x), static_cast<int>(listBounds.y), static_cast<int>(listBounds.width), static_cast<int>(listBounds.height));
-    for (const Group& group : groups)
+    for (const ValidationGroup& group : groups)
     {
         const bool expanded = tab.expandedValidationGroups[group.category];
         const Rectangle header{ listBounds.x, rowY, rowW, headerH - 3.0f };
@@ -481,14 +480,19 @@ void DrawValidatorPanel(Font font, ModelTab& tab, HierarchyPanelState& panel, fl
             DrawRectangleRec(header, hoveredHeader ? Color{ 48, 57, 66, 255 } : Color{ 35, 42, 49, 255 });
             const std::string label = std::string(expanded ? "v " : "> ") + group.category + " (" + std::to_string(group.issues.size()) + ")";
             DrawUiTextClipped(font, label.c_str(), header.x + 8.0f, header.y + 7.0f, 14.0f, header.width - 16.0f,
-                              GetValidatorSeverityColor(group.issues.front()->severity));
+                              GetValidatorSeverityColor(issues[group.issues.front()].severity));
             if (hoveredHeader && openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT)) toggledGroup = group.category;
         }
         rowY += headerH;
         if (!expanded) continue;
-        for (const ValidatorIssue* entry : group.issues)
+        // Jump directly to visible rows instead of visiting every expanded issue.
+        const float groupStartY = rowY;
+        const int first = ClampInt(static_cast<int>(std::floor((listBounds.y - rowY) / rowH)), 0, static_cast<int>(group.issues.size()));
+        const int last = ClampInt(static_cast<int>(std::ceil((listBounds.y + listBounds.height - rowY) / rowH)), first, static_cast<int>(group.issues.size()));
+        rowY += first * rowH;
+        for (int index = first; index < last; ++index)
         {
-            const ValidatorIssue& issue = *entry;
+            const ValidatorIssue& issue = issues[group.issues[static_cast<size_t>(index)]];
             if (rowY + rowH > listBounds.y && rowY < listBounds.y + listBounds.height)
             {
                 const Rectangle row{ listBounds.x + 8.0f, rowY, rowW - 8.0f, rowH - 4.0f };
@@ -505,6 +509,7 @@ void DrawValidatorPanel(Font font, ModelTab& tab, HierarchyPanelState& panel, fl
             }
             rowY += rowH;
         }
+        rowY = groupStartY + rowH * static_cast<float>(group.issues.size());
     }
     EndScissorMode();
 

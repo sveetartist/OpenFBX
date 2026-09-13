@@ -11,6 +11,8 @@ int RunOpenFbxApp(int argc, char** argv)
 
     Font uiFont = LoadTechnicalFont();
     LitShader litShader = LoadBasicLitShader();
+    Material checkerMaterial = LoadMaterialDefault();
+    int appliedCheckerSquares = 0;
     OrbitCamera emptyOrbit = CreateDefaultCamera();
     std::vector<std::unique_ptr<ModelTab>> tabs;
     int activeTab = -1;
@@ -56,6 +58,7 @@ int RunOpenFbxApp(int argc, char** argv)
         tab.visibleBonePoses = tab.loaded.bonePoses;
         tab.collapsedNodes.assign(tab.loaded.nodes.size(), false);
         tab.hiddenNodes.clear();
+        tab.validationCache = ValidationCache{};
         tab.deletedNodes.assign(tab.loaded.nodes.size(), false);
         tab.selectedNode = -1;
         for (int nodeIndex = 0; nodeIndex < static_cast<int>(tab.loaded.nodes.size()); ++nodeIndex)
@@ -631,6 +634,11 @@ int RunOpenFbxApp(int argc, char** argv)
                     DrawMaterialColorModel(*active, litShader);
                     EndBlendMode();
                 }
+                else if (viewMode == ViewMode::Checker)
+                {
+                    UpdateCheckerMaterial(checkerMaterial, appliedCheckerSquares);
+                    DrawCheckerModel(*active, checkerMaterial);
+                }
                 else if (viewMode == ViewMode::UvIslands)
                 {
                     DrawUvIslandColorOverlay(*active);
@@ -691,6 +699,10 @@ int RunOpenFbxApp(int argc, char** argv)
             if (viewMode == ViewMode::MaterialColors)
             {
                 std::snprintf(channelText, sizeof(channelText), "Viewport: Material Colors");
+            }
+            else if (viewMode == ViewMode::Checker)
+            {
+                std::snprintf(channelText, sizeof(channelText), "Viewport: Checker (%d squares / UV tile)", gCheckerSquares);
             }
             else if (viewMode == ViewMode::UvIslands)
             {
@@ -1090,6 +1102,12 @@ int RunOpenFbxApp(int argc, char** argv)
     {
         UnloadFont(uiFont);
     }
+    if (appliedCheckerSquares != 0)
+    {
+        UnloadTexture(checkerMaterial.maps[MATERIAL_MAP_DIFFUSE].texture);
+        checkerMaterial.maps[MATERIAL_MAP_DIFFUSE].texture = Texture2D{};
+    }
+    UnloadMaterial(checkerMaterial);
     CloseWindow();
     return 0;
 }

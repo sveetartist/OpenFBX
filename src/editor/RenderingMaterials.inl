@@ -9,6 +9,7 @@ void TrimEditHistory(std::vector<EditSnapshot>& history)
 
 void PushUndoSnapshot(ModelTab& tab, EditSnapshot snapshot)
 {
+    tab.validationCache.dirty = true;
     tab.undoStack.push_back(std::move(snapshot));
     TrimEditHistory(tab.undoStack);
     tab.redoStack.clear();
@@ -21,6 +22,7 @@ void PushUndoSnapshot(ModelTab& tab)
 
 void RestoreEditSnapshot(ModelTab& tab, const EditSnapshot& snapshot)
 {
+    tab.validationCache.dirty = true;
     tab.loaded.uvSetNames = snapshot.uvSetNames;
     tab.loaded.uvSets = snapshot.uvSets;
     tab.loaded.uvSetPresence = snapshot.uvSetPresence;
@@ -173,6 +175,38 @@ void DrawMaterialModel(ModelTab& tab, const LitShader& lit, MaterialPreviewMode 
     drawMeshes(true);
     rlDrawRenderBatchActive();
     rlEnableDepthMask();
+}
+
+void UpdateCheckerMaterial(Material& material, int& appliedSquares)
+{
+    if (appliedSquares == gCheckerSquares) return;
+    Texture2D texture{};
+    if (gCheckerSquares == 16)
+    {
+        const std::string path = std::string(GetApplicationDirectory()) + "checker.png";
+        if (FileExists(path.c_str())) texture = LoadTexture(path.c_str());
+    }
+    if (texture.id == 0)
+    {
+        Image checker = GenImageChecked(512, 512, 512 / gCheckerSquares, 512 / gCheckerSquares,
+                                       Color{ 210, 210, 210, 255 }, Color{ 55, 55, 55, 255 });
+        texture = LoadTextureFromImage(checker);
+        UnloadImage(checker);
+    }
+    GenTextureMipmaps(&texture);
+    SetTextureFilter(texture, TEXTURE_FILTER_TRILINEAR);
+    SetTextureWrap(texture, TEXTURE_WRAP_REPEAT);
+    if (appliedSquares != 0) UnloadTexture(material.maps[MATERIAL_MAP_DIFFUSE].texture);
+    material.maps[MATERIAL_MAP_DIFFUSE].texture = texture;
+    appliedSquares = gCheckerSquares;
+}
+
+void DrawCheckerModel(const ModelTab& tab, const Material& material)
+{
+    for (int meshIndex = 0; meshIndex < tab.loaded.model.meshCount; ++meshIndex)
+    {
+        DrawMesh(tab.loaded.model.meshes[meshIndex], material, MatrixIdentity());
+    }
 }
 
 void DrawMaterialColorModel(ModelTab& tab, const LitShader& lit)

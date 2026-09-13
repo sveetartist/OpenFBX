@@ -63,10 +63,10 @@ void DrawMenuBar(Font font,
         openMenuBounds = Rectangle{ 66.0f, 29.0f, 230.0f, 68.0f };
         break;
     case OpenMenu::View:
-        openMenuBounds = Rectangle{ 124.0f, 29.0f, 230.0f, 428.0f };
+        openMenuBounds = Rectangle{ 124.0f, 29.0f, 230.0f, 458.0f };
         break;
     case OpenMenu::Preferences:
-        openMenuBounds = Rectangle{ 186.0f, 29.0f, 420.0f, 468.0f };
+        openMenuBounds = Rectangle{ 186.0f, 29.0f, 420.0f, 536.0f };
         break;
     case OpenMenu::Help:
         openMenuBounds = Rectangle{ 308.0f, 29.0f, 230.0f, 38.0f };
@@ -168,7 +168,7 @@ void DrawMenuBar(Font font,
     }
     else if (openMenu == OpenMenu::View)
     {
-        DrawRectangle(124, 29, 230, 428, Color{ 28, 31, 35, 245 });
+        DrawRectangle(124, 29, 230, 458, Color{ 28, 31, 35, 245 });
         if (DrawMenuItem(font, Rectangle{ 124.0f, 29.0f, 230.0f, 30.0f }, "Shaded", viewMode == ViewMode::Shaded))
         {
             viewMode = ViewMode::Shaded;
@@ -189,39 +189,43 @@ void DrawMenuBar(Font font,
         {
             viewMode = ViewMode::UvIslands;
         }
-        if (DrawMenuItem(font, Rectangle{ 124.0f, 187.0f, 230.0f, 30.0f }, visibility.geometry ? "[x] Geometry        G" : "[ ] Geometry        G"))
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 179.0f, 230.0f, 30.0f }, "Checker", viewMode == ViewMode::Checker))
+        {
+            viewMode = ViewMode::Checker;
+        }
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 217.0f, 230.0f, 30.0f }, visibility.geometry ? "[x] Geometry        G" : "[ ] Geometry        G"))
         {
             visibility.geometry = !visibility.geometry;
         }
-        if (DrawMenuItem(font, Rectangle{ 124.0f, 217.0f, 230.0f, 30.0f }, visibility.textures ? "[x] Textures" : "[ ] Textures"))
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 247.0f, 230.0f, 30.0f }, visibility.textures ? "[x] Textures" : "[ ] Textures"))
         {
             visibility.textures = !visibility.textures;
         }
-        if (DrawMenuItem(font, Rectangle{ 124.0f, 247.0f, 230.0f, 30.0f }, visibility.backfaceCulling ? "[x] Backface Culling" : "[ ] Backface Culling"))
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 277.0f, 230.0f, 30.0f }, visibility.backfaceCulling ? "[x] Backface Culling" : "[ ] Backface Culling"))
         {
             visibility.backfaceCulling = !visibility.backfaceCulling;
         }
-        if (DrawMenuItem(font, Rectangle{ 124.0f, 277.0f, 230.0f, 30.0f }, visibility.bones ? "[x] Bones        B" : "[ ] Bones        B"))
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 307.0f, 230.0f, 30.0f }, visibility.bones ? "[x] Bones        B" : "[ ] Bones        B"))
         {
             visibility.bones = !visibility.bones;
         }
-        if (DrawMenuItem(font, Rectangle{ 124.0f, 307.0f, 230.0f, 30.0f }, visibility.boneRotations ? "[x] Bone Orientation  O" : "[ ] Bone Orientation  O"))
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 337.0f, 230.0f, 30.0f }, visibility.boneRotations ? "[x] Bone Orientation  O" : "[ ] Bone Orientation  O"))
         {
             visibility.boneRotations = !visibility.boneRotations;
         }
-        if (DrawMenuItem(font, Rectangle{ 124.0f, 337.0f, 230.0f, 30.0f }, visibility.empties ? "[x] Empties" : "[ ] Empties"))
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 367.0f, 230.0f, 30.0f }, visibility.empties ? "[x] Empties" : "[ ] Empties"))
         {
             visibility.empties = !visibility.empties;
         }
-        if (DrawMenuItem(font, Rectangle{ 124.0f, 367.0f, 230.0f, 30.0f }, visibility.skinWeights ? "[x] Skin Weights" : "[ ] Skin Weights"))
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 397.0f, 230.0f, 30.0f }, visibility.skinWeights ? "[x] Skin Weights" : "[ ] Skin Weights"))
         {
             visibility.skinWeights = !visibility.skinWeights;
         }
-        if (DrawMenuItem(font, Rectangle{ 124.0f, 397.0f, 230.0f, 30.0f }, "Hide / Show Selected  H") && activeTab)
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 427.0f, 230.0f, 30.0f }, "Hide / Show Selected  H") && activeTab)
         {
             ToggleSelectedNodeVisibility(*activeTab);
         }
-        if (DrawMenuItem(font, Rectangle{ 124.0f, 427.0f, 230.0f, 30.0f }, "Show All        Alt+H"))
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 457.0f, 230.0f, 30.0f }, "Show All        Alt+H"))
         {
             if (activeTab) ShowAllNodes(*activeTab);
             visibility.geometry = true;
@@ -231,7 +235,7 @@ void DrawMenuBar(Font font,
     }
     else if (openMenu == OpenMenu::Preferences)
     {
-        DrawRectangle(186, 29, 420, 468, Color{ 28, 31, 35, 245 });
+        DrawRectangle(186, 29, 420, 536, Color{ 28, 31, 35, 245 });
         DrawUiText(font, "NAVIGATION", 198.0f, 39.0f, 16.0f, Color{ 165, 182, 196, 255 });
         if (DrawMenuItem(font, Rectangle{ 196.0f, 64.0f, 185.0f, 30.0f }, "Blender", navigation == NavigationPreset::Blender))
         {
@@ -297,12 +301,23 @@ void DrawMenuBar(Font font,
             gBoneOrientationLineWidth = 2.0f;
         DrawUiText(font, "View > Bone Orientation (O) toggles the axes", 198.0f, 302.0f, 14.0f, Color{ 165, 182, 196, 255 });
 
-        DrawUiText(font, "HOTKEYS", 198.0f, 334.0f, 16.0f, Color{ 165, 182, 196, 255 });
-        DrawUiText(font, "Q/W/E/R tools    Ctrl+O open FBX    Ctrl+R reload", 198.0f, 360.0f, 15.0f, Color{ 205, 213, 220, 255 });
-        DrawUiText(font, "Ctrl+Z undo    Ctrl+Y redo    T textures    C channels", 198.0f, 386.0f, 15.0f, Color{ 205, 213, 220, 255 });
-        DrawUiText(font, "Blender: MMB orbit, Alt snap, Shift+MMB pan, Wheel zoom", 198.0f, 412.0f, 15.0f, Color{ 205, 213, 220, 255 });
-        DrawUiText(font, "Maya: Alt+LMB orbit, Shift snap, Alt+MMB pan, Alt+RMB/Wheel zoom", 198.0f, 438.0f, 15.0f, Color{ 205, 213, 220, 255 });
-        DrawUiText(font, "Esc deselects    Ctrl+W closes tab    Ctrl+Q quits", 198.0f, 464.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        DrawUiText(font, "CHECKER TEXTURE", 198.0f, 330.0f, 16.0f, Color{ 165, 182, 196, 255 });
+        char checkerSizeText[80] = {};
+        std::snprintf(checkerSizeText, sizeof(checkerSizeText), "Squares / UV tile: %d", gCheckerSquares);
+        DrawUiText(font, checkerSizeText, 198.0f, 359.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        if (DrawPanelButton(font, Rectangle{ 414.0f, 352.0f, 34.0f, 26.0f }, "-"))
+            gCheckerSquares = std::max(2, gCheckerSquares / 2);
+        if (DrawPanelButton(font, Rectangle{ 454.0f, 352.0f, 34.0f, 26.0f }, "+"))
+            gCheckerSquares = std::min(128, gCheckerSquares * 2);
+        if (DrawPanelButton(font, Rectangle{ 496.0f, 352.0f, 70.0f, 26.0f }, "Reset"))
+            gCheckerSquares = 16;
+
+        DrawUiText(font, "HOTKEYS", 198.0f, 402.0f, 16.0f, Color{ 165, 182, 196, 255 });
+        DrawUiText(font, "Q/W/E/R tools    Ctrl+O open FBX    Ctrl+R reload", 198.0f, 428.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        DrawUiText(font, "Ctrl+Z undo    Ctrl+Y redo    T textures    C channels", 198.0f, 454.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        DrawUiText(font, "Blender: MMB orbit, Alt snap, Shift+MMB pan, Wheel zoom", 198.0f, 480.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        DrawUiText(font, "Maya: Alt+LMB orbit, Shift snap, Alt+MMB pan, Alt+RMB/Wheel zoom", 198.0f, 506.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        DrawUiText(font, "Esc deselects    Ctrl+W closes tab    Ctrl+Q quits", 198.0f, 532.0f, 15.0f, Color{ 205, 213, 220, 255 });
     }
     else if (openMenu == OpenMenu::Help)
     {
