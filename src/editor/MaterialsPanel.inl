@@ -7,7 +7,7 @@ bool DrawChannelButton(Font font, Rectangle bounds, PackedChannel channel)
     const char* label = GetPackedChannelName(channel);
     const Vector2 size = MeasureTextEx(font, label, 14.0f, 1.0f);
     DrawUiText(font, label, bounds.x + (bounds.width - size.x) * 0.5f, bounds.y + 4.0f, 14.0f, RAYWHITE);
-    return hovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    return hovered && openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT);
 }
 
 bool DrawNormalModeButton(Font font, Rectangle bounds, bool directX)
@@ -22,7 +22,7 @@ bool DrawNormalModeButton(Font font, Rectangle bounds, bool directX)
     const char* label = directX ? "DX" : "GL";
     const Vector2 size = MeasureTextEx(font, label, 14.0f, 1.0f);
     DrawUiText(font, label, bounds.x + (bounds.width - size.x) * 0.5f, bounds.y + 4.0f, 14.0f, RAYWHITE);
-    return hovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    return hovered && openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT);
 }
 
 void DrawTextureThumbnail(Font font, Rectangle bounds, const PbrTexture& texture, bool dropTarget)
@@ -88,7 +88,7 @@ void DrawTextureContextMenu(Font font, ModelTab& tab, TextureClipboard& clipboar
             clipboard.menuOpen = false;
             return;
         }
-        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !CheckCollisionPointRec(GetMousePosition(), menu))
+        if (openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT) && !CheckCollisionPointRec(GetMousePosition(), menu))
         {
             clipboard.menuOpen = false;
         }
@@ -423,52 +423,97 @@ void DrawValidatorPanel(Font font, ModelTab& tab, HierarchyPanelState& panel, fl
         return;
     }
 
-    constexpr float rowH = 54.0f;
-    const Rectangle listBounds{ contentX, y, panelW - 24.0f, std::max(40.0f, panelH - (y - 61.0f) - 10.0f) };
-    const float visibleRows = std::max(1.0f, std::floor(listBounds.height / rowH));
-    const float maxScroll = std::max(0.0f, static_cast<float>(issues.size()) - visibleRows);
-    if (CheckCollisionPointRec(GetMousePosition(), listBounds))
+    // Issues arrive severity-sorted, so groups and their contents retain priority.
+    struct Group
     {
-        const float wheel = GetMouseWheelMove();
-        if (std::fabs(wheel) > 0.0f)
+        std::string category;
+        std::vector<const ValidatorIssue*> issues;
+    };
+    std::vector<Group> groups;
+    for (const ValidatorIssue& issue : issues)
+    {
+        auto group = std::find_if(groups.begin(), groups.end(), [&](const Group& candidate)
         {
-            panel.validatorScroll = ClampFloat(panel.validatorScroll - wheel * 2.0f, 0.0f, maxScroll);
-        }
+            return candidate.category == issue.category;
+        });
+        if (group == groups.end()) groups.push_back(Group{ issue.category, { &issue } });
+        else group->issues.push_back(&issue);
     }
-    panel.validatorScroll = ClampFloat(panel.validatorScroll, 0.0f, maxScroll);
 
-    const int firstRow = static_cast<int>(std::floor(panel.validatorScroll));
-    float rowY = listBounds.y - (panel.validatorScroll - static_cast<float>(firstRow)) * rowH;
+    const float buttonW = (panelW - 30.0f) * 0.5f;
+    if (DrawPanelButton(font, Rectangle{ contentX, y, buttonW, 24.0f }, "Expand All"))
+    {
+        for (const Group& group : groups) tab.expandedValidationGroups[group.category] = true;
+    }
+    if (DrawPanelButton(font, Rectangle{ contentX + buttonW + 6.0f, y, buttonW, 24.0f }, "Collapse All"))
+    {
+        for (const Group& group : groups) tab.expandedValidationGroups[group.category] = false;
+        panel.validatorScroll = 0.0f;
+    }
+    y += 32.0f;
+
+    constexpr float headerH = 32.0f;
+    constexpr float rowH = 54.0f;
+    const Rectangle listBounds{ contentX, y, panelW - 24.0f, std::max(1.0f, panelH - (y - 61.0f) - 10.0f) };
+    float contentH = 0.0f;
+    for (const Group& group : groups)
+    {
+        contentH += headerH;
+        if (tab.expandedValidationGroups[group.category]) contentH += rowH * static_cast<float>(group.issues.size());
+    }
+    const float maxScroll = std::max(0.0f, contentH - listBounds.height);
     const Vector2 mouse = GetMousePosition();
+    const bool inList = CheckCollisionPointRec(mouse, listBounds);
+    if (inList) panel.validatorScroll -= openfbx::UiMouseWheelMove() * rowH * 2.0f;
+    panel.validatorScroll = ClampFloat(panel.validatorScroll, 0.0f, maxScroll);
+    float rowY = listBounds.y - panel.validatorScroll;
+    const float rowW = listBounds.width - (maxScroll > 0.0f ? 10.0f : 0.0f);
+    std::string toggledGroup;
 
     BeginScissorMode(static_cast<int>(listBounds.x), static_cast<int>(listBounds.y), static_cast<int>(listBounds.width), static_cast<int>(listBounds.height));
-    for (int index = firstRow; index < static_cast<int>(issues.size()) && rowY < listBounds.y + listBounds.height; ++index)
+    for (const Group& group : groups)
     {
-        const ValidatorIssue& issue = issues[static_cast<size_t>(index)];
-        const Rectangle row{ listBounds.x, rowY, listBounds.width - (maxScroll > 0.0f ? 10.0f : 0.0f), rowH - 4.0f };
-        const bool hovered = CheckCollisionPointRec(mouse, row);
-        const bool selectedNode = issue.node >= 0 && IsNodeSelected(tab, issue.node);
-        DrawRectangleRec(row, selectedNode ? Color{ 48, 70, 92, 255 } : hovered ? Color{ 34, 39, 45, 255 } : Color{ 24, 27, 31, 220 });
-        DrawRectangleLinesEx(row, 1.0f, Color{ 54, 62, 70, 255 });
-
-        const Color severityColor = GetValidatorSeverityColor(issue.severity);
-        DrawUiText(font, GetValidatorSeverityName(issue.severity), row.x + 8.0f, row.y + 7.0f, 13.0f, severityColor);
-        DrawUiTextClipped(font, issue.category.c_str(), row.x + 58.0f, row.y + 6.0f, 14.0f, row.width - 66.0f, Color{ 205, 213, 220, 255 });
-        DrawUiTextClipped(font, issue.message.c_str(), row.x + 8.0f, row.y + 27.0f, 13.0f, row.width - 16.0f, Color{ 154, 166, 178, 255 });
-
-        if (hovered && issue.node >= 0 && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+        const bool expanded = tab.expandedValidationGroups[group.category];
+        const Rectangle header{ listBounds.x, rowY, rowW, headerH - 3.0f };
+        const bool hoveredHeader = inList && CheckCollisionPointRec(mouse, header);
+        if (rowY + headerH > listBounds.y && rowY < listBounds.y + listBounds.height)
         {
-            SelectNode(tab, issue.node, IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT));
+            DrawRectangleRec(header, hoveredHeader ? Color{ 48, 57, 66, 255 } : Color{ 35, 42, 49, 255 });
+            const std::string label = std::string(expanded ? "v " : "> ") + group.category + " (" + std::to_string(group.issues.size()) + ")";
+            DrawUiTextClipped(font, label.c_str(), header.x + 8.0f, header.y + 7.0f, 14.0f, header.width - 16.0f,
+                              GetValidatorSeverityColor(group.issues.front()->severity));
+            if (hoveredHeader && openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT)) toggledGroup = group.category;
         }
-
-        rowY += rowH;
+        rowY += headerH;
+        if (!expanded) continue;
+        for (const ValidatorIssue* entry : group.issues)
+        {
+            const ValidatorIssue& issue = *entry;
+            if (rowY + rowH > listBounds.y && rowY < listBounds.y + listBounds.height)
+            {
+                const Rectangle row{ listBounds.x + 8.0f, rowY, rowW - 8.0f, rowH - 4.0f };
+                const bool hovered = inList && CheckCollisionPointRec(mouse, row);
+                const bool selectedNode = issue.node >= 0 && IsNodeSelected(tab, issue.node);
+                DrawRectangleRec(row, selectedNode ? Color{ 48, 70, 92, 255 } : hovered ? Color{ 34, 39, 45, 255 } : Color{ 24, 27, 31, 220 });
+                DrawRectangleLinesEx(row, 1.0f, Color{ 54, 62, 70, 255 });
+                DrawUiText(font, GetValidatorSeverityName(issue.severity), row.x + 8.0f, row.y + 7.0f, 13.0f, GetValidatorSeverityColor(issue.severity));
+                DrawUiTextClipped(font, issue.message.c_str(), row.x + 8.0f, row.y + 27.0f, 13.0f, row.width - 16.0f, Color{ 154, 166, 178, 255 });
+                if (hovered && issue.node >= 0 && openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT))
+                {
+                    SelectNode(tab, issue.node, IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT));
+                }
+            }
+            rowY += rowH;
+        }
     }
     EndScissorMode();
 
+    // Apply after drawing so expanding cannot dispatch the same click to a new row.
+    if (!toggledGroup.empty()) tab.expandedValidationGroups[toggledGroup] = !tab.expandedValidationGroups[toggledGroup];
     if (maxScroll > 0.0f)
     {
         const float trackX = listBounds.x + listBounds.width - 6.0f;
-        const float thumbH = std::max(24.0f, listBounds.height * (visibleRows / static_cast<float>(issues.size())));
+        const float thumbH = std::min(listBounds.height, std::max(24.0f, listBounds.height * (listBounds.height / contentH)));
         const float thumbY = listBounds.y + (listBounds.height - thumbH) * (panel.validatorScroll / maxScroll);
         DrawRectangle(static_cast<int>(trackX), static_cast<int>(listBounds.y), 4, static_cast<int>(listBounds.height), Color{ 44, 49, 55, 255 });
         DrawRectangle(static_cast<int>(trackX - 1.0f), static_cast<int>(thumbY), 6, static_cast<int>(thumbH), Color{ 112, 124, 136, 255 });
@@ -600,7 +645,7 @@ void DrawPbrTextureRow(Font font,
         }
     }
 
-    if (!inputBlocked && thumbnailHovered && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT))
+    if (!inputBlocked && thumbnailHovered && openfbx::UiMouseButtonPressed(MOUSE_BUTTON_RIGHT))
     {
         clipboard.menuOpen = true;
         clipboard.justOpened = true;
@@ -718,7 +763,7 @@ void DrawMaterialsPanel(Font font,
         DrawRectangleRec(row, selected ? Color{ 48, 70, 92, 255 } : hovered ? Color{ 34, 39, 45, 255 } : Color{ 24, 27, 31, 220 });
         const std::string name = i < static_cast<int>(tab.loaded.materialNames.size()) ? tab.loaded.materialNames[static_cast<size_t>(i)] : std::string("Material ") + std::to_string(i + 1);
         DrawUiTextClipped(font, name.c_str(), row.x + 8.0f, row.y + 3.0f, 14.0f, row.width - 16.0f, selected ? RAYWHITE : Color{ 185, 195, 205, 255 });
-        if (!inputBlocked && hovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+        if (!inputBlocked && hovered && openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT))
         {
             tab.selectedMaterial = i;
         }

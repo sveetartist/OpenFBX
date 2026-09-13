@@ -18,7 +18,8 @@ void DrawMenuBar(Font font,
                  NavigationPreset& navigation,
                  VisibilityState& visibility,
                  bool canUndo,
-                 bool canRedo)
+                 bool canRedo,
+                 ModelTab* activeTab)
 {
     const float menuHeight = 28.0f;
     DrawRectangle(0, 0, GetScreenWidth(), static_cast<int>(menuHeight), Color{ 24, 26, 29, 255 });
@@ -46,7 +47,7 @@ void DrawMenuBar(Font font,
         const bool hovered = CheckCollisionPointRec(mouse, button.bounds);
         DrawRectangleRec(button.bounds, active ? Color{ 52, 60, 68, 255 } : hovered ? Color{ 42, 46, 51, 255 } : Color{ 24, 26, 29, 255 });
         DrawUiText(font, button.label, button.bounds.x + 8.0f, button.bounds.y + 3.0f, 16.0f, RAYWHITE);
-        if (hovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+        if (hovered && openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT))
         {
             openMenu = active ? OpenMenu::None : button.menu;
         }
@@ -62,7 +63,7 @@ void DrawMenuBar(Font font,
         openMenuBounds = Rectangle{ 66.0f, 29.0f, 230.0f, 68.0f };
         break;
     case OpenMenu::View:
-        openMenuBounds = Rectangle{ 124.0f, 29.0f, 230.0f, 368.0f };
+        openMenuBounds = Rectangle{ 124.0f, 29.0f, 230.0f, 428.0f };
         break;
     case OpenMenu::Preferences:
         openMenuBounds = Rectangle{ 186.0f, 29.0f, 420.0f, 468.0f };
@@ -74,7 +75,7 @@ void DrawMenuBar(Font font,
         break;
     }
 
-    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
+    if (openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT) &&
         openMenu != OpenMenu::None &&
         mouse.y > menuHeight &&
         !CheckCollisionPointRec(mouse, openMenuBounds))
@@ -167,7 +168,7 @@ void DrawMenuBar(Font font,
     }
     else if (openMenu == OpenMenu::View)
     {
-        DrawRectangle(124, 29, 230, 368, Color{ 28, 31, 35, 245 });
+        DrawRectangle(124, 29, 230, 428, Color{ 28, 31, 35, 245 });
         if (DrawMenuItem(font, Rectangle{ 124.0f, 29.0f, 230.0f, 30.0f }, "Shaded", viewMode == ViewMode::Shaded))
         {
             viewMode = ViewMode::Shaded;
@@ -215,6 +216,17 @@ void DrawMenuBar(Font font,
         if (DrawMenuItem(font, Rectangle{ 124.0f, 367.0f, 230.0f, 30.0f }, visibility.skinWeights ? "[x] Skin Weights" : "[ ] Skin Weights"))
         {
             visibility.skinWeights = !visibility.skinWeights;
+        }
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 397.0f, 230.0f, 30.0f }, "Hide / Show Selected  H") && activeTab)
+        {
+            ToggleSelectedNodeVisibility(*activeTab);
+        }
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 427.0f, 230.0f, 30.0f }, "Show All        Alt+H"))
+        {
+            if (activeTab) ShowAllNodes(*activeTab);
+            visibility.geometry = true;
+            visibility.bones = true;
+            visibility.empties = true;
         }
     }
     else if (openMenu == OpenMenu::Preferences)
@@ -428,12 +440,12 @@ void DrawTabs(Font font, std::vector<std::unique_ptr<ModelTab>>& tabs, int& acti
         DrawUiText(font, title.c_str(), tab.x + 10.0f, tab.y + 5.0f, 15.0f, active ? RAYWHITE : Color{ 190, 198, 206, 255 });
         DrawUiText(font, "x", close.x + 4.0f, close.y - 1.0f, 16.0f, CheckCollisionPointRec(mouse, close) ? Color{ 255, 150, 130, 255 } : Color{ 170, 178, 186, 255 });
 
-        if (hovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !CheckCollisionPointRec(mouse, close))
+        if (hovered && openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT) && !CheckCollisionPointRec(mouse, close))
         {
             activeTab = i;
         }
-        if ((hovered && IsMouseButtonPressed(MOUSE_BUTTON_MIDDLE)) ||
-            (CheckCollisionPointRec(mouse, close) && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)))
+        if ((hovered && openfbx::UiMouseButtonPressed(MOUSE_BUTTON_MIDDLE)) ||
+            (CheckCollisionPointRec(mouse, close) && openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT)))
         {
             closeIndex = i;
         }
@@ -514,7 +526,7 @@ void DrawTimeline(Font font, ModelTab& tab, RenameEditor& renameEditor, bool& co
         DrawRectangleRec(noAnimationRow, Color{ 36, 42, 48, 255 });
     }
     DrawUiText(font, "Bind pose", noAnimationRow.x + 8.0f, noAnimationRow.y + 3.0f, 15.0f, noAnimationSelected ? RAYWHITE : Color{ 185, 194, 202, 255 });
-    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, noAnimationRow))
+    if (openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, noAnimationRow))
     {
         animation.clipIndex = -1;
         animation.time = 0.0f;
@@ -529,7 +541,7 @@ void DrawTimeline(Font font, ModelTab& tab, RenameEditor& renameEditor, bool& co
     animation.clipScroll = ClampInt(animation.clipScroll, 0, maxClipScroll);
     if (!loaded.animations.empty() && CheckCollisionPointRec(mouse, clipListBounds))
     {
-        const float wheel = GetMouseWheelMove();
+        const float wheel = openfbx::UiMouseWheelMove();
         if (std::fabs(wheel) > 0.0f)
         {
             animation.clipScroll = ClampInt(animation.clipScroll - static_cast<int>(wheel), 0, maxClipScroll);
@@ -560,7 +572,7 @@ void DrawTimeline(Font font, ModelTab& tab, RenameEditor& renameEditor, bool& co
             DrawRectangleRec(row, Color{ 36, 42, 48, 255 });
         }
 
-        if (!mouseOverContextMenu && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, row))
+        if (!mouseOverContextMenu && openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, row))
         {
             animation.clipIndex = i;
             animation.time = 0.0f;
@@ -568,7 +580,7 @@ void DrawTimeline(Font font, ModelTab& tab, RenameEditor& renameEditor, bool& co
             animation.scrubbing = false;
             animation.contextMenuOpen = false;
         }
-        if (!mouseOverContextMenu && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) && CheckCollisionPointRec(mouse, row))
+        if (!mouseOverContextMenu && openfbx::UiMouseButtonPressed(MOUSE_BUTTON_RIGHT) && CheckCollisionPointRec(mouse, row))
         {
             animation.contextClipIndex = i;
             animation.contextPosition = Vector2{
@@ -634,7 +646,7 @@ void DrawTimeline(Font font, ModelTab& tab, RenameEditor& renameEditor, bool& co
                 animation.contextClipIndex = -1;
                 animation.clipScroll = ClampInt(animation.clipScroll, 0, std::max(0, static_cast<int>(loaded.animations.size()) - visibleRows));
             }
-            else if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !CheckCollisionPointRec(mouse, menu))
+            else if (openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT) && !CheckCollisionPointRec(mouse, menu))
             {
                 animation.contextMenuOpen = false;
             }
@@ -658,11 +670,11 @@ void DrawTimeline(Font font, ModelTab& tab, RenameEditor& renameEditor, bool& co
 
     if (clip && clip->duration > 0.0f)
     {
-        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, scrubHitbox))
+        if (openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, scrubHitbox))
         {
             animation.scrubbing = true;
         }
-        if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT))
+        if (!openfbx::UiMouseButtonDown(MOUSE_BUTTON_LEFT))
         {
             animation.scrubbing = false;
         }

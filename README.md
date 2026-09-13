@@ -72,3 +72,10 @@ fixtures also verify that bone display helpers are excluded and skinning survive
 - `src/` contains application source files.
 - `assets/` contains the icon and source artwork used by the app.
 - `build/` and `build-*` are generated CMake output directories and are ignored.
+
+## Object visibility
+
+Press **H** to toggle visibility of selected objects or bones. Hidden entries stay
+selectable in the hierarchy and use darker text. **View > Show All** (**Alt+H**) restores all
+hidden items, exits isolation, and enables geometry, bones, and empties. Visibility
+is local to each open tab and resets on reload.

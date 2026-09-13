@@ -251,7 +251,7 @@ void UpdateHierarchyPanelInteraction(HierarchyPanelState& panel, const ModelTab*
     if (panel.hidden)
     {
         const Rectangle restoreRect{ panelX, panelY, collapsedW, panelH };
-        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, restoreRect))
+        if (openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, restoreRect))
         {
             panel.hidden = false;
         }
@@ -263,11 +263,11 @@ void UpdateHierarchyPanelInteraction(HierarchyPanelState& panel, const ModelTab*
     const Rectangle titleRect{ panelX, panelY, panel.width, 30.0f };
     const Rectangle resizeRect{ panel.width - 5.0f, panelY, 10.0f, panelH };
 
-    if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, resizeRect))
+    if (openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, resizeRect))
     {
         panel.resizing = true;
     }
-    if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT))
+    if (openfbx::UiMouseButtonReleased(MOUSE_BUTTON_LEFT))
     {
         panel.resizing = false;
     }
@@ -275,7 +275,7 @@ void UpdateHierarchyPanelInteraction(HierarchyPanelState& panel, const ModelTab*
     {
         panel.width = ClampFloat(mouse.x, 220.0f, std::min(620.0f, static_cast<float>(GetScreenWidth()) - 160.0f));
     }
-    else if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, titleRect))
+    else if (openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, titleRect))
     {
         panel.hidden = true;
         return;
@@ -284,7 +284,7 @@ void UpdateHierarchyPanelInteraction(HierarchyPanelState& panel, const ModelTab*
     const Rectangle panelRect{ panelX, panelY, panel.width, panelH };
     if (active && panel.activeTab == LeftPanelTab::Hierarchy && CheckCollisionPointRec(mouse, panelRect))
     {
-        const float wheel = GetMouseWheelMove();
+        const float wheel = openfbx::UiMouseWheelMove();
         if (std::fabs(wheel) > 0.0f)
         {
             const float visibleRows = std::max(0.0f, std::floor((panelH - 64.0f) / rowH));

@@ -222,7 +222,7 @@ bool UpdateTransformGizmoInput(ModelTab* active,
     if (state.dragging)
     {
         const bool draggingPivotMode = state.pivotMode;
-        if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT))
+        if (!openfbx::UiMouseButtonDown(MOUSE_BUTTON_LEFT))
         {
             state = TransformGizmoState{};
             return true;
@@ -338,7 +338,7 @@ bool UpdateTransformGizmoInput(ModelTab* active,
         return true;
     }
 
-    if (!mouseInViewport || !IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) return false;
+    if (!mouseInViewport || !openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT)) return false;
     const TransformAxis axis = PickTransformGizmoAxis(*active, activeTool, orientation, mouse);
     if (axis == TransformAxis::None) return false;
 
@@ -501,7 +501,7 @@ bool UpdateTransformToolbarInput(TransformTool& tool, GizmoOrientation& orientat
     {
         if (CheckCollisionPointRec(mouse, GetTransformToolbarButtonRect(hierarchyBlockW, i)))
         {
-            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+            if (openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT))
             {
                 tool = tools[i];
                 if (tool != TransformTool::Move && tool != TransformTool::Rotate)
@@ -515,7 +515,7 @@ bool UpdateTransformToolbarInput(TransformTool& tool, GizmoOrientation& orientat
 
     if (CheckCollisionPointRec(mouse, GetPivotModeButtonRect(hierarchyBlockW)))
     {
-        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+        if (openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT))
         {
             editPivotMode = !editPivotMode;
             if (editPivotMode && tool != TransformTool::Move && tool != TransformTool::Rotate)
@@ -533,7 +533,7 @@ bool UpdateTransformToolbarInput(TransformTool& tool, GizmoOrientation& orientat
             for (int column = 0; column < 2; ++column)
             {
                 if (!CheckCollisionPointRec(mouse, GetWeightBrushSmallButtonRect(hierarchyBlockW, row, column))) continue;
-                if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+                if (openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT))
                 {
                     if (row == 0)
                     {
@@ -550,7 +550,7 @@ bool UpdateTransformToolbarInput(TransformTool& tool, GizmoOrientation& orientat
 
         if (CheckCollisionPointRec(mouse, GetWeightBrushAutoNormalizeRect(hierarchyBlockW)))
         {
-            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+            if (openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT))
             {
                 brush.autoNormalize = !brush.autoNormalize;
             }
@@ -563,7 +563,7 @@ bool UpdateTransformToolbarInput(TransformTool& tool, GizmoOrientation& orientat
     {
         if (CheckCollisionPointRec(mouse, GetGizmoOrientationButtonRect(hierarchyBlockW, i)))
         {
-            if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+            if (openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT))
             {
                 orientation = orientations[i];
             }

@@ -472,7 +472,7 @@ bool UpdateSelectedInfoPanelInput(ModelTab* active, TransformValueEditor& editor
         {
             CancelTransformValueEdit(editor);
         }
-        else if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !mouseOverPanel)
+        else if (openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT) && !mouseOverPanel)
         {
             CommitTransformValueEdit(*active, editor, editPivotMode, notice, error);
         }
@@ -481,7 +481,7 @@ bool UpdateSelectedInfoPanelInput(ModelTab* active, TransformValueEditor& editor
     const std::vector<int> selectedMeshNodes = GetSelectedMeshNodeIndices(*active);
     if (selectedMeshNodes.size() > 1) return mouseOverPanel;
 
-    if (mouseOverPanel && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+    if (mouseOverPanel && openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT))
     {
         const struct Row
         {

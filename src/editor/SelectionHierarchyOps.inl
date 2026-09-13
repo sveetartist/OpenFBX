@@ -969,6 +969,27 @@ int ResetContextBoneSubtreesToOriginalBindPose(ModelTab& tab, const std::vector<
     return changedCount;
 }
 
+void ToggleSelectedNodeVisibility(ModelTab& tab)
+{
+    tab.hiddenNodes.resize(tab.loaded.nodes.size(), false);
+    std::vector<int> nodes = tab.selectedNodes;
+    if (nodes.empty() && IsValidSelectableNode(tab, tab.selectedNode)) nodes.push_back(tab.selectedNode);
+    for (int nodeIndex : nodes)
+    {
+        if (!IsValidSelectableNode(tab, nodeIndex)) continue;
+        const size_t index = static_cast<size_t>(nodeIndex);
+        tab.hiddenNodes[index] = !tab.hiddenNodes[index];
+    }
+    RefreshDisplayedMesh(tab);
+}
+
+void ShowAllNodes(ModelTab& tab)
+{
+    tab.hiddenNodes.clear();
+    tab.isolatedNode = -1;
+    RefreshDisplayedMesh(tab);
+}
+
 bool ToggleSelectedNodeIsolation(ModelTab& tab, std::string& notice, std::string& error)
 {
     if (tab.isolatedNode >= 0 && tab.isolatedNode == tab.selectedNode)
@@ -1201,7 +1222,7 @@ void DrawRenameEditor(Font font, ModelTab* active, RenameEditor& editor, std::st
     }
 
     const bool submit = IsKeyPressed(KEY_ENTER) || IsKeyPressed(KEY_KP_ENTER);
-    const bool cancelClick = IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    const bool cancelClick = openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT);
     const float dialogW = 360.0f;
     const float dialogH = 128.0f;
     const Rectangle dialog{ (static_cast<float>(GetScreenWidth()) - dialogW) * 0.5f,

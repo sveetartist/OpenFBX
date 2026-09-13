@@ -18,6 +18,7 @@ int RunOpenFbxApp(int argc, char** argv)
     MaterialPreviewMode materialPreviewMode = MaterialPreviewMode::Shaded;
     NavigationPreset navigation = NavigationPreset::Blender;
     OpenMenu openMenu = OpenMenu::None;
+    bool menuPointerCaptured = false;
     HierarchyPanelState hierarchyPanel;
     VisibilityState visibility;
     std::string error;
@@ -54,6 +55,7 @@ int RunOpenFbxApp(int argc, char** argv)
         tab.visibleBones = tab.loaded.bones;
         tab.visibleBonePoses = tab.loaded.bonePoses;
         tab.collapsedNodes.assign(tab.loaded.nodes.size(), false);
+        tab.hiddenNodes.clear();
         tab.deletedNodes.assign(tab.loaded.nodes.size(), false);
         tab.selectedNode = -1;
         for (int nodeIndex = 0; nodeIndex < static_cast<int>(tab.loaded.nodes.size()); ++nodeIndex)
@@ -242,6 +244,22 @@ int RunOpenFbxApp(int argc, char** argv)
 
     while (!WindowShouldClose() && !quitRequested)
     {
+        // Use raw input here: capture remains active through the release frame,
+        // even when a menu action or an outside click closes the popup.
+        bool pointerGestureActive = false;
+        for (int button = MOUSE_BUTTON_LEFT; button <= MOUSE_BUTTON_MIDDLE; ++button)
+        {
+            pointerGestureActive = pointerGestureActive || IsMouseButtonDown(button) || IsMouseButtonReleased(button);
+        }
+        if (!pointerGestureActive) menuPointerCaptured = false;
+        if (openMenu != OpenMenu::None ||
+            (GetMousePosition().y < 28.0f && IsMouseButtonPressed(MOUSE_BUTTON_LEFT)))
+        {
+            menuPointerCaptured = true;
+        }
+        const bool menuBlocksPointer = openMenu != OpenMenu::None || menuPointerCaptured;
+        openfbx::SetUiPointerBlocked(menuBlocksPointer);
+
         const bool controlDown = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
         const bool shiftDown = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
         const bool altDown = IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT);
@@ -307,7 +325,7 @@ int RunOpenFbxApp(int argc, char** argv)
         const bool mouseInViewport = mouse.x > hierarchyBlockW &&
                                      mouse.y >= 61.0f &&
                                      mouse.y < static_cast<float>(GetScreenHeight()) - gBottomPanelReservedHeight &&
-                                     openMenu == OpenMenu::None &&
+                                     !menuBlocksPointer &&
                                      !modalOpen &&
                                      !hierarchyPanel.resizing &&
                                      !mouseOverHierarchyContextMenu;
@@ -353,8 +371,8 @@ int RunOpenFbxApp(int argc, char** argv)
             mouseInViewport &&
             !transformInfoConsumedMouse &&
             transformTool == TransformTool::WeightsBrush &&
-            IsMouseButtonDown(MOUSE_BUTTON_LEFT) &&
-            !IsMouseButtonDown(MOUSE_BUTTON_RIGHT))
+            openfbx::UiMouseButtonDown(MOUSE_BUTTON_LEFT) &&
+            !openfbx::UiMouseButtonDown(MOUSE_BUTTON_RIGHT))
         {
             if (!weightBrushState.painting)
             {
@@ -375,7 +393,7 @@ int RunOpenFbxApp(int argc, char** argv)
             }
             weightBrushConsumedMouse = true;
         }
-        if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT))
+        if (!openfbx::UiMouseButtonDown(MOUSE_BUTTON_LEFT))
         {
             weightBrushState.painting = false;
         }
@@ -404,6 +422,19 @@ int RunOpenFbxApp(int argc, char** argv)
             }
         }
 
+        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && active &&
+            !controlDown && !shiftDown && !altDown && !transformGizmo.dragging && IsKeyPressed(KEY_H))
+        {
+            ToggleSelectedNodeVisibility(*active);
+        }
+        if (!modalOpen && !renameEditor.active && !transformValueEditor.active &&
+            !controlDown && !shiftDown && altDown && !transformGizmo.dragging && IsKeyPressed(KEY_H))
+        {
+            if (active) ShowAllNodes(*active);
+            visibility.geometry = true;
+            visibility.bones = true;
+            visibility.empties = true;
+        }
         if (!modalOpen && !renameEditor.active && !transformValueEditor.active && IsKeyPressed(KEY_V))
         {
             viewMode = NextViewMode(viewMode);
@@ -440,13 +471,13 @@ int RunOpenFbxApp(int argc, char** argv)
             !renameEditor.active && !transformValueEditor.active &&
             !toolbarConsumedMouse && !transformInfoConsumedMouse && !transformConsumedMouse &&
             !weightBrushConsumedMouse && !pivotEditLocksSelection &&
-            !IsMouseButtonDown(MOUSE_BUTTON_RIGHT) && !IsMouseButtonDown(MOUSE_BUTTON_MIDDLE);
+            !openfbx::UiMouseButtonDown(MOUSE_BUTTON_RIGHT) && !openfbx::UiMouseButtonDown(MOUSE_BUTTON_MIDDLE);
         if (marquee.tab && (marquee.tab != active || transformTool != TransformTool::Select ||
             editPivotMode || modalOpen || openMenu != OpenMenu::None || renameEditor.active ||
             transformValueEditor.active || altDown || !IsWindowFocused() ||
-            IsMouseButtonDown(MOUSE_BUTTON_RIGHT) || IsMouseButtonDown(MOUSE_BUTTON_MIDDLE)))
+            openfbx::UiMouseButtonDown(MOUSE_BUTTON_RIGHT) || openfbx::UiMouseButtonDown(MOUSE_BUTTON_MIDDLE)))
             marquee = MarqueeSelectionState{};
-        if (canSelectInViewport && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+        if (canSelectInViewport && openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT))
         {
             if (transformTool == TransformTool::Select)
                 marquee = MarqueeSelectionState{ active, mouse, mouse, false, shiftDown, controlDown };
@@ -462,7 +493,7 @@ int RunOpenFbxApp(int argc, char** argv)
                 ClampFloat(mouse.y, 61.0f, static_cast<float>(GetScreenHeight()) - gBottomPanelReservedHeight)
             };
             marquee.dragging = marquee.dragging || Vector2Distance(marquee.start, marquee.end) >= 4.0f;
-            if (IsMouseButtonReleased(MOUSE_BUTTON_LEFT))
+            if (openfbx::UiMouseButtonReleased(MOUSE_BUTTON_LEFT))
             {
                 if (marquee.dragging)
                     SelectNodesInMarquee(*active, GetMarqueeRectangle(marquee.start, marquee.end), visibility,
@@ -473,7 +504,7 @@ int RunOpenFbxApp(int argc, char** argv)
                 if (active->selectedNode >= 0) RevealNodeInHierarchy(*active, hierarchyPanel, active->selectedNode);
                 marquee = MarqueeSelectionState{};
             }
-            else if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT)) marquee = MarqueeSelectionState{};
+            else if (!openfbx::UiMouseButtonDown(MOUSE_BUTTON_LEFT)) marquee = MarqueeSelectionState{};
         }
         if (active &&
             mouseInViewport &&
@@ -483,7 +514,7 @@ int RunOpenFbxApp(int argc, char** argv)
             !transformConsumedMouse &&
             !weightBrushConsumedMouse &&
             !pivotEditLocksSelection &&
-            IsMouseButtonPressed(MOUSE_BUTTON_RIGHT))
+            openfbx::UiMouseButtonPressed(MOUSE_BUTTON_RIGHT))
         {
             std::vector<int> selectedContextNodes = GetValidContextActionNodes(*active, active->selectedNodes);
             if (selectedContextNodes.size() > 1)
@@ -750,6 +781,7 @@ int RunOpenFbxApp(int argc, char** argv)
         bool exportJsonRequested = false;
         bool compareFbxRequested = false;
         bool aboutRequested = false;
+        openfbx::SetUiPointerBlocked(false);
         if (!aboutVisible)
         {
             DrawMenuBar(uiFont,
@@ -772,8 +804,10 @@ int RunOpenFbxApp(int argc, char** argv)
                         navigation,
                         visibility,
                         active && !active->undoStack.empty(),
-                        active && !active->redoStack.empty());
+                        active && !active->redoStack.empty(),
+                        active);
         }
+        openfbx::SetUiPointerBlocked(menuBlocksPointer);
         undoRequested = undoRequested || menuUndoRequested;
         redoRequested = redoRequested || menuRedoRequested;
         reloadFbxRequested = reloadFbxRequested || menuReloadTabRequested;
@@ -783,6 +817,7 @@ int RunOpenFbxApp(int argc, char** argv)
         DrawRenameEditor(uiFont, active, renameEditor, notice, error);
         DrawAboutWindow(uiFont, aboutVisible);
         EndDrawing();
+        openfbx::SetUiPointerBlocked(false);
 
         if (undoRequested && active)
         {

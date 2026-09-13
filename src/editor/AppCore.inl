@@ -409,6 +409,8 @@ struct ModelTab
     bool manualSkinnedMeshPose = false;
     int selectedNode = -1;
     std::vector<int> selectedNodes;
+    std::unordered_map<std::string, bool> expandedValidationGroups;
+    std::vector<bool> hiddenNodes;
     int isolatedNode = -1;
     std::string path;
     std::string title;

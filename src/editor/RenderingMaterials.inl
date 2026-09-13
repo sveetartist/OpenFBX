@@ -277,7 +277,7 @@ bool IsViewportNodeVisible(const ModelTab& tab, int nodeIndex);
 const std::vector<BoneSegment>& GetVisibleBones(const ModelTab& tab)
 {
     const std::vector<BoneSegment>& source = tab.visibleBones.empty() ? tab.loaded.bones : tab.visibleBones;
-    if (tab.deletedNodes.empty() && tab.isolatedNode < 0) return source;
+    if (tab.deletedNodes.empty() && tab.hiddenNodes.empty() && tab.isolatedNode < 0) return source;
 
     static std::vector<BoneSegment> filteredBones;
     filteredBones.clear();
@@ -292,7 +292,7 @@ const std::vector<BoneSegment>& GetVisibleBones(const ModelTab& tab)
 const std::vector<BonePose>& GetVisibleBonePoses(const ModelTab& tab)
 {
     const std::vector<BonePose>& source = tab.visibleBonePoses.empty() ? tab.loaded.bonePoses : tab.visibleBonePoses;
-    if (tab.deletedNodes.empty() && tab.isolatedNode < 0) return source;
+    if (tab.deletedNodes.empty() && tab.hiddenNodes.empty() && tab.isolatedNode < 0) return source;
 
     static std::vector<BonePose> filteredPoses;
     filteredPoses.clear();
@@ -360,14 +360,16 @@ bool IsNodeVisibleInIsolation(const ModelTab& tab, int nodeIndex)
 
 bool IsViewportNodeVisible(const ModelTab& tab, int nodeIndex)
 {
-    return !IsDeletedNode(tab, nodeIndex) && IsNodeVisibleInIsolation(tab, nodeIndex);
+    return !(nodeIndex >= 0 && nodeIndex < static_cast<int>(tab.hiddenNodes.size()) &&
+             tab.hiddenNodes[static_cast<size_t>(nodeIndex)]) &&
+           !IsDeletedNode(tab, nodeIndex) && IsNodeVisibleInIsolation(tab, nodeIndex);
 }
 
 std::vector<int> BuildHiddenMeshNodes(const ModelTab& tab, size_t vertexCount)
 {
     // Resolve ownership once, preserving the first matching mesh for overlapping ranges.
     std::vector<int> hiddenMeshNodes;
-    if (!tab.deletedNodes.empty() || tab.isolatedNode >= 0)
+    if (!tab.deletedNodes.empty() || !tab.hiddenNodes.empty() || tab.isolatedNode >= 0)
     {
         hiddenMeshNodes.assign(vertexCount, -2);
         for (int nodeIndex = 0; nodeIndex < static_cast<int>(tab.loaded.nodes.size()); ++nodeIndex)

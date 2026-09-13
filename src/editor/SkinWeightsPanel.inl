@@ -324,10 +324,10 @@ void DrawHierarchyPanel(Font font,
 
     const Vector2 mouse = GetMousePosition();
     const bool additiveSelection = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
-    const bool leftPressed = !inputBlocked && IsMouseButtonPressed(MOUSE_BUTTON_LEFT);
-    const bool leftDown = !inputBlocked && IsMouseButtonDown(MOUSE_BUTTON_LEFT);
-    const bool leftReleased = !inputBlocked && IsMouseButtonReleased(MOUSE_BUTTON_LEFT);
-    if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT) || !additiveSelection)
+    const bool leftPressed = !inputBlocked && openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT);
+    const bool leftDown = !inputBlocked && openfbx::UiMouseButtonDown(MOUSE_BUTTON_LEFT);
+    const bool leftReleased = !inputBlocked && openfbx::UiMouseButtonReleased(MOUSE_BUTTON_LEFT);
+    if (!openfbx::UiMouseButtonDown(MOUSE_BUTTON_LEFT) || !additiveSelection)
     {
         panel.shiftDragSelecting = false;
         panel.shiftDragAnchorNode = -1;
@@ -417,13 +417,13 @@ void DrawHierarchyPanel(Font font,
         const float labelX = panelX + 28.0f + indent;
         const float labelMaxW = panelX + panelW - 12.0f - labelX;
         BeginScissorMode(static_cast<int>(panelX), static_cast<int>(panelY), static_cast<int>(panelW), static_cast<int>(panelH));
-        DrawUiTextClipped(font, label, labelX, rowY + 3.0f, 15.0f, labelMaxW, selected ? RAYWHITE : Color{ 198, 207, 216, 255 });
+        DrawUiTextClipped(font, label, labelX, rowY + 3.0f, 15.0f, labelMaxW, !IsViewportNodeVisible(*active, i) ? Color{ 100, 108, 116, 255 } : selected ? RAYWHITE : Color{ 198, 207, 216, 255 });
         EndScissorMode();
 
         if (hovered &&
             leftPressed &&
-            !IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) &&
-            !IsMouseButtonDown(MOUSE_BUTTON_RIGHT) &&
+            !openfbx::UiMouseButtonPressed(MOUSE_BUTTON_RIGHT) &&
+            !openfbx::UiMouseButtonDown(MOUSE_BUTTON_RIGHT) &&
             !mouseOverContextMenu &&
             !CheckCollisionPointRec(mouse, collapseRect))
         {
@@ -472,7 +472,7 @@ void DrawHierarchyPanel(Font font,
             panel.contextMenuOpen = false;
         }
 
-        if (hovered && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) && !mouseOverContextMenu)
+        if (hovered && openfbx::UiMouseButtonPressed(MOUSE_BUTTON_RIGHT) && !mouseOverContextMenu)
         {
             std::vector<int> selectedContextNodes = GetValidContextActionNodes(*active, active->selectedNodes);
             if (selectedContextNodes.size() > 1)
@@ -787,7 +787,7 @@ void DrawHierarchyPanel(Font font,
                     panel.contextMenuOpen = false;
                 }
             }
-            if (!inputBlocked && IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !CheckCollisionPointRec(mouse, menu))
+            if (!inputBlocked && openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT) && !CheckCollisionPointRec(mouse, menu))
             {
                 panel.contextMenuOpen = false;
             }

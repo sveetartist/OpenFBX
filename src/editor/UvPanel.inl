@@ -812,7 +812,7 @@ void DrawUvPanel(Font font, ModelTab& tab, RenameEditor& renameEditor, float pan
     const Vector2 mouse = GetMousePosition();
     if (CheckCollisionPointRec(mouse, listBounds))
     {
-        const float wheel = GetMouseWheelMove();
+        const float wheel = openfbx::UiMouseWheelMove();
         if (std::fabs(wheel) > 0.0f)
         {
             tab.uvSetScroll = ClampInt(tab.uvSetScroll - static_cast<int>(wheel), 0, maxUvSetScroll);
@@ -835,11 +835,11 @@ void DrawUvPanel(Font font, ModelTab& tab, RenameEditor& renameEditor, float pan
         const bool selected = uvSetIndex == tab.selectedUvSet;
         const bool hovered = CheckCollisionPointRec(mouse, row);
         DrawRectangleRec(row, selected ? Color{ 50, 70, 88, 255 } : hovered ? Color{ 36, 42, 48, 255 } : Color{ 14, 16, 19, 245 });
-        if (!renameEditor.active && hovered && IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+        if (!renameEditor.active && hovered && openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT))
         {
             tab.selectedUvSet = uvSetIndex;
         }
-        if (!renameEditor.active && hovered && IsMouseButtonPressed(MOUSE_BUTTON_RIGHT))
+        if (!renameEditor.active && hovered && openfbx::UiMouseButtonPressed(MOUSE_BUTTON_RIGHT))
         {
             tab.selectedUvSet = uvSetIndex;
             tab.uvContextSet = uvSetIndex;
@@ -880,7 +880,7 @@ void DrawUvPanel(Font font, ModelTab& tab, RenameEditor& renameEditor, float pan
         }
         if (uvSetCount > 1 && DrawPanelButton(font, Rectangle{ contentX + 4, y + 31, menu.width - 8, 24 }, "Combine All UV Sets"))
             CombineAllUvSets(tab, tab.uvContextSet);
-        if (IsKeyPressed(KEY_ESCAPE) || (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !CheckCollisionPointRec(mouse, menu)))
+        if (IsKeyPressed(KEY_ESCAPE) || (openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT) && !CheckCollisionPointRec(mouse, menu)))
             tab.uvContextSet = -1;
         return;
     }
@@ -1051,7 +1051,7 @@ void DrawUvPanel(Font font, ModelTab& tab, RenameEditor& renameEditor, float pan
     const bool shiftDown = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
     if (mouseOverEditor)
     {
-        const float wheel = GetMouseWheelMove();
+        const float wheel = openfbx::UiMouseWheelMove();
         if (std::fabs(wheel) > 0.0f)
         {
             const Vector2 uvUnderMouse = screenToUv(mouse);
@@ -1061,11 +1061,11 @@ void DrawUvPanel(Font font, ModelTab& tab, RenameEditor& renameEditor, float pan
             tab.uvViewPan.y = mouse.y - editorCenter.y + (uvUnderMouse.y - 0.5f) * scale;
         }
 
-        if (IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) || IsMouseButtonPressed(MOUSE_BUTTON_MIDDLE))
+        if (openfbx::UiMouseButtonPressed(MOUSE_BUTTON_RIGHT) || openfbx::UiMouseButtonPressed(MOUSE_BUTTON_MIDDLE))
         {
             tab.uvViewPanning = true;
         }
-        if (IsMouseButtonPressed(MOUSE_BUTTON_LEFT))
+        if (openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT))
         {
             tab.uvIslandMarqueeSelecting = true;
             tab.uvIslandMarqueeAdditive = shiftDown;
@@ -1073,11 +1073,11 @@ void DrawUvPanel(Font font, ModelTab& tab, RenameEditor& renameEditor, float pan
             tab.uvIslandMarqueeCurrent = mouse;
         }
     }
-    if (tab.uvIslandMarqueeSelecting && IsMouseButtonDown(MOUSE_BUTTON_LEFT))
+    if (tab.uvIslandMarqueeSelecting && openfbx::UiMouseButtonDown(MOUSE_BUTTON_LEFT))
     {
         tab.uvIslandMarqueeCurrent = mouse;
     }
-    if (tab.uvIslandMarqueeSelecting && IsMouseButtonReleased(MOUSE_BUTTON_LEFT))
+    if (tab.uvIslandMarqueeSelecting && openfbx::UiMouseButtonReleased(MOUSE_BUTTON_LEFT))
     {
         tab.uvIslandMarqueeCurrent = mouse;
         constexpr float kUvMarqueeThreshold = 5.0f;
@@ -1139,20 +1139,20 @@ void DrawUvPanel(Font font, ModelTab& tab, RenameEditor& renameEditor, float pan
         }
         tab.uvIslandMarqueeSelecting = false;
     }
-    if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT) && !IsMouseButtonReleased(MOUSE_BUTTON_LEFT))
+    if (!openfbx::UiMouseButtonDown(MOUSE_BUTTON_LEFT) && !openfbx::UiMouseButtonReleased(MOUSE_BUTTON_LEFT))
     {
         tab.uvIslandMarqueeSelecting = false;
     }
-    if (IsMouseButtonReleased(MOUSE_BUTTON_RIGHT) || IsMouseButtonReleased(MOUSE_BUTTON_MIDDLE))
+    if (openfbx::UiMouseButtonReleased(MOUSE_BUTTON_RIGHT) || openfbx::UiMouseButtonReleased(MOUSE_BUTTON_MIDDLE))
     {
         tab.uvViewPanning = false;
     }
-    if (tab.uvViewPanning && (IsMouseButtonDown(MOUSE_BUTTON_RIGHT) || IsMouseButtonDown(MOUSE_BUTTON_MIDDLE)))
+    if (tab.uvViewPanning && (openfbx::UiMouseButtonDown(MOUSE_BUTTON_RIGHT) || openfbx::UiMouseButtonDown(MOUSE_BUTTON_MIDDLE)))
     {
         const Vector2 delta = GetMouseDelta();
         tab.uvViewPan = Vector2Add(tab.uvViewPan, delta);
     }
-    else if (!IsMouseButtonDown(MOUSE_BUTTON_RIGHT) && !IsMouseButtonDown(MOUSE_BUTTON_MIDDLE))
+    else if (!openfbx::UiMouseButtonDown(MOUSE_BUTTON_RIGHT) && !openfbx::UiMouseButtonDown(MOUSE_BUTTON_MIDDLE))
     {
         tab.uvViewPanning = false;
     }
