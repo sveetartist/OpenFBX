@@ -86,3 +86,7 @@ Press **V** to cycle to **Checker**, or choose **View > Checker**. The bundled
 `assets/checker.png` displays a repeating UV checker without changing materials.
 In **Preferences > Checker Texture**, adjust squares per UV tile from 2 to 128
 (default 16). More squares make each checker smaller.
+
+Enable **Preferences > Use Colored Checker** to use the supplied labeled textures.
+**Next Color** cycles through all five variants. The texture-size controls select
+512, 1024, 2048, or 4096 pixels, loading the matching supplied image (default 1024).

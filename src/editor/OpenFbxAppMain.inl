@@ -12,7 +12,7 @@ int RunOpenFbxApp(int argc, char** argv)
     Font uiFont = LoadTechnicalFont();
     LitShader litShader = LoadBasicLitShader();
     Material checkerMaterial = LoadMaterialDefault();
-    int appliedCheckerSquares = 0;
+    int appliedCheckerVariant = 0;
     OrbitCamera emptyOrbit = CreateDefaultCamera();
     std::vector<std::unique_ptr<ModelTab>> tabs;
     int activeTab = -1;
@@ -636,7 +636,7 @@ int RunOpenFbxApp(int argc, char** argv)
                 }
                 else if (viewMode == ViewMode::Checker)
                 {
-                    UpdateCheckerMaterial(checkerMaterial, appliedCheckerSquares);
+                    UpdateCheckerMaterial(checkerMaterial, appliedCheckerVariant, error);
                     DrawCheckerModel(*active, checkerMaterial);
                 }
                 else if (viewMode == ViewMode::UvIslands)
@@ -702,7 +702,10 @@ int RunOpenFbxApp(int argc, char** argv)
             }
             else if (viewMode == ViewMode::Checker)
             {
-                std::snprintf(channelText, sizeof(channelText), "Viewport: Checker (%d squares / UV tile)", gCheckerSquares);
+                if (gUseColoredChecker)
+                    std::snprintf(channelText, sizeof(channelText), "Viewport: Colored Checker %d (%dx%d)", gCheckerColor, gCheckerTextureSize, gCheckerTextureSize);
+                else
+                    std::snprintf(channelText, sizeof(channelText), "Viewport: Checker (%d squares / UV tile)", gCheckerSquares);
             }
             else if (viewMode == ViewMode::UvIslands)
             {
@@ -1102,7 +1105,7 @@ int RunOpenFbxApp(int argc, char** argv)
     {
         UnloadFont(uiFont);
     }
-    if (appliedCheckerSquares != 0)
+    if (appliedCheckerVariant != 0)
     {
         UnloadTexture(checkerMaterial.maps[MATERIAL_MAP_DIFFUSE].texture);
         checkerMaterial.maps[MATERIAL_MAP_DIFFUSE].texture = Texture2D{};

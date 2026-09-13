@@ -63,7 +63,10 @@ if(WIN32)
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "${CMAKE_CURRENT_SOURCE_DIR}/assets/checker.png"
                 "$<TARGET_FILE_DIR:openfbx>/checker.png"
-        COMMENT "Copying openfbx window icon and checker texture"
+        COMMAND ${CMAKE_COMMAND} -E copy_directory
+                "${CMAKE_CURRENT_SOURCE_DIR}/assets/colored_checkers"
+                "$<TARGET_FILE_DIR:openfbx>/colored_checkers"
+        COMMENT "Copying openfbx window icon and checker textures"
     )
 endif()
 

@@ -79,6 +79,9 @@ constexpr float kMaxBoneOrientationScale = 4.0f;
 constexpr float kMinBoneOrientationLineWidth = 1.0f;
 constexpr float kMaxBoneOrientationLineWidth = 10.0f;
 int gCheckerSquares = 16;
+bool gUseColoredChecker = false;
+int gCheckerColor = 1;
+int gCheckerTextureSize = 1024;
 float gBoneOrientationScale = 1.0f;
 float gBoneOrientationLineWidth = 2.0f;
 

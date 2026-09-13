@@ -66,7 +66,7 @@ void DrawMenuBar(Font font,
         openMenuBounds = Rectangle{ 124.0f, 29.0f, 230.0f, 458.0f };
         break;
     case OpenMenu::Preferences:
-        openMenuBounds = Rectangle{ 186.0f, 29.0f, 420.0f, 536.0f };
+        openMenuBounds = Rectangle{ 186.0f, 29.0f, 420.0f, 608.0f };
         break;
     case OpenMenu::Help:
         openMenuBounds = Rectangle{ 308.0f, 29.0f, 230.0f, 38.0f };
@@ -235,7 +235,7 @@ void DrawMenuBar(Font font,
     }
     else if (openMenu == OpenMenu::Preferences)
     {
-        DrawRectangle(186, 29, 420, 536, Color{ 28, 31, 35, 245 });
+        DrawRectangle(186, 29, 420, 608, Color{ 28, 31, 35, 245 });
         DrawUiText(font, "NAVIGATION", 198.0f, 39.0f, 16.0f, Color{ 165, 182, 196, 255 });
         if (DrawMenuItem(font, Rectangle{ 196.0f, 64.0f, 185.0f, 30.0f }, "Blender", navigation == NavigationPreset::Blender))
         {
@@ -302,22 +302,44 @@ void DrawMenuBar(Font font,
         DrawUiText(font, "View > Bone Orientation (O) toggles the axes", 198.0f, 302.0f, 14.0f, Color{ 165, 182, 196, 255 });
 
         DrawUiText(font, "CHECKER TEXTURE", 198.0f, 330.0f, 16.0f, Color{ 165, 182, 196, 255 });
+        if (DrawMenuItem(font, Rectangle{ 198.0f, 350.0f, 390.0f, 28.0f },
+                         gUseColoredChecker ? "[x] Use Colored Checker" : "[ ] Use Colored Checker"))
+            gUseColoredChecker = !gUseColoredChecker;
         char checkerSizeText[80] = {};
-        std::snprintf(checkerSizeText, sizeof(checkerSizeText), "Squares / UV tile: %d", gCheckerSquares);
-        DrawUiText(font, checkerSizeText, 198.0f, 359.0f, 15.0f, Color{ 205, 213, 220, 255 });
-        if (DrawPanelButton(font, Rectangle{ 414.0f, 352.0f, 34.0f, 26.0f }, "-"))
-            gCheckerSquares = std::max(2, gCheckerSquares / 2);
-        if (DrawPanelButton(font, Rectangle{ 454.0f, 352.0f, 34.0f, 26.0f }, "+"))
-            gCheckerSquares = std::min(128, gCheckerSquares * 2);
-        if (DrawPanelButton(font, Rectangle{ 496.0f, 352.0f, 70.0f, 26.0f }, "Reset"))
-            gCheckerSquares = 16;
+        if (gUseColoredChecker)
+        {
+            char colorText[40] = {};
+            std::snprintf(colorText, sizeof(colorText), "Color: %d / 5", gCheckerColor);
+            DrawUiText(font, colorText, 198.0f, 391.0f, 15.0f, Color{ 205, 213, 220, 255 });
+            if (DrawPanelButton(font, Rectangle{ 414.0f, 384.0f, 152.0f, 26.0f }, "Next Color"))
+                gCheckerColor = gCheckerColor % 5 + 1;
+            std::snprintf(checkerSizeText, sizeof(checkerSizeText), "Texture: %dx%d", gCheckerTextureSize, gCheckerTextureSize);
+            DrawUiText(font, checkerSizeText, 198.0f, 425.0f, 15.0f, Color{ 205, 213, 220, 255 });
+            if (DrawPanelButton(font, Rectangle{ 414.0f, 418.0f, 34.0f, 26.0f }, "-"))
+                gCheckerTextureSize = std::max(512, gCheckerTextureSize / 2);
+            if (DrawPanelButton(font, Rectangle{ 454.0f, 418.0f, 34.0f, 26.0f }, "+"))
+                gCheckerTextureSize = std::min(4096, gCheckerTextureSize * 2);
+            if (DrawPanelButton(font, Rectangle{ 496.0f, 418.0f, 70.0f, 26.0f }, "Reset"))
+                gCheckerTextureSize = 1024;
+        }
+        else
+        {
+            std::snprintf(checkerSizeText, sizeof(checkerSizeText), "Squares / UV tile: %d", gCheckerSquares);
+            DrawUiText(font, checkerSizeText, 198.0f, 391.0f, 15.0f, Color{ 205, 213, 220, 255 });
+            if (DrawPanelButton(font, Rectangle{ 414.0f, 384.0f, 34.0f, 26.0f }, "-"))
+                gCheckerSquares = std::max(2, gCheckerSquares / 2);
+            if (DrawPanelButton(font, Rectangle{ 454.0f, 384.0f, 34.0f, 26.0f }, "+"))
+                gCheckerSquares = std::min(128, gCheckerSquares * 2);
+            if (DrawPanelButton(font, Rectangle{ 496.0f, 384.0f, 70.0f, 26.0f }, "Reset"))
+                gCheckerSquares = 16;
+        }
 
-        DrawUiText(font, "HOTKEYS", 198.0f, 402.0f, 16.0f, Color{ 165, 182, 196, 255 });
-        DrawUiText(font, "Q/W/E/R tools    Ctrl+O open FBX    Ctrl+R reload", 198.0f, 428.0f, 15.0f, Color{ 205, 213, 220, 255 });
-        DrawUiText(font, "Ctrl+Z undo    Ctrl+Y redo    T textures    C channels", 198.0f, 454.0f, 15.0f, Color{ 205, 213, 220, 255 });
-        DrawUiText(font, "Blender: MMB orbit, Alt snap, Shift+MMB pan, Wheel zoom", 198.0f, 480.0f, 15.0f, Color{ 205, 213, 220, 255 });
-        DrawUiText(font, "Maya: Alt+LMB orbit, Shift snap, Alt+MMB pan, Alt+RMB/Wheel zoom", 198.0f, 506.0f, 15.0f, Color{ 205, 213, 220, 255 });
-        DrawUiText(font, "Esc deselects    Ctrl+W closes tab    Ctrl+Q quits", 198.0f, 532.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        DrawUiText(font, "HOTKEYS", 198.0f, 474.0f, 16.0f, Color{ 165, 182, 196, 255 });
+        DrawUiText(font, "Q/W/E/R tools    Ctrl+O open FBX    Ctrl+R reload", 198.0f, 500.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        DrawUiText(font, "Ctrl+Z undo    Ctrl+Y redo    T textures    C channels", 198.0f, 526.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        DrawUiText(font, "Blender: MMB orbit, Alt snap, Shift+MMB pan, Wheel zoom", 198.0f, 552.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        DrawUiText(font, "Maya: Alt+LMB orbit, Shift snap, Alt+MMB pan, Alt+RMB/Wheel zoom", 198.0f, 578.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        DrawUiText(font, "Esc deselects    Ctrl+W closes tab    Ctrl+Q quits", 198.0f, 604.0f, 15.0f, Color{ 205, 213, 220, 255 });
     }
     else if (openMenu == OpenMenu::Help)
     {

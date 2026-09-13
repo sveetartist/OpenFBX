@@ -177,28 +177,53 @@ void DrawMaterialModel(ModelTab& tab, const LitShader& lit, MaterialPreviewMode 
     rlEnableDepthMask();
 }
 
-void UpdateCheckerMaterial(Material& material, int& appliedSquares)
+int GetCheckerVariantKey()
 {
-    if (appliedSquares == gCheckerSquares) return;
+    return gUseColoredChecker ? gCheckerColor * 10000 + gCheckerTextureSize : gCheckerSquares;
+}
+
+std::string GetColoredCheckerFilename()
+{
+    const std::string size = std::to_string(gCheckerTextureSize);
+    return "colored_checkers/" + size + "x" + size + " Texel Density Texture " + std::to_string(gCheckerColor) + ".png";
+}
+
+void UpdateCheckerMaterial(Material& material, int& appliedVariant, std::string& error)
+{
+    const int variant = GetCheckerVariantKey();
+    if (appliedVariant == variant) return;
     Texture2D texture{};
-    if (gCheckerSquares == 16)
+    if (gUseColoredChecker)
     {
-        const std::string path = std::string(GetApplicationDirectory()) + "checker.png";
-        if (FileExists(path.c_str())) texture = LoadTexture(path.c_str());
+        const std::string path = std::string(GetApplicationDirectory()) + GetColoredCheckerFilename();
+        texture = LoadTexture(path.c_str());
+        if (texture.id == 0)
+        {
+            error = "Unable to load colored checker: " + path;
+            return;
+        }
     }
-    if (texture.id == 0)
+    else
     {
-        Image checker = GenImageChecked(512, 512, 512 / gCheckerSquares, 512 / gCheckerSquares,
-                                       Color{ 210, 210, 210, 255 }, Color{ 55, 55, 55, 255 });
-        texture = LoadTextureFromImage(checker);
-        UnloadImage(checker);
+        if (gCheckerSquares == 16)
+        {
+            const std::string path = std::string(GetApplicationDirectory()) + "checker.png";
+            if (FileExists(path.c_str())) texture = LoadTexture(path.c_str());
+        }
+        if (texture.id == 0)
+        {
+            Image checker = GenImageChecked(512, 512, 512 / gCheckerSquares, 512 / gCheckerSquares,
+                                           Color{ 210, 210, 210, 255 }, Color{ 55, 55, 55, 255 });
+            texture = LoadTextureFromImage(checker);
+            UnloadImage(checker);
+        }
     }
     GenTextureMipmaps(&texture);
     SetTextureFilter(texture, TEXTURE_FILTER_TRILINEAR);
     SetTextureWrap(texture, TEXTURE_WRAP_REPEAT);
-    if (appliedSquares != 0) UnloadTexture(material.maps[MATERIAL_MAP_DIFFUSE].texture);
+    if (appliedVariant != 0) UnloadTexture(material.maps[MATERIAL_MAP_DIFFUSE].texture);
     material.maps[MATERIAL_MAP_DIFFUSE].texture = texture;
-    appliedSquares = gCheckerSquares;
+    appliedVariant = variant;
 }
 
 void DrawCheckerModel(const ModelTab& tab, const Material& material)
