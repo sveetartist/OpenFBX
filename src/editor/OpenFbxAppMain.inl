@@ -40,8 +40,6 @@ int RunOpenFbxApp(int argc, char** argv)
     bool editPivotMode = false;
     TransformGizmoState transformGizmo;
     MarqueeSelectionState marquee;
-    WeightBrushSettings weightBrush;
-    WeightBrushState weightBrushState;
 
     auto initializeLoadedTab = [&](ModelTab& tab, const std::string& path)
     {
@@ -333,11 +331,11 @@ int RunOpenFbxApp(int argc, char** argv)
                                      !menuBlocksPointer &&
                                      !modalOpen &&
                                      !hierarchyPanel.resizing &&
+                                     !hierarchyPanel.scrollDragging &&
                                      !mouseOverHierarchyContextMenu;
 
         const bool transformInfoConsumedMouse = !modalOpen && !renameEditor.active && UpdateSelectedInfoPanelInput(active, transformValueEditor, editPivotMode, notice, error);
-        const bool toolbarConsumedMouse = !modalOpen && !renameEditor.active && !transformValueEditor.active && UpdateTransformToolbarInput(transformTool, gizmoOrientation, editPivotMode, weightBrush, hierarchyBlockW);
-        const WeightBrushMode weightBrushMode = shiftDown ? WeightBrushMode::Smooth : controlDown ? WeightBrushMode::Subtract : WeightBrushMode::Add;
+        const bool toolbarConsumedMouse = !modalOpen && !renameEditor.active && !transformValueEditor.active && UpdateTransformToolbarInput(transformTool, gizmoOrientation, editPivotMode, hierarchyBlockW);
         if (!modalOpen && !renameEditor.active && !transformValueEditor.active && !controlDown && !altDown)
         {
             if (IsKeyPressed(KEY_Q))
@@ -358,51 +356,13 @@ int RunOpenFbxApp(int argc, char** argv)
                 transformTool = TransformTool::Scale;
                 editPivotMode = false;
             }
-            if (IsKeyPressed(KEY_A))
-            {
-                transformTool = TransformTool::WeightsBrush;
-                editPivotMode = false;
-            }
+
         }
         const bool transformConsumedMouse = !toolbarConsumedMouse &&
                                             !renameEditor.active &&
                                             !transformValueEditor.active &&
                                             !transformInfoConsumedMouse &&
                                             UpdateTransformGizmoInput(active, transformGizmo, transformTool, gizmoOrientation, editPivotMode, mouseInViewport, notice, error);
-        bool weightBrushConsumedMouse = false;
-        if (!renameEditor.active &&
-            !transformValueEditor.active &&
-            active &&
-            mouseInViewport &&
-            !transformInfoConsumedMouse &&
-            transformTool == TransformTool::WeightsBrush &&
-            openfbx::UiMouseButtonDown(MOUSE_BUTTON_LEFT) &&
-            !openfbx::UiMouseButtonDown(MOUSE_BUTTON_RIGHT))
-        {
-            if (!weightBrushState.painting)
-            {
-                EditSnapshot before = CaptureEditSnapshot(*active);
-                if (PaintSkinWeightsAtMouse(*active, mouse, visibility, weightBrush, weightBrushMode, notice, error))
-                {
-                    PushUndoSnapshot(*active, std::move(before));
-                    weightBrushState.painting = true;
-                    visibility.skinWeights = true;
-                }
-            }
-            else
-            {
-                if (PaintSkinWeightsAtMouse(*active, mouse, visibility, weightBrush, weightBrushMode, notice, error))
-                {
-                    visibility.skinWeights = true;
-                }
-            }
-            weightBrushConsumedMouse = true;
-        }
-        if (!openfbx::UiMouseButtonDown(MOUSE_BUTTON_LEFT))
-        {
-            weightBrushState.painting = false;
-        }
-
         if (!modalOpen && !renameEditor.active && !transformValueEditor.active && active && altDown && IsKeyPressed(KEY_Q))
         {
             ToggleSelectedNodeIsolation(*active, notice, error);
@@ -475,7 +435,7 @@ int RunOpenFbxApp(int argc, char** argv)
         const bool canSelectInViewport = active && mouseInViewport && !altDown &&
             !renameEditor.active && !transformValueEditor.active &&
             !toolbarConsumedMouse && !transformInfoConsumedMouse && !transformConsumedMouse &&
-            !weightBrushConsumedMouse && !pivotEditLocksSelection &&
+            !pivotEditLocksSelection &&
             !openfbx::UiMouseButtonDown(MOUSE_BUTTON_RIGHT) && !openfbx::UiMouseButtonDown(MOUSE_BUTTON_MIDDLE);
         if (marquee.tab && (marquee.tab != active || transformTool != TransformTool::Select ||
             editPivotMode || modalOpen || openMenu != OpenMenu::None || renameEditor.active ||
@@ -517,7 +477,6 @@ int RunOpenFbxApp(int argc, char** argv)
             !toolbarConsumedMouse &&
             !transformInfoConsumedMouse &&
             !transformConsumedMouse &&
-            !weightBrushConsumedMouse &&
             !pivotEditLocksSelection &&
             openfbx::UiMouseButtonPressed(MOUSE_BUTTON_RIGHT))
         {
@@ -572,7 +531,7 @@ int RunOpenFbxApp(int argc, char** argv)
 
         if (active)
         {
-            if (mouseInViewport && !marqueeConsumedMouse && !toolbarConsumedMouse && !transformInfoConsumedMouse && !transformConsumedMouse && !weightBrushConsumedMouse)
+            if (mouseInViewport && !marqueeConsumedMouse && !toolbarConsumedMouse && !transformInfoConsumedMouse && !transformConsumedMouse)
             {
                 UpdateNavigation(active->orbit, navigation);
             }
@@ -680,7 +639,6 @@ int RunOpenFbxApp(int argc, char** argv)
         }
         EndMode3D();
 
-        const WeightBrushMode drawWeightBrushMode = shiftDown ? WeightBrushMode::Smooth : controlDown ? WeightBrushMode::Subtract : WeightBrushMode::Add;
         if (marquee.tab == active && marquee.dragging)
         {
             const Rectangle rectangle = GetMarqueeRectangle(marquee.start, marquee.end);
@@ -688,7 +646,6 @@ int RunOpenFbxApp(int argc, char** argv)
             DrawRectangleRec(rectangle, subtractive ? Color{ 230, 95, 80, 35 } : Color{ 80, 155, 230, 35 });
             DrawRectangleLinesEx(rectangle, 1.5f, subtractive ? Color{ 255, 135, 110, 255 } : Color{ 110, 190, 255, 255 });
         }
-        DrawWeightBrushCursor(uiFont, active, transformTool, weightBrush, drawWeightBrushMode, mouseInViewport);
 
         char statusText[256] = {};
         const char* activeToolName = editPivotMode ? (transformTool == TransformTool::Rotate ? "Edit Pivot Rotate" : "Edit Pivot Move") : GetTransformToolName(transformTool);
@@ -779,7 +736,7 @@ int RunOpenFbxApp(int argc, char** argv)
                            notice,
                            error,
                            openMenu != OpenMenu::None || modalOpen);
-        DrawTransformToolbar(uiFont, transformTool, gizmoOrientation, editPivotMode, weightBrush, hierarchyBlockW);
+        DrawTransformToolbar(uiFont, transformTool, gizmoOrientation, editPivotMode, hierarchyBlockW);
         DrawOrientationGizmo(uiFont, active ? active->orbit.camera : emptyOrbit.camera);
 
         DrawTabs(uiFont, tabs, activeTab);

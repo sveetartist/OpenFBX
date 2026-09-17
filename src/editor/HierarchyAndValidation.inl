@@ -222,9 +222,8 @@ void RevealNodeInHierarchy(ModelTab& tab, HierarchyPanelState& panel, int nodeIn
     const int row = GetVisibleSceneNodeRow(tab, tab.collapsedNodes, nodeIndex);
     if (row < 0) return;
 
-    constexpr float rowH = 22.0f;
     const float panelH = GetHierarchyPanelHeight();
-    const float visibleRows = std::max(1.0f, std::floor((panelH - 64.0f) / rowH));
+    const float visibleRows = std::max(1.0f, std::floor((panelH - 64.0f) / 22.0f));
     const float maxScroll = std::max(0.0f, static_cast<float>(CountVisibleSceneNodes(tab, tab.collapsedNodes)) - visibleRows);
 
     if (static_cast<float>(row) < panel.scroll)
@@ -239,12 +238,33 @@ void RevealNodeInHierarchy(ModelTab& tab, HierarchyPanelState& panel, int nodeIn
     panel.scroll = ClampFloat(panel.scroll, 0.0f, maxScroll);
 }
 
+Rectangle GetHierarchyScrollTrack(const HierarchyPanelState& panel)
+{
+    return Rectangle{ panel.width - 22.0f, GetHierarchyContentStartY(), 14.0f,
+                      std::max(1.0f, GetHierarchyPanelHeight() - 64.0f) };
+}
+
+float GetHierarchyMaxScroll(const ModelTab& tab)
+{
+    const float visibleRows = std::max(1.0f, std::floor((GetHierarchyPanelHeight() - 64.0f) / 22.0f));
+    return std::max(0.0f, static_cast<float>(CountVisibleSceneNodes(tab, tab.collapsedNodes)) - visibleRows);
+}
+
+Rectangle GetHierarchyScrollThumb(const ModelTab& tab, const HierarchyPanelState& panel)
+{
+    const Rectangle track = GetHierarchyScrollTrack(panel);
+    const float visibleRows = std::max(1.0f, std::floor(track.height / 22.0f));
+    const float maxScroll = GetHierarchyMaxScroll(tab);
+    const float height = std::min(track.height, std::max(28.0f, track.height * visibleRows / (visibleRows + maxScroll)));
+    const float offset = maxScroll > 0.0f ? ClampFloat(panel.scroll / maxScroll, 0.0f, 1.0f) : 0.0f;
+    return Rectangle{ track.x, track.y + (track.height - height) * offset, track.width, height };
+}
+
 void UpdateHierarchyPanelInteraction(HierarchyPanelState& panel, const ModelTab* active)
 {
     constexpr float panelX = 0.0f;
     constexpr float panelY = 61.0f;
     constexpr float collapsedW = 28.0f;
-    constexpr float rowH = 22.0f;
     const float panelH = GetHierarchyPanelHeight();
     const Vector2 mouse = GetMousePosition();
 
@@ -281,17 +301,31 @@ void UpdateHierarchyPanelInteraction(HierarchyPanelState& panel, const ModelTab*
         return;
     }
 
-    const Rectangle panelRect{ panelX, panelY, panel.width, panelH };
-    if (active && panel.activeTab == LeftPanelTab::Hierarchy && CheckCollisionPointRec(mouse, panelRect))
+    if (!active || panel.activeTab != LeftPanelTab::Hierarchy || panel.resizing)
     {
-        const float wheel = openfbx::UiMouseWheelMove();
-        if (std::fabs(wheel) > 0.0f)
-        {
-            const float visibleRows = std::max(0.0f, std::floor((panelH - 64.0f) / rowH));
-            const float maxScroll = std::max(0.0f, static_cast<float>(CountVisibleSceneNodes(*active, active->collapsedNodes)) - visibleRows);
-            panel.scroll = ClampFloat(panel.scroll - wheel * 3.0f, 0.0f, maxScroll);
-        }
+        panel.scrollDragging = false;
+        return;
     }
+    const float maxScroll = GetHierarchyMaxScroll(*active);
+    const Rectangle track = GetHierarchyScrollTrack(panel);
+    const Rectangle thumb = GetHierarchyScrollThumb(*active, panel);
+    if (!openfbx::UiMouseButtonDown(MOUSE_BUTTON_LEFT) || maxScroll <= 0.0f)
+        panel.scrollDragging = false;
+    if (!panel.contextMenuOpen && !panel.reparentDragArmed && !panel.shiftDragSelecting &&
+        maxScroll > 0.0f && openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, track))
+    {
+        panel.scrollDragging = true;
+        panel.scrollDragOffset = CheckCollisionPointRec(mouse, thumb) ? mouse.y - thumb.y : thumb.height * 0.5f;
+    }
+    if (panel.scrollDragging && track.height > thumb.height)
+    {
+        panel.scroll = maxScroll * ClampFloat((mouse.y - track.y - panel.scrollDragOffset) / (track.height - thumb.height), 0.0f, 1.0f);
+    }
+    else if (CheckCollisionPointRec(mouse, Rectangle{ panelX, panelY, panel.width, panelH }))
+    {
+        panel.scroll -= openfbx::UiMouseWheelMove() * 3.0f;
+    }
+    panel.scroll = ClampFloat(panel.scroll, 0.0f, maxScroll);
 }
 
 float GetHierarchyPanelBlockWidth(const HierarchyPanelState& panel)

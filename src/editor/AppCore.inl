@@ -163,7 +163,6 @@ enum class LeftPanelTab
     Stats,
     Materials,
     UV,
-    SkinWeights,
     Validator
 };
 
@@ -209,8 +208,7 @@ enum class TransformTool
     Select,
     Move,
     Rotate,
-    Scale,
-    WeightsBrush
+    Scale
 };
 
 enum class TransformAxis
@@ -303,25 +301,6 @@ struct TransformGizmoState
     float lastAngle = 0.0f;
     float snapRadiansX = 0.0f;
     float snapRadiansY = 0.0f;
-};
-
-struct WeightBrushSettings
-{
-    float sizePixels = 48.0f;
-    float strength = 0.35f;
-    bool autoNormalize = true;
-};
-
-enum class WeightBrushMode
-{
-    Add,
-    Subtract,
-    Smooth
-};
-
-struct WeightBrushState
-{
-    bool painting = false;
 };
 
 struct TextureClipboard
@@ -446,7 +425,8 @@ struct HierarchyPanelState
     float width = 320.0f;
     float scroll = 0.0f;
     float validatorScroll = 0.0f;
-    float skinWeightsScroll = 0.0f;
+    bool scrollDragging = false;
+    float scrollDragOffset = 0.0f;
     int contextNodeIndex = -1;
     std::vector<int> contextNodeIndices;
     Vector2 contextPosition{};

@@ -10,6 +10,6 @@
 #include "HierarchyAndValidation.inl"
 #include "MaterialsPanel.inl"
 #include "UvPanel.inl"
-#include "SkinWeightsPanel.inl"
+#include "HierarchyPanel.inl"
 #include "MenuTabsTimeline.inl"
 #include "OpenFbxAppMain.inl"

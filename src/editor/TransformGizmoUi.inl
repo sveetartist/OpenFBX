@@ -6,7 +6,6 @@ const char* GetTransformToolName(TransformTool tool)
     case TransformTool::Move: return "Move";
     case TransformTool::Rotate: return "Rotate";
     case TransformTool::Scale: return "Scale";
-    case TransformTool::WeightsBrush: return "Weights";
     }
     return "Select";
 }
@@ -19,7 +18,6 @@ const char* GetTransformToolHotkey(TransformTool tool)
     case TransformTool::Move: return "W";
     case TransformTool::Rotate: return "E";
     case TransformTool::Scale: return "R";
-    case TransformTool::WeightsBrush: return "A";
     }
     return "";
 }
@@ -158,7 +156,7 @@ float DistanceMouseToGizmoRing(ModelTab& tab, Vector2 mouse, Vector3 pivot, Tran
 TransformAxis PickTransformGizmoAxis(ModelTab& tab, TransformTool tool, GizmoOrientation orientation, Vector2 mouse)
 {
     Vector3 pivot{};
-    if (tool == TransformTool::Select || tool == TransformTool::WeightsBrush || !GetGizmoPivot(tab, pivot)) return TransformAxis::None;
+    if (tool == TransformTool::Select || !GetGizmoPivot(tab, pivot)) return TransformAxis::None;
 
     const Vector2 pivotScreen = GetWorldToScreen(pivot, tab.orbit.camera);
     if (Vector2Distance(mouse, pivotScreen) <= 15.0f)
@@ -205,7 +203,7 @@ bool UpdateTransformGizmoInput(ModelTab* active,
     const bool pivotDragInProgress = state.dragging && state.pivotMode;
     const TransformTool requestedTool = editPivotMode && tool != TransformTool::Move && tool != TransformTool::Rotate ? TransformTool::Select : tool;
     const TransformTool activeTool = state.dragging ? state.tool : requestedTool;
-    if (!active || !active->loaded.valid || activeTool == TransformTool::Select || activeTool == TransformTool::WeightsBrush)
+    if (!active || !active->loaded.valid || activeTool == TransformTool::Select)
     {
         state = TransformGizmoState{};
         return false;
@@ -418,7 +416,7 @@ void DrawTransformGizmo(const ModelTab& tab, TransformTool tool, const Transform
     const bool pivotDragInProgress = state.dragging && state.pivotMode;
     const TransformTool requestedTool = editPivotMode && tool != TransformTool::Move && tool != TransformTool::Rotate ? TransformTool::Select : tool;
     const TransformTool activeTool = state.dragging ? state.tool : requestedTool;
-    if (activeTool == TransformTool::Select || activeTool == TransformTool::WeightsBrush) return;
+    if (activeTool == TransformTool::Select) return;
     if ((editPivotMode || pivotDragInProgress) && !IsValidPivotNode(tab, tab.selectedNode)) return;
 
     Vector3 pivot{};
@@ -475,29 +473,19 @@ Rectangle GetTransformToolbarButtonRect(float hierarchyBlockW, int index)
 
 Rectangle GetGizmoOrientationButtonRect(float hierarchyBlockW, int index)
 {
-    return Rectangle{ hierarchyBlockW + 10.0f + static_cast<float>(index) * 57.0f, 304.0f, 55.0f, 28.0f };
+    return Rectangle{ hierarchyBlockW + 10.0f + static_cast<float>(index) * 57.0f, 266.0f, 55.0f, 28.0f };
 }
 
 Rectangle GetPivotModeButtonRect(float hierarchyBlockW)
 {
-    return Rectangle{ hierarchyBlockW + 10.0f, 338.0f, 112.0f, 28.0f };
+    return Rectangle{ hierarchyBlockW + 10.0f, 300.0f, 112.0f, 28.0f };
 }
 
-Rectangle GetWeightBrushSmallButtonRect(float hierarchyBlockW, int row, int column)
-{
-    return Rectangle{ hierarchyBlockW + 112.0f + static_cast<float>(column) * 31.0f, 404.0f + static_cast<float>(row) * 30.0f, 28.0f, 24.0f };
-}
-
-Rectangle GetWeightBrushAutoNormalizeRect(float hierarchyBlockW)
-{
-    return Rectangle{ hierarchyBlockW + 10.0f, 464.0f, 112.0f, 24.0f };
-}
-
-bool UpdateTransformToolbarInput(TransformTool& tool, GizmoOrientation& orientation, bool& editPivotMode, WeightBrushSettings& brush, float hierarchyBlockW)
+bool UpdateTransformToolbarInput(TransformTool& tool, GizmoOrientation& orientation, bool& editPivotMode, float hierarchyBlockW)
 {
     const Vector2 mouse = GetMousePosition();
-    const TransformTool tools[] = { TransformTool::Select, TransformTool::Move, TransformTool::Rotate, TransformTool::Scale, TransformTool::WeightsBrush };
-    for (int i = 0; i < 5; ++i)
+    const TransformTool tools[] = { TransformTool::Select, TransformTool::Move, TransformTool::Rotate, TransformTool::Scale };
+    for (int i = 0; i < 4; ++i)
     {
         if (CheckCollisionPointRec(mouse, GetTransformToolbarButtonRect(hierarchyBlockW, i)))
         {
@@ -526,38 +514,6 @@ bool UpdateTransformToolbarInput(TransformTool& tool, GizmoOrientation& orientat
         return true;
     }
 
-    if (tool == TransformTool::WeightsBrush)
-    {
-        for (int row = 0; row < 2; ++row)
-        {
-            for (int column = 0; column < 2; ++column)
-            {
-                if (!CheckCollisionPointRec(mouse, GetWeightBrushSmallButtonRect(hierarchyBlockW, row, column))) continue;
-                if (openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT))
-                {
-                    if (row == 0)
-                    {
-                        brush.sizePixels = ClampFloat(brush.sizePixels + (column == 0 ? -8.0f : 8.0f), 8.0f, 220.0f);
-                    }
-                    else
-                    {
-                        brush.strength = ClampFloat(brush.strength + (column == 0 ? -0.05f : 0.05f), 0.01f, 1.0f);
-                    }
-                }
-                return true;
-            }
-        }
-
-        if (CheckCollisionPointRec(mouse, GetWeightBrushAutoNormalizeRect(hierarchyBlockW)))
-        {
-            if (openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT))
-            {
-                brush.autoNormalize = !brush.autoNormalize;
-            }
-            return true;
-        }
-    }
-
     const GizmoOrientation orientations[] = { GizmoOrientation::Global, GizmoOrientation::Local };
     for (int i = 0; i < 2; ++i)
     {
@@ -573,41 +529,10 @@ bool UpdateTransformToolbarInput(TransformTool& tool, GizmoOrientation& orientat
     return false;
 }
 
-void DrawWeightBrushControls(Font font, const WeightBrushSettings& brush, float hierarchyBlockW)
+void DrawTransformToolbar(Font font, TransformTool tool, GizmoOrientation orientation, bool editPivotMode, float hierarchyBlockW)
 {
-    DrawUiText(font, "Brush", hierarchyBlockW + 12.0f, 380.0f, 13.0f, Color{ 154, 166, 178, 255 });
-
-    char value[64] = {};
-    DrawUiText(font, "Size", hierarchyBlockW + 12.0f, 408.0f, 13.0f, Color{ 190, 200, 210, 255 });
-    std::snprintf(value, sizeof(value), "%.0f", brush.sizePixels);
-    DrawUiText(font, value, hierarchyBlockW + 52.0f, 408.0f, 13.0f, Color{ 205, 224, 238, 255 });
-    DrawPanelButton(font, GetWeightBrushSmallButtonRect(hierarchyBlockW, 0, 0), "-");
-    DrawPanelButton(font, GetWeightBrushSmallButtonRect(hierarchyBlockW, 0, 1), "+");
-
-    DrawUiText(font, "Strength", hierarchyBlockW + 12.0f, 438.0f, 13.0f, Color{ 190, 200, 210, 255 });
-    std::snprintf(value, sizeof(value), "%.2f", brush.strength);
-    DrawUiText(font, value, hierarchyBlockW + 70.0f, 438.0f, 13.0f, Color{ 205, 224, 238, 255 });
-    DrawPanelButton(font, GetWeightBrushSmallButtonRect(hierarchyBlockW, 1, 0), "-");
-    DrawPanelButton(font, GetWeightBrushSmallButtonRect(hierarchyBlockW, 1, 1), "+");
-
-    DrawPanelButton(font, GetWeightBrushAutoNormalizeRect(hierarchyBlockW), brush.autoNormalize ? "[x] Normalize" : "[ ] Normalize");
-}
-
-const char* GetWeightBrushModeName(WeightBrushMode mode)
-{
-    switch (mode)
-    {
-    case WeightBrushMode::Subtract: return "Subtract";
-    case WeightBrushMode::Smooth: return "Smooth";
-    case WeightBrushMode::Add: return "Add";
-    }
-    return "Add";
-}
-
-void DrawTransformToolbar(Font font, TransformTool tool, GizmoOrientation orientation, bool editPivotMode, const WeightBrushSettings& brush, float hierarchyBlockW)
-{
-    const TransformTool tools[] = { TransformTool::Select, TransformTool::Move, TransformTool::Rotate, TransformTool::Scale, TransformTool::WeightsBrush };
-    for (int i = 0; i < 5; ++i)
+    const TransformTool tools[] = { TransformTool::Select, TransformTool::Move, TransformTool::Rotate, TransformTool::Scale };
+    for (int i = 0; i < 4; ++i)
     {
         const Rectangle bounds = GetTransformToolbarButtonRect(hierarchyBlockW, i);
         const bool selected = tool == tools[i];
@@ -636,34 +561,6 @@ void DrawTransformToolbar(Font font, TransformTool tool, GizmoOrientation orient
     DrawRectangleLinesEx(pivotBounds, 1.0f, editPivotMode ? Color{ 214, 190, 90, 255 } : Color{ 78, 88, 98, 255 });
     DrawUiText(font, editPivotMode ? "Pivot On" : "Pivot Off", pivotBounds.x + 8.0f, pivotBounds.y + 7.0f, 13.0f, editPivotMode ? Color{ 255, 236, 160, 255 } : Color{ 154, 166, 178, 255 });
 
-    if (tool == TransformTool::WeightsBrush)
-    {
-        DrawWeightBrushControls(font, brush, hierarchyBlockW);
-    }
-}
-
-void DrawWeightBrushCursor(Font font, const ModelTab* active, TransformTool tool, const WeightBrushSettings& brush, WeightBrushMode mode, bool mouseInViewport)
-{
-    if (!active || tool != TransformTool::WeightsBrush || !mouseInViewport) return;
-
-    const Vector2 mouse = GetMousePosition();
-    const float radius = ClampFloat(brush.sizePixels, 4.0f, 220.0f);
-    DrawCircleV(mouse, radius, Color{ 204, 154, 42, 28 });
-    DrawCircleLines(static_cast<int>(std::round(mouse.x)), static_cast<int>(std::round(mouse.y)), radius, Color{ 235, 190, 72, 230 });
-
-    const bool validBone = active->selectedNode >= 0 &&
-                           active->selectedNode < static_cast<int>(active->loaded.nodes.size()) &&
-                           active->loaded.nodes[static_cast<size_t>(active->selectedNode)].type == SceneNodeType::Bone &&
-                           !IsDeletedNode(*active, active->selectedNode);
-    const std::string label = std::string(GetWeightBrushModeName(mode)) + ": " +
-                              (validBone ? active->loaded.nodes[static_cast<size_t>(active->selectedNode)].name : "Select bone");
-    const Vector2 labelSize = MeasureTextEx(font, label.c_str(), 13.0f, 1.0f);
-    Rectangle badge{ mouse.x + radius + 8.0f, mouse.y - 12.0f, std::min(labelSize.x + 12.0f, 260.0f), 22.0f };
-    badge.x = ClampFloat(badge.x, 4.0f, static_cast<float>(GetScreenWidth()) - badge.width - 4.0f);
-    badge.y = ClampFloat(badge.y, 4.0f, static_cast<float>(GetScreenHeight()) - badge.height - gBottomPanelReservedHeight - 4.0f);
-    DrawRectangleRec(badge, Color{ 24, 27, 31, 230 });
-    DrawRectangleLinesEx(badge, 1.0f, validBone ? Color{ 120, 190, 230, 255 } : Color{ 210, 110, 92, 255 });
-    DrawUiTextClipped(font, label.c_str(), badge.x + 6.0f, badge.y + 4.0f, 13.0f, badge.width - 12.0f, validBone ? Color{ 205, 224, 238, 255 } : Color{ 255, 170, 150, 255 });
 }
 
 void DrawOrientationGizmo(Font font, const Camera3D& camera)

@@ -22,7 +22,7 @@ set(OPENFBX_SOURCES
     src/editor/HierarchyAndValidation.inl
     src/editor/MaterialsPanel.inl
     src/editor/UvPanel.inl
-    src/editor/SkinWeightsPanel.inl
+    src/editor/HierarchyPanel.inl
     src/editor/MenuTabsTimeline.inl
     src/editor/OpenFbxAppMain.inl
     src/core/MathUtils.cpp
