@@ -387,6 +387,7 @@ int MergeSelectedGeometry(ModelTab& tab, const std::vector<int>& contextNodes, s
         const int end = std::min(sourceNode.meshVertexStart + sourceNode.meshVertexCount, oldVertexCount);
         for (int sourceVertex = start; sourceVertex < end; ++sourceVertex)
         {
+            if (IsRemovedTriangle(sourceNode, sourceVertex)) continue;
             const int newVertex = static_cast<int>(tab.loaded.bindVertices.size() / 3);
             const size_t sourceBase = static_cast<size_t>(sourceVertex) * 3;
             const float bindX = tab.loaded.bindVertices[sourceBase];
@@ -989,6 +990,48 @@ void ShowAllNodes(ModelTab& tab)
     tab.hiddenNodes.clear();
     tab.isolatedNode = -1;
     RefreshDisplayedMesh(tab);
+}
+
+int FixDegenerateTriangles(ModelTab& tab, int nodeIndex)
+{
+    if (!IsValidSelectableNode(tab, nodeIndex)) return 0;
+    SceneNode& node = tab.loaded.nodes[static_cast<size_t>(nodeIndex)];
+    if (node.type != SceneNodeType::Mesh) return 0;
+    std::vector<int> removed;
+    const int end = std::min(node.meshVertexStart + node.meshVertexCount, static_cast<int>(tab.loaded.bindVertices.size() / 3));
+    int vertex = std::max(0, node.meshVertexStart);
+    std::vector<int> polygonCounts = node.sourcePolygonTriangleCounts;
+    if (polygonCounts.empty()) polygonCounts.assign(static_cast<size_t>(std::max(0, end - vertex) / 3), 1);
+    int removedFaces = 0;
+    for (int count : polygonCounts)
+    {
+        bool degenerateFace = count > 0 && vertex + count * 3 <= end;
+        for (int triangle = 0; triangle < count && degenerateFace; ++triangle)
+        {
+            const int triangleStart = vertex + triangle * 3;
+            if (IsRemovedTriangle(node, triangleStart)) { degenerateFace = false; break; }
+            const float* data = tab.loaded.bindVertices.data() + triangleStart * 3;
+            const Vector3 a{ data[0], data[1], data[2] }, b{ data[3], data[4], data[5] }, c{ data[6], data[7], data[8] };
+            degenerateFace = Vector3LengthSqr(Vector3CrossProduct(Vector3Subtract(b, a), Vector3Subtract(c, a))) <= 0.000000000001f;
+        }
+        if (degenerateFace)
+        {
+            for (int triangle = 0; triangle < count; ++triangle) removed.push_back(vertex + triangle * 3);
+            ++removedFaces;
+        }
+        vertex += count * 3;
+    }
+    if (removed.empty()) return 0;
+    PushUndoSnapshot(tab);
+    node.removedTriangleStarts.insert(node.removedTriangleStarts.end(), removed.begin(), removed.end());
+    std::sort(node.removedTriangleStarts.begin(), node.removedTriangleStarts.end());
+    node.degenerateTriangleCount = std::max(0, node.degenerateTriangleCount - static_cast<int>(removed.size()));
+    node.meshPolygonCount = std::max(0, node.meshPolygonCount - removedFaces);
+    node.meshTriangleCount = std::max(0, node.meshVertexCount / 3 - static_cast<int>(node.removedTriangleStarts.size()));
+    // Preserve source vertex indices, UVs and skin weights for animation and undo.
+    tab.viewportUvIslandCache = ViewportUvIslandCache{};
+    RefreshDisplayedMesh(tab);
+    return static_cast<int>(removed.size());
 }
 
 bool ToggleSelectedNodeIsolation(ModelTab& tab, std::string& notice, std::string& error)

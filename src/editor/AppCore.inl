@@ -431,6 +431,8 @@ struct ModelTab
     bool manualSkinnedMeshPose = false;
     int selectedNode = -1;
     std::vector<int> selectedNodes;
+    int validationFixNode = -1;
+    Vector2 validationFixPosition{};
     ValidationCache validationCache;
     std::unordered_map<std::string, bool> expandedValidationGroups;
     std::vector<bool> hiddenNodes;

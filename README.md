@@ -90,3 +90,9 @@ In **Preferences > Checker Texture**, adjust squares per UV tile from 2 to 128
 Enable **Preferences > Use Colored Checker** to use the supplied labeled textures.
 **Next Color** cycles through all five variants. The texture-size controls select
 512, 1024, 2048, or 4096 pixels, loading the matching supplied image (default 1024).
+
+In the Validator, expand **Degenerate triangles**, right-click an issue, and choose
+**Fix Degenerate Triangles** to remove the affected mesh's whole zero-area faces.
+Valid quads and n-gons are preserved without triangulation. Degenerate display
+triangles within otherwise valid polygons remain flagged. The fix supports
+Undo/Redo and is included when saving the FBX.

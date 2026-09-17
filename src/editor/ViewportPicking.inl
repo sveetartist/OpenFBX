@@ -4,7 +4,7 @@ void DrawMeshNodeWireframe(const ModelTab& tab, const SceneNode& node, Color col
     if (!vertices || node.meshVertexStart < 0 || node.meshVertexCount < 3) return;
     const int nodeIndex = static_cast<int>(&node - tab.loaded.nodes.data());
 
-    if (nodeIndex >= 0 && nodeIndex < static_cast<int>(tab.loaded.nodes.size()) && !tab.loaded.meshPolygonEdges.empty())
+    if (nodeIndex >= 0 && nodeIndex < static_cast<int>(tab.loaded.nodes.size()) && !tab.loaded.meshPolygonEdges.empty() && node.removedTriangleStarts.empty())
     {
         const int vertexCount = static_cast<int>(tab.loaded.bindVertices.size() / 3);
         bool drewSourceEdges = false;
@@ -28,6 +28,7 @@ void DrawMeshNodeWireframe(const ModelTab& tab, const SceneNode& node, Color col
     const int end = node.meshVertexStart + node.meshVertexCount;
     for (int vertex = start; vertex + 2 < end; vertex += 3)
     {
+        if (IsRemovedTriangle(node, vertex)) continue;
         const int i0 = vertex * 3;
         const int i1 = (vertex + 1) * 3;
         const int i2 = (vertex + 2) * 3;
@@ -63,6 +64,7 @@ bool GetRayCollisionMeshNodeTriangles(const ModelTab& tab, const SceneNode& node
     const int end = node.meshVertexStart + node.meshVertexCount;
     for (int vertex = start; vertex + 2 < end; vertex += 3)
     {
+        if (IsRemovedTriangle(node, vertex)) continue;
         const int i0 = vertex * 3;
         const int i1 = (vertex + 1) * 3;
         const int i2 = (vertex + 2) * 3;
@@ -321,6 +323,7 @@ void SelectNodesInMarquee(ModelTab& tab, Rectangle rectangle, const VisibilitySt
             const int end = std::min(vertexCount, node.meshVertexStart + node.meshVertexCount);
             for (int vertex = node.meshVertexStart; vertex + 2 < end; vertex += 3)
             {
+                if (IsRemovedTriangle(node, vertex)) continue;
                 Vector3 triangle[3];
                 for (int corner = 0; corner < 3; ++corner)
                 {

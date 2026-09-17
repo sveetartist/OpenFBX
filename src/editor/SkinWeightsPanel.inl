@@ -313,7 +313,7 @@ void DrawHierarchyPanel(Font font,
     }
     if (panel.activeTab == LeftPanelTab::Validator)
     {
-        DrawValidatorPanel(font, *active, panel, panelX, GetHierarchyContentStartY() + 10.0f, panelW);
+        DrawValidatorPanel(font, *active, panel, panelX, GetHierarchyContentStartY() + 10.0f, panelW, notice, error);
         return;
     }
 

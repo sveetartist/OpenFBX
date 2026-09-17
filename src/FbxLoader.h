@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 
 #include "platform/ModelConversion.h"
 
@@ -105,10 +106,18 @@ struct SceneNode
     bool meshHasSkin = false;
     bool hasSkinBindPose = false;
     int degenerateTriangleCount = 0;
+    std::vector<int> removedTriangleStarts;
+    std::vector<int> sourcePolygonTriangleCounts;
     int badSkinWeightCount = 0;
     int missingSkinWeightCount = 0;
     std::string materialName;
 };
+
+inline bool IsRemovedTriangle(const SceneNode& node, int vertex)
+{
+    const int start = node.meshVertexStart + ((vertex - node.meshVertexStart) / 3) * 3;
+    return std::binary_search(node.removedTriangleStarts.begin(), node.removedTriangleStarts.end(), start);
+}
 
 struct AnimationClip
 {

@@ -141,6 +141,7 @@ UvDensityStats CalculateUvDensityStats(const LoadedFbxModel& loaded,
 
     for (int vertex = start; vertex + 2 < end; vertex += 3)
     {
+        if (IsRemovedTriangle(node, vertex)) continue;
         const Vector3 p0 = GetModelVertexPosition(loaded, vertex);
         const Vector3 p1 = GetModelVertexPosition(loaded, vertex + 1);
         const Vector3 p2 = GetModelVertexPosition(loaded, vertex + 2);
@@ -210,6 +211,7 @@ void AppendNodeUvTriangles(const LoadedFbxModel& loaded,
     const int end = node.meshVertexStart + node.meshVertexCount;
     for (int vertex = start; vertex + 2 < end; vertex += 3)
     {
+        if (IsRemovedTriangle(node, vertex)) continue;
         UvTriangleSample triangle;
         triangle.nodeIndex = nodeIndex;
         for (int i = 0; i < 3; ++i)

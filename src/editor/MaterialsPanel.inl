@@ -413,7 +413,7 @@ const ValidationCache& GetValidationCache(ModelTab& tab)
     return cache;
 }
 
-void DrawValidatorPanel(Font font, ModelTab& tab, HierarchyPanelState& panel, float panelX, float panelY, float panelW)
+void DrawValidatorPanel(Font font, ModelTab& tab, HierarchyPanelState& panel, float panelX, float panelY, float panelW, std::string& notice, std::string& error)
 {
     if (DrawPanelButton(font, Rectangle{ panelX + panelW - 88.0f, panelY - 3.0f, 76.0f, 24.0f }, "Refresh"))
         tab.validationCache.dirty = true;
@@ -502,6 +502,12 @@ void DrawValidatorPanel(Font font, ModelTab& tab, HierarchyPanelState& panel, fl
                 DrawRectangleLinesEx(row, 1.0f, Color{ 54, 62, 70, 255 });
                 DrawUiText(font, GetValidatorSeverityName(issue.severity), row.x + 8.0f, row.y + 7.0f, 13.0f, GetValidatorSeverityColor(issue.severity));
                 DrawUiTextClipped(font, issue.message.c_str(), row.x + 8.0f, row.y + 27.0f, 13.0f, row.width - 16.0f, Color{ 154, 166, 178, 255 });
+                if (hovered && issue.node >= 0 && issue.category == "Degenerate triangles" &&
+                    openfbx::UiMouseButtonPressed(MOUSE_BUTTON_RIGHT))
+                {
+                    tab.validationFixNode = issue.node;
+                    tab.validationFixPosition = Vector2{ listBounds.x, ClampFloat(mouse.y, listBounds.y, listBounds.y + listBounds.height - 30.0f) };
+                }
                 if (hovered && issue.node >= 0 && openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT))
                 {
                     SelectNode(tab, issue.node, IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT));
@@ -523,6 +529,22 @@ void DrawValidatorPanel(Font font, ModelTab& tab, HierarchyPanelState& panel, fl
         DrawRectangle(static_cast<int>(trackX), static_cast<int>(listBounds.y), 4, static_cast<int>(listBounds.height), Color{ 44, 49, 55, 255 });
         DrawRectangle(static_cast<int>(trackX - 1.0f), static_cast<int>(thumbY), 6, static_cast<int>(thumbH), Color{ 112, 124, 136, 255 });
     }
+    if (tab.validationFixNode >= 0)
+    {
+        const Rectangle menu{ tab.validationFixPosition.x, tab.validationFixPosition.y, listBounds.width, 28.0f };
+        openfbx::SetUiPointerBlocked(false);
+        if (DrawPanelButton(font, menu, "Fix Degenerate Triangles"))
+        {
+            const int count = FixDegenerateTriangles(tab, tab.validationFixNode);
+            notice = count > 0 ? "Removed " + std::to_string(count) + " degenerate triangle(s)." : "No whole degenerate faces to remove; valid polygons were preserved.";
+            error.clear();
+            tab.validationFixNode = -1;
+        }
+        else if (IsKeyPressed(KEY_ESCAPE) || (openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT) && !CheckCollisionPointRec(mouse, menu)))
+            tab.validationFixNode = -1;
+        openfbx::SetUiPointerBlocked(true);
+    }
+
 }
 
 void DrawSceneStatsPanel(Font font, const ModelTab& tab, float panelX, float panelY, float panelW)

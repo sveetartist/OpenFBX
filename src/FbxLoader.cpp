@@ -416,6 +416,7 @@ void AppendMesh(FbxNode* node, FbxMesh* mesh, MeshBuilder& out)
 
     for (int polygon = 0; polygon < polygonCount; ++polygon)
     {
+        if (sceneNodeIndex >= 0) out.nodes[static_cast<size_t>(sceneNodeIndex)].sourcePolygonTriangleCounts.push_back(0);
         const int polygonSize = mesh->GetPolygonSize(polygon);
         if (polygonSize < 3) continue;
 
@@ -496,6 +497,7 @@ void AppendMesh(FbxNode* node, FbxMesh* mesh, MeshBuilder& out)
         }
 
         std::vector<int> polygonCornerVertices(static_cast<size_t>(polygonSize), -1);
+        if (sceneNodeIndex >= 0) out.nodes[static_cast<size_t>(sceneNodeIndex)].sourcePolygonTriangleCounts.back() = polygonSize - 2;
         for (int fan = 1; fan + 1 < polygonSize; ++fan)
         {
             const int sourceCorners[3] = { 0, fan, fan + 1 };
@@ -2483,6 +2485,49 @@ void ApplyTextureReferencesToScene(FbxScene* scene, const std::vector<FbxTexture
     }
 }
 
+bool ApplyRemovedDegenerateTriangles(const LoadedFbxModel& model,
+                                     const std::vector<bool>& deletedNodes, const std::vector<FbxNode*>& nodes,
+                                     std::string& error)
+{
+    for (int index = 0; index < static_cast<int>(model.nodes.size()); ++index)
+    {
+        const SceneNode& edited = model.nodes[static_cast<size_t>(index)];
+        if (edited.removedTriangleStarts.empty() || IsDeletedModelNode(deletedNodes, index)) continue;
+        FbxNode* node = nodes[static_cast<size_t>(index)];
+        if (!node) continue;
+        int vertex = edited.meshVertexStart;
+        size_t sourcePolygon = 0;
+        for (int attribute = 0; attribute < node->GetNodeAttributeCount(); ++attribute)
+        {
+            auto* source = node->GetNodeAttributeByIndex(attribute);
+            if (!source || source->GetAttributeType() != FbxNodeAttribute::eMesh) continue;
+            auto* mesh = static_cast<FbxMesh*>(source);
+            std::vector<int> removePolygons;
+            for (int polygon = 0; polygon < mesh->GetPolygonCount(); ++polygon, ++sourcePolygon)
+            {
+                const int count = sourcePolygon < edited.sourcePolygonTriangleCounts.size()
+                    ? edited.sourcePolygonTriangleCounts[sourcePolygon] : std::max(0, mesh->GetPolygonSize(polygon) - 2);
+                bool removed = count > 0;
+                for (int triangle = 0; triangle < count; ++triangle)
+                    removed = removed && IsRemovedTriangle(edited, vertex + triangle * 3);
+                if (removed) removePolygons.push_back(polygon);
+                vertex += count * 3;
+            }
+            // Remove in reverse order; FBX updates polygon-associated layer data.
+            // Control points, skin clusters, and surviving polygon topology stay intact.
+            for (auto polygon = removePolygons.rbegin(); polygon != removePolygons.rend(); ++polygon)
+            {
+                if (mesh->RemovePolygon(*polygon) < 0)
+                {
+                    error = "Unable to remove degenerate face from " + edited.name;
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
 bool ApplyEditedModelToScene(FbxScene* scene,
                              const LoadedFbxModel& model,
                              const std::vector<bool>& deletedNodes,
@@ -2505,6 +2550,7 @@ bool ApplyEditedModelToScene(FbxScene* scene,
     ApplyEditedSkinBindMatrices(model, deletedNodes, mappedSceneNodes);
     RebuildEditedBindPose(scene, model, deletedNodes, mappedSceneNodes);
     ApplyEditedMeshGeometry(model, deletedNodes, mappedSceneNodes);
+    if (!ApplyRemovedDegenerateTriangles(model, deletedNodes, mappedSceneNodes, error)) return false;
     ApplyEditedNodeNames(model, deletedNodes, mappedSceneNodes);
     ApplyDeletedNodes(scene, model, deletedNodes, mappedSceneNodes);
     return true;

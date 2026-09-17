@@ -428,7 +428,8 @@ std::vector<int> BuildHiddenMeshNodes(const ModelTab& tab, size_t vertexCount)
 {
     // Resolve ownership once, preserving the first matching mesh for overlapping ranges.
     std::vector<int> hiddenMeshNodes;
-    if (!tab.deletedNodes.empty() || !tab.hiddenNodes.empty() || tab.isolatedNode >= 0)
+    if (!tab.deletedNodes.empty() || !tab.hiddenNodes.empty() || tab.isolatedNode >= 0 ||
+        std::any_of(tab.loaded.nodes.begin(), tab.loaded.nodes.end(), [](const SceneNode& node) { return !node.removedTriangleStarts.empty(); }))
     {
         hiddenMeshNodes.assign(vertexCount, -2);
         for (int nodeIndex = 0; nodeIndex < static_cast<int>(tab.loaded.nodes.size()); ++nodeIndex)
@@ -440,7 +441,7 @@ std::vector<int> BuildHiddenMeshNodes(const ModelTab& tab, size_t vertexCount)
             const int hiddenNode = IsViewportNodeVisible(tab, nodeIndex) ? -1 : nodeIndex;
             for (size_t vertex = start; vertex < end; ++vertex)
             {
-                if (hiddenMeshNodes[vertex] == -2) hiddenMeshNodes[vertex] = hiddenNode;
+                if (hiddenMeshNodes[vertex] == -2) hiddenMeshNodes[vertex] = IsRemovedTriangle(node, static_cast<int>(vertex)) ? nodeIndex : hiddenNode;
             }
         }
     }

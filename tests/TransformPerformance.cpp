@@ -1,4 +1,5 @@
 #include <chrono>
+#include <fbxsdk.h>
 #include <execution>
 #include <stdexcept>
 #include "editor/OpenFbxApp.cpp"
@@ -474,6 +475,77 @@ static void TestUvOverlapSpatialSearch()
     Require(!UvIslandsOverlap(empty, empty, {}), "Empty islands overlap");
 }
 
+static void TestDegenerateTriangleRepair()
+{
+    const auto directory = std::filesystem::temp_directory_path() / ("openfbx-repair-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(directory);
+    const std::string source = (directory / "source.fbx").string();
+    const std::string output = (directory / "fixed.fbx").string();
+    FbxManager* manager = FbxManager::Create();
+    manager->SetIOSettings(FbxIOSettings::Create(manager, IOSROOT));
+    FbxScene* scene = FbxScene::Create(manager, "repair");
+    FbxNode* node = FbxNode::Create(scene, "Mesh");
+    FbxMesh* mesh = FbxMesh::Create(scene, "Mesh");
+    mesh->InitControlPoints(5);
+    mesh->SetControlPointAt(FbxVector4(0, 0, 0), 0);
+    mesh->SetControlPointAt(FbxVector4(100, 0, 0), 1);
+    mesh->SetControlPointAt(FbxVector4(0, 100, 0), 2);
+    mesh->SetControlPointAt(FbxVector4(200, 0, 0), 3);
+    mesh->SetControlPointAt(FbxVector4(100, 100, 0), 4);
+    for (const auto& face : std::vector<std::vector<int>>{ {0,1,2}, {0,1,3}, {0,0,1}, {0,1,4,2}, {0,1,3,1}, {0,1,3,2} })
+    {
+        mesh->BeginPolygon();
+        for (int index : face) mesh->AddPolygon(index);
+        mesh->EndPolygon();
+    }
+    node->SetNodeAttribute(mesh);
+    scene->GetRootNode()->AddChild(node);
+    FbxExporter* exporter = FbxExporter::Create(manager, "export");
+    Require(exporter->Initialize(source.c_str(), -1, manager->GetIOSettings()) && exporter->Export(scene), "Could not write repair fixture");
+    manager->Destroy();
+    SetTraceLogLevel(LOG_WARNING);
+    SetConfigFlags(FLAG_WINDOW_HIDDEN);
+    InitWindow(64, 64, "Repair test");
+    ModelTab tab;
+    std::string error;
+    Require(LoadFbxModel(source, tab.loaded, error), error.c_str());
+    int meshIndex = -1;
+    for (int i = 0; i < static_cast<int>(tab.loaded.nodes.size()); ++i)
+        if (tab.loaded.nodes[static_cast<size_t>(i)].type == SceneNodeType::Mesh) meshIndex = i;
+    Require(meshIndex >= 0 && tab.loaded.nodes[static_cast<size_t>(meshIndex)].degenerateTriangleCount == 5, "Fixture must contain five degenerate display triangles");
+    Require(FixDegenerateTriangles(tab, meshIndex) == 4, "Repair did not remove the whole degenerate faces");
+    Require(tab.loaded.nodes[static_cast<size_t>(meshIndex)].meshTriangleCount == 5, "Repair removed valid geometry");
+    Require(FixDegenerateTriangles(tab, meshIndex) == 0, "Repair is not idempotent");
+    Require(UndoEdit(tab) && tab.loaded.nodes[static_cast<size_t>(meshIndex)].degenerateTriangleCount == 5, "Undo did not restore bad faces");
+    Require(RedoEdit(tab) && tab.loaded.nodes[static_cast<size_t>(meshIndex)].degenerateTriangleCount == 1, "Redo did not restore repair");
+    Require(SaveFbxModelAnimations(source, output, tab.loaded, tab.deletedNodes, error), error.c_str());
+    LoadedFbxModel reopened;
+    Require(LoadFbxModel(output, reopened, error), error.c_str());
+    int triangles = 0;
+    int degenerate = 0;
+    for (const auto& saved : reopened.nodes)
+    {
+        degenerate += saved.degenerateTriangleCount;
+        triangles += saved.meshTriangleCount;
+    }
+    Require(triangles == 5 && degenerate == 1, "Saved repair changed a valid polygon containing a degenerate fan triangle");
+    FbxManager* verifier = FbxManager::Create();
+    verifier->SetIOSettings(FbxIOSettings::Create(verifier, IOSROOT));
+    auto* imported = FbxScene::Create(verifier, "verify topology");
+    auto* importer = FbxImporter::Create(verifier, "import");
+    Require(importer->Initialize(output.c_str(), -1, verifier->GetIOSettings()) && importer->Import(imported), "Cannot inspect saved topology");
+    auto* savedMesh = imported->GetRootNode()->GetChild(0)->GetMesh();
+    Require(savedMesh && savedMesh->GetPolygonCount() == 3, "Wrong saved face count");
+    Require(savedMesh->GetPolygonSize(0) == 3 && savedMesh->GetPolygonSize(1) == 4 && savedMesh->GetPolygonSize(2) == 4,
+            "Repair triangulated surviving quads");
+    Require(savedMesh->GetControlPointsCount() == 5, "Repair changed control points");
+    verifier->Destroy();
+    UnloadFbxModel(reopened);
+    UnloadFbxModel(tab.loaded);
+    CloseWindow();
+    std::filesystem::remove_all(directory);
+}
+
 static int BenchmarkValidation(const char* path)
 {
     SetTraceLogLevel(LOG_WARNING);
@@ -508,6 +580,7 @@ int main(int argc, char** argv)
     {
         if (argc > 2 && std::string(argv[1]) == "--validation") return BenchmarkValidation(argv[2]);
         if (argc > 1) return BenchmarkFbx(argv[1]);
+        TestDegenerateTriangleRepair();
         TestUvOverlapSpatialSearch();
         TestValidationCache();
         TestVisibility();

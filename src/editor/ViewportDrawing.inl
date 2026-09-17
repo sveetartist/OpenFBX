@@ -509,6 +509,7 @@ void BuildViewportUvIslandCache(ModelTab& tab, int uvSetIndex)
         const int end = node.meshVertexStart + node.meshVertexCount;
         for (int vertex = start; vertex + 2 < end; vertex += 3)
         {
+            if (IsRemovedTriangle(node, vertex)) continue;
             if ((vertex + 2) * 3 + 2 >= vertexFloatCount) continue;
 
             ViewportUvIslandTriangle triangle;
@@ -689,6 +690,7 @@ void DrawSkinWeightHeatMap(const ModelTab& tab)
         const int end = std::min(node.meshVertexStart + node.meshVertexCount, static_cast<int>(tab.loaded.skinnedVertices.size()));
         for (int vertex = start; vertex + 2 < end; vertex += 3)
         {
+            if (IsRemovedTriangle(node, vertex)) continue;
             const int vertexIndices[3] = { vertex, vertex + 1, vertex + 2 };
             Vector3 points[3]{};
             Vector3 fallbackNormal{};
