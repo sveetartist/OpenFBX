@@ -93,6 +93,14 @@ Enable **Preferences > Use Colored Checker** to use the supplied labeled texture
 
 In the Validator, expand **Degenerate triangles**, right-click an issue, and choose
 **Fix Degenerate Triangles** to remove the affected mesh's whole zero-area faces.
+Surviving quads/ngons retain their original polygon edges in the viewport and
+their topology, UVs, and material assignments when saved.
+
+To check cleanup and topology preservation on a local model without modifying it:
+
+```powershell
+& build/vs2022/Release/openfbx_transform_tests.exe --repair test_models/hero_maya.fbx
+```
 Valid quads and n-gons are preserved without triangulation. Degenerate display
 triangles within otherwise valid polygons remain flagged. The fix supports
 Undo/Redo and is included when saving the FBX.

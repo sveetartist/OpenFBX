@@ -1,44 +1,45 @@
+template <typename DrawEdge>
+void ForEachMeshNodeWireframeEdge(const LoadedFbxModel& loaded, const SceneNode& node, DrawEdge drawEdge)
+{
+    if (node.meshVertexStart < 0 || node.meshVertexCount < 3) return;
+    const int nodeIndex = static_cast<int>(&node - loaded.nodes.data());
+    const int vertexCount = static_cast<int>(loaded.bindVertices.size() / 3);
+    bool hasSourceEdges = false;
+    for (const MeshEdge& edge : loaded.meshPolygonEdges)
+    {
+        if (edge.node != nodeIndex) continue;
+        if (edge.a < 0 || edge.b < 0 || edge.a >= vertexCount || edge.b >= vertexCount) continue;
+        hasSourceEdges = true;
+        // Repair removes whole source faces. Keep their surviving polygon edges
+        // instead of falling back to the internal display triangle diagonals.
+        if (IsRemovedTriangle(node, edge.a) || IsRemovedTriangle(node, edge.b)) continue;
+        drawEdge(edge.a, edge.b);
+    }
+    // An entirely removed mesh must not fall back to displaying triangle edges.
+    if (hasSourceEdges) return;
+
+    const int end = std::min(node.meshVertexStart + node.meshVertexCount, vertexCount);
+    for (int vertex = node.meshVertexStart; vertex + 2 < end; vertex += 3)
+    {
+        if (IsRemovedTriangle(node, vertex)) continue;
+        drawEdge(vertex, vertex + 1);
+        drawEdge(vertex + 1, vertex + 2);
+        drawEdge(vertex + 2, vertex);
+    }
+}
+
 void DrawMeshNodeWireframe(const ModelTab& tab, const SceneNode& node, Color color)
 {
     const float* vertices = GetCurrentMeshVertices(tab);
-    if (!vertices || node.meshVertexStart < 0 || node.meshVertexCount < 3) return;
-    const int nodeIndex = static_cast<int>(&node - tab.loaded.nodes.data());
-
-    if (nodeIndex >= 0 && nodeIndex < static_cast<int>(tab.loaded.nodes.size()) && !tab.loaded.meshPolygonEdges.empty() && node.removedTriangleStarts.empty())
+    if (!vertices) return;
+    ForEachMeshNodeWireframeEdge(tab.loaded, node, [&](int a, int b)
     {
-        const int vertexCount = static_cast<int>(tab.loaded.bindVertices.size() / 3);
-        bool drewSourceEdges = false;
-        for (const MeshEdge& edge : tab.loaded.meshPolygonEdges)
-        {
-            if (edge.node != nodeIndex) continue;
-            if (edge.a < 0 || edge.b < 0 || edge.a >= vertexCount || edge.b >= vertexCount) continue;
-
-            const int i0 = edge.a * 3;
-            const int i1 = edge.b * 3;
-            const Vector3 p0{ vertices[i0], vertices[i0 + 1], vertices[i0 + 2] };
-            const Vector3 p1{ vertices[i1], vertices[i1 + 1], vertices[i1 + 2] };
-            DrawLine3D(p0, p1, color);
-            drewSourceEdges = true;
-        }
-
-        if (drewSourceEdges) return;
-    }
-
-    const int start = node.meshVertexStart;
-    const int end = node.meshVertexStart + node.meshVertexCount;
-    for (int vertex = start; vertex + 2 < end; vertex += 3)
-    {
-        if (IsRemovedTriangle(node, vertex)) continue;
-        const int i0 = vertex * 3;
-        const int i1 = (vertex + 1) * 3;
-        const int i2 = (vertex + 2) * 3;
+        const int i0 = a * 3;
+        const int i1 = b * 3;
         const Vector3 p0{ vertices[i0], vertices[i0 + 1], vertices[i0 + 2] };
         const Vector3 p1{ vertices[i1], vertices[i1 + 1], vertices[i1 + 2] };
-        const Vector3 p2{ vertices[i2], vertices[i2 + 1], vertices[i2 + 2] };
         DrawLine3D(p0, p1, color);
-        DrawLine3D(p1, p2, color);
-        DrawLine3D(p2, p0, color);
-    }
+    });
 }
 
 void DrawVisibleMeshWireframe(const ModelTab& tab, Color color)

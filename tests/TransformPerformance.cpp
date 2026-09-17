@@ -1,6 +1,7 @@
 #include <chrono>
 #include <fbxsdk.h>
 #include <execution>
+#include <functional>
 #include <stdexcept>
 #include "editor/OpenFbxApp.cpp"
 
@@ -492,10 +493,27 @@ static void TestDegenerateTriangleRepair()
     mesh->SetControlPointAt(FbxVector4(0, 100, 0), 2);
     mesh->SetControlPointAt(FbxVector4(200, 0, 0), 3);
     mesh->SetControlPointAt(FbxVector4(100, 100, 0), 4);
-    for (const auto& face : std::vector<std::vector<int>>{ {0,1,2}, {0,1,3}, {0,0,1}, {0,1,4,2}, {0,1,3,1}, {0,1,3,2} })
+    const std::vector<std::vector<int>> faces{
+        {0,1,2}, {0,1,3}, {0,0,1}, {0,1,4,2}, {0,1,3,1}, {0,1,3,2},
+        {0,1,3,1,0}, {0,1,3,4,2}
+    };
+    node->AddMaterial(FbxSurfacePhong::Create(scene, "First"));
+    node->AddMaterial(FbxSurfacePhong::Create(scene, "Second"));
+    auto* materials = mesh->CreateElementMaterial();
+    materials->SetMappingMode(FbxLayerElement::eByPolygon);
+    materials->SetReferenceMode(FbxLayerElement::eIndexToDirect);
+    auto* uvs = mesh->CreateElementUV("RepairUV");
+    uvs->SetMappingMode(FbxLayerElement::eByPolygonVertex);
+    uvs->SetReferenceMode(FbxLayerElement::eIndexToDirect);
+    for (int polygon = 0; polygon < static_cast<int>(faces.size()); ++polygon)
     {
-        mesh->BeginPolygon();
-        for (int index : face) mesh->AddPolygon(index);
+        mesh->BeginPolygon(polygon % 2);
+        for (int corner = 0; corner < static_cast<int>(faces[polygon].size()); ++corner)
+        {
+            const int uvIndex = uvs->GetDirectArray().GetCount();
+            uvs->GetDirectArray().Add(FbxVector2(polygon * 0.1, corner * 0.1));
+            mesh->AddPolygon(faces[polygon][corner], uvIndex);
+        }
         mesh->EndPolygon();
     }
     node->SetNodeAttribute(mesh);
@@ -512,12 +530,27 @@ static void TestDegenerateTriangleRepair()
     int meshIndex = -1;
     for (int i = 0; i < static_cast<int>(tab.loaded.nodes.size()); ++i)
         if (tab.loaded.nodes[static_cast<size_t>(i)].type == SceneNodeType::Mesh) meshIndex = i;
-    Require(meshIndex >= 0 && tab.loaded.nodes[static_cast<size_t>(meshIndex)].degenerateTriangleCount == 5, "Fixture must contain five degenerate display triangles");
-    Require(FixDegenerateTriangles(tab, meshIndex) == 4, "Repair did not remove the whole degenerate faces");
-    Require(tab.loaded.nodes[static_cast<size_t>(meshIndex)].meshTriangleCount == 5, "Repair removed valid geometry");
+    Require(meshIndex >= 0 && tab.loaded.nodes[static_cast<size_t>(meshIndex)].degenerateTriangleCount == 9, "Fixture must include degenerate faces and valid polygons with collinear fan corners");
+    Require(FixDegenerateTriangles(tab, meshIndex) == 7, "Repair did not remove the whole degenerate faces");
+    Require(tab.loaded.nodes[static_cast<size_t>(meshIndex)].meshTriangleCount == 8, "Repair removed valid geometry");
+    auto checkWireframe = [&](int expectedEdges)
+    {
+        int edges = 0;
+        ForEachMeshNodeWireframeEdge(tab.loaded, tab.loaded.nodes[static_cast<size_t>(meshIndex)], [&](int a, int b)
+        {
+            ++edges;
+            Require(std::any_of(tab.loaded.meshPolygonEdges.begin(), tab.loaded.meshPolygonEdges.end(),
+                [&](const MeshEdge& edge) { return edge.node == meshIndex && edge.a == a && edge.b == b; }),
+                "Repair introduced a triangulation diagonal into the wireframe");
+        });
+        Require(edges == expectedEdges, "Wireframe has missing or removed polygon edges");
+    };
+    checkWireframe(16);
     Require(FixDegenerateTriangles(tab, meshIndex) == 0, "Repair is not idempotent");
-    Require(UndoEdit(tab) && tab.loaded.nodes[static_cast<size_t>(meshIndex)].degenerateTriangleCount == 5, "Undo did not restore bad faces");
-    Require(RedoEdit(tab) && tab.loaded.nodes[static_cast<size_t>(meshIndex)].degenerateTriangleCount == 1, "Redo did not restore repair");
+    Require(UndoEdit(tab) && tab.loaded.nodes[static_cast<size_t>(meshIndex)].degenerateTriangleCount == 9, "Undo did not restore bad faces");
+    checkWireframe(31);
+    Require(RedoEdit(tab) && tab.loaded.nodes[static_cast<size_t>(meshIndex)].degenerateTriangleCount == 2, "Redo did not restore repair");
+    checkWireframe(16);
     Require(SaveFbxModelAnimations(source, output, tab.loaded, tab.deletedNodes, error), error.c_str());
     LoadedFbxModel reopened;
     Require(LoadFbxModel(output, reopened, error), error.c_str());
@@ -528,22 +561,147 @@ static void TestDegenerateTriangleRepair()
         degenerate += saved.degenerateTriangleCount;
         triangles += saved.meshTriangleCount;
     }
-    Require(triangles == 5 && degenerate == 1, "Saved repair changed a valid polygon containing a degenerate fan triangle");
+    Require(triangles == 8 && degenerate == 2, "Saved repair changed a valid polygon containing a degenerate fan triangle");
     FbxManager* verifier = FbxManager::Create();
     verifier->SetIOSettings(FbxIOSettings::Create(verifier, IOSROOT));
     auto* imported = FbxScene::Create(verifier, "verify topology");
     auto* importer = FbxImporter::Create(verifier, "import");
     Require(importer->Initialize(output.c_str(), -1, verifier->GetIOSettings()) && importer->Import(imported), "Cannot inspect saved topology");
     auto* savedMesh = imported->GetRootNode()->GetChild(0)->GetMesh();
-    Require(savedMesh && savedMesh->GetPolygonCount() == 3, "Wrong saved face count");
-    Require(savedMesh->GetPolygonSize(0) == 3 && savedMesh->GetPolygonSize(1) == 4 && savedMesh->GetPolygonSize(2) == 4,
-            "Repair triangulated surviving quads");
+    Require(savedMesh && savedMesh->GetPolygonCount() == 4, "Wrong saved face count");
+    const int survivingPolygons[] = { 0, 3, 5, 7 };
+    for (int polygon = 0; polygon < 4; ++polygon)
+    {
+        const int sourcePolygon = survivingPolygons[polygon];
+        const auto& face = faces[sourcePolygon];
+        Require(savedMesh->GetPolygonSize(polygon) == static_cast<int>(face.size()), "Repair triangulated a surviving quad/ngon");
+        Require(savedMesh->GetElementMaterial()->GetIndexArray().GetAt(polygon) == sourcePolygon % 2, "Repair changed material assignment");
+        for (int corner = 0; corner < static_cast<int>(face.size()); ++corner)
+        {
+            Require(savedMesh->GetPolygonVertex(polygon, corner) == face[corner], "Repair changed polygon corners or winding");
+            FbxVector2 uv;
+            bool unmapped = false;
+            Require(savedMesh->GetPolygonVertexUV(polygon, corner, "RepairUV", uv, unmapped) && !unmapped, "Repair lost polygon UVs");
+            Require(std::fabs(uv[0] - sourcePolygon * 0.1) < 0.000001 && std::fabs(uv[1] - corner * 0.1) < 0.000001, "Repair changed polygon UVs");
+        }
+    }
     Require(savedMesh->GetControlPointsCount() == 5, "Repair changed control points");
+    auto& repairedNode = tab.loaded.nodes[static_cast<size_t>(meshIndex)];
+    for (int vertex = repairedNode.meshVertexStart; vertex < repairedNode.meshVertexStart + repairedNode.meshVertexCount; vertex += 3)
+        repairedNode.removedTriangleStarts.push_back(vertex);
+    std::sort(repairedNode.removedTriangleStarts.begin(), repairedNode.removedTriangleStarts.end());
+    checkWireframe(0);
     verifier->Destroy();
     UnloadFbxModel(reopened);
     UnloadFbxModel(tab.loaded);
     CloseWindow();
     std::filesystem::remove_all(directory);
+}
+
+// Optional real-model regression: --repair <fbx>. Writes only to a temporary folder.
+static int TestModelRepair(const char* path)
+{
+    struct Topology
+    {
+        int controlPoints = 0;
+        std::vector<std::vector<int>> polygons;
+    };
+    auto readTopology = [](const std::string& file)
+    {
+        std::unordered_map<std::string, Topology> result;
+        auto* manager = FbxManager::Create();
+        manager->SetIOSettings(FbxIOSettings::Create(manager, IOSROOT));
+        manager->GetIOSettings()->SetBoolProp(IMP_FBX_EXTRACT_EMBEDDED_DATA, false);
+        auto* scene = FbxScene::Create(manager, "topology");
+        auto* importer = FbxImporter::Create(manager, "import");
+        Require(importer->Initialize(file.c_str(), -1, manager->GetIOSettings()) && importer->Import(scene), "Cannot inspect model topology");
+        std::function<void(FbxNode*, std::string)> visit = [&](FbxNode* node, std::string key)
+        {
+            key += "/" + std::string(node->GetName());
+            for (int attribute = 0; attribute < node->GetNodeAttributeCount(); ++attribute)
+            {
+                auto* source = node->GetNodeAttributeByIndex(attribute);
+                if (!source || source->GetAttributeType() != FbxNodeAttribute::eMesh) continue;
+                auto* mesh = static_cast<FbxMesh*>(source);
+                auto& topology = result[key + ":" + std::to_string(attribute)];
+                topology.controlPoints = mesh->GetControlPointsCount();
+                for (int polygon = 0; polygon < mesh->GetPolygonCount(); ++polygon)
+                {
+                    std::vector<int> corners;
+                    for (int corner = 0; corner < mesh->GetPolygonSize(polygon); ++corner)
+                        corners.push_back(mesh->GetPolygonVertex(polygon, corner));
+                    topology.polygons.push_back(std::move(corners));
+                }
+            }
+            for (int child = 0; child < node->GetChildCount(); ++child)
+                visit(node->GetChild(child), key);
+        };
+        for (int child = 0; child < scene->GetRootNode()->GetChildCount(); ++child)
+            visit(scene->GetRootNode()->GetChild(child), "");
+        manager->Destroy();
+        return result;
+    };
+    const auto before = readTopology(path);
+    SetTraceLogLevel(LOG_WARNING);
+    SetConfigFlags(FLAG_WINDOW_HIDDEN);
+    InitWindow(64, 64, "Model repair test");
+    ModelTab tab;
+    std::string error;
+    Require(LoadFbxModel(path, tab.loaded, error), error.c_str());
+    int removedTriangles = 0;
+    int removedFaces = 0;
+    for (int index = 0; index < static_cast<int>(tab.loaded.nodes.size()); ++index)
+    {
+        const auto& node = tab.loaded.nodes[index];
+        if (node.type != SceneNodeType::Mesh) continue;
+        const int polygonsBefore = node.meshPolygonCount;
+        removedTriangles += FixDegenerateTriangles(tab, index);
+        removedFaces += polygonsBefore - node.meshPolygonCount;
+        std::vector<std::pair<int, int>> expectedEdges;
+        for (const auto& edge : tab.loaded.meshPolygonEdges)
+            if (edge.node == index && !IsRemovedTriangle(node, edge.a) && !IsRemovedTriangle(node, edge.b))
+                expectedEdges.emplace_back(edge.a, edge.b);
+        std::vector<std::pair<int, int>> displayedEdges;
+        ForEachMeshNodeWireframeEdge(tab.loaded, node, [&](int a, int b) { displayedEdges.emplace_back(a, b); });
+        Require(displayedEdges == expectedEdges, "Cleanup triangulated the model wireframe");
+    }
+    const auto directory = std::filesystem::temp_directory_path() / ("openfbx-model-repair-" + std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(directory);
+    const std::string output = (directory / "fixed.fbx").string();
+    Require(SaveFbxModelAnimations(path, output, tab.loaded, tab.deletedNodes, error), error.c_str());
+    const auto after = readTopology(output);
+    Require(before.size() == after.size(), "Repair changed the mesh count");
+    int savedRemovedFaces = 0;
+    int savedRemovedTriangles = 0;
+    int quads = 0;
+    int ngons = 0;
+    for (const auto& entry : before)
+    {
+        const auto found = after.find(entry.first);
+        Require(found != after.end(), "Repair lost a mesh");
+        const auto& original = entry.second;
+        const auto& saved = found->second;
+        Require(original.controlPoints == saved.controlPoints, "Repair changed control points");
+        size_t cursor = 0;
+        for (const auto& polygon : saved.polygons)
+        {
+            while (cursor < original.polygons.size() && original.polygons[cursor] != polygon) ++cursor;
+            Require(cursor < original.polygons.size(), "Repair changed surviving polygon topology or winding");
+            ++cursor;
+            quads += polygon.size() == 4;
+            ngons += polygon.size() > 4;
+        }
+        savedRemovedFaces += static_cast<int>(original.polygons.size()) - static_cast<int>(saved.polygons.size());
+        for (const auto& polygon : original.polygons) savedRemovedTriangles += std::max(0, static_cast<int>(polygon.size()) - 2);
+        for (const auto& polygon : saved.polygons) savedRemovedTriangles -= std::max(0, static_cast<int>(polygon.size()) - 2);
+    }
+    Require(savedRemovedFaces == removedFaces && savedRemovedTriangles == removedTriangles, "Saved repair removed the wrong geometry");
+    std::cout << "PASS repair " << path << ": removed " << removedFaces << " faces (" << removedTriangles
+              << " display triangles); preserved " << quads << " quads and " << ngons << " ngons, polygon corners, and wireframe edges\n";
+    UnloadFbxModel(tab.loaded);
+    CloseWindow();
+    std::filesystem::remove_all(directory);
+    return 0;
 }
 
 static int BenchmarkValidation(const char* path)
@@ -578,6 +736,7 @@ int main(int argc, char** argv)
 {
     try
     {
+        if (argc > 2 && std::string(argv[1]) == "--repair") return TestModelRepair(argv[2]);
         if (argc > 2 && std::string(argv[1]) == "--validation") return BenchmarkValidation(argv[2]);
         if (argc > 1) return BenchmarkFbx(argv[1]);
         TestDegenerateTriangleRepair();
