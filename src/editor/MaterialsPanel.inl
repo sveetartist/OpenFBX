@@ -667,7 +667,7 @@ void DrawValidatorPanel(Font font, ModelTab& tab, HierarchyPanelState& panel, fl
         else if (DrawPanelButton(font, menu, "Fix Degenerate Triangles"))
         {
             const int count = FixDegenerateTriangles(tab, tab.validationFixNode);
-            notice = count > 0 ? "Removed " + std::to_string(count) + " degenerate triangle(s)." : "No whole degenerate faces to remove; valid polygons were preserved.";
+            notice = count > 0 ? "Removed " + std::to_string(count) + " degenerate triangle(s)." : "No degenerate triangles to remove.";
             error.clear();
             tab.validationFixNode = -1;
         }

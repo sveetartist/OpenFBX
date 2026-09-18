@@ -1005,20 +1005,24 @@ int FixDegenerateTriangles(ModelTab& tab, int nodeIndex)
     int removedFaces = 0;
     for (int count : polygonCounts)
     {
-        bool degenerateFace = count > 0 && vertex + count * 3 <= end;
-        for (int triangle = 0; triangle < count && degenerateFace; ++triangle)
+        int surviving = 0;
+        int newlyRemoved = 0;
+        int previouslyRemoved = 0;
+        for (int triangle = 0; triangle < count && vertex + triangle * 3 + 2 < end; ++triangle)
         {
             const int triangleStart = vertex + triangle * 3;
-            if (IsRemovedTriangle(node, triangleStart)) { degenerateFace = false; break; }
+            if (IsRemovedTriangle(node, triangleStart)) { ++previouslyRemoved; continue; }
             const float* data = tab.loaded.bindVertices.data() + triangleStart * 3;
             const Vector3 a{ data[0], data[1], data[2] }, b{ data[3], data[4], data[5] }, c{ data[6], data[7], data[8] };
-            degenerateFace = Vector3LengthSqr(Vector3CrossProduct(Vector3Subtract(b, a), Vector3Subtract(c, a))) <= 0.000000000001f;
+            if (Vector3LengthSqr(Vector3CrossProduct(Vector3Subtract(b, a), Vector3Subtract(c, a))) <= 0.000000000001f)
+            {
+                removed.push_back(triangleStart);
+                ++newlyRemoved;
+            }
+            else ++surviving;
         }
-        if (degenerateFace)
-        {
-            for (int triangle = 0; triangle < count; ++triangle) removed.push_back(vertex + triangle * 3);
-            ++removedFaces;
-        }
+        // A partially repaired polygon exports as its surviving fan triangles.
+        if (newlyRemoved > 0) removedFaces += previouslyRemoved > 0 ? newlyRemoved : 1 - surviving;
         vertex += count * 3;
     }
     if (removed.empty()) return 0;

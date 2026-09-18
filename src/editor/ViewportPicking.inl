@@ -4,19 +4,40 @@ void ForEachMeshNodeWireframeEdge(const LoadedFbxModel& loaded, const SceneNode&
     if (node.meshVertexStart < 0 || node.meshVertexCount < 3) return;
     const int nodeIndex = static_cast<int>(&node - loaded.nodes.data());
     const int vertexCount = static_cast<int>(loaded.bindVertices.size() / 3);
+    std::vector<std::pair<int, int>> repairedPolygons;
+    int polygonStart = node.meshVertexStart;
+    if (!node.removedTriangleStarts.empty()) for (int count : node.sourcePolygonTriangleCounts)
+    {
+        int removed = 0;
+        for (int triangle = 0; triangle < count; ++triangle)
+            if (IsRemovedTriangle(node, polygonStart + triangle * 3)) ++removed;
+        if (removed > 0 && removed < count)
+        {
+            repairedPolygons.emplace_back(polygonStart, polygonStart + count * 3);
+            for (int vertex = polygonStart; vertex + 2 < polygonStart + count * 3 && vertex + 2 < vertexCount; vertex += 3)
+            {
+                if (IsRemovedTriangle(node, vertex)) continue;
+                drawEdge(vertex, vertex + 1);
+                drawEdge(vertex + 1, vertex + 2);
+                drawEdge(vertex + 2, vertex);
+            }
+        }
+        polygonStart += count * 3;
+    }
     bool hasSourceEdges = false;
     for (const MeshEdge& edge : loaded.meshPolygonEdges)
     {
         if (edge.node != nodeIndex) continue;
         if (edge.a < 0 || edge.b < 0 || edge.a >= vertexCount || edge.b >= vertexCount) continue;
         hasSourceEdges = true;
-        // Repair removes whole source faces. Keep their surviving polygon edges
-        // instead of falling back to the internal display triangle diagonals.
+        // Partially repaired polygons use the surviving triangles drawn above.
+        if (std::any_of(repairedPolygons.begin(), repairedPolygons.end(), [&](const auto& range)
+            { return edge.a >= range.first && edge.a < range.second; })) continue;
         if (IsRemovedTriangle(node, edge.a) || IsRemovedTriangle(node, edge.b)) continue;
         drawEdge(edge.a, edge.b);
     }
     // An entirely removed mesh must not fall back to displaying triangle edges.
-    if (hasSourceEdges) return;
+    if (hasSourceEdges || !repairedPolygons.empty()) return;
 
     const int end = std::min(node.meshVertexStart + node.meshVertexCount, vertexCount);
     for (int vertex = node.meshVertexStart; vertex + 2 < end; vertex += 3)

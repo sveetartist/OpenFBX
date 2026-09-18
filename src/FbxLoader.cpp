@@ -2485,6 +2485,106 @@ void ApplyTextureReferencesToScene(FbxScene* scene, const std::vector<FbxTexture
     }
 }
 
+template <typename T>
+void RemapRepairArray(FbxLayerElementArrayTemplate<T>& destination,
+                     const FbxLayerElementArrayTemplate<T>& source, const std::vector<int>& mapping)
+{
+    destination.Clear();
+    for (int index : mapping)
+        destination.Add(index >= 0 && index < source.GetCount() ? source.GetAt(index) : T{});
+}
+
+template <typename Element>
+void RemapRepairElement(Element* destination, const Element* source,
+                        const std::vector<int>& polygons, const std::vector<int>& corners,
+                        const std::vector<int>& edges)
+{
+    const auto mode = source->GetMappingMode();
+    const auto* mapping = mode == FbxLayerElement::eByPolygon ? &polygons
+        : mode == FbxLayerElement::eByPolygonVertex ? &corners
+        : mode == FbxLayerElement::eByEdge ? &edges : nullptr;
+    if (!mapping) return;
+    if (source->GetReferenceMode() == FbxLayerElement::eDirect)
+        RemapRepairArray(destination->GetDirectArray(), source->GetDirectArray(), *mapping);
+    else
+        RemapRepairArray(destination->GetIndexArray(), source->GetIndexArray(), *mapping);
+}
+
+// Rebuild only meshes with partially removed polygons. Keep untouched polygons
+// intact, and retain control points/deformers so skinning and blend shapes survive.
+bool RebuildPartiallyRepairedMesh(FbxMesh* mesh, const std::vector<std::vector<int>>& faces,
+                                 const std::vector<int>& polygons, const std::vector<int>& corners)
+{
+    auto* original = static_cast<FbxMesh*>(mesh->Clone(FbxObject::eDeepClone));
+    if (!original) return false;
+    const auto cleanup = std::unique_ptr<FbxMesh, std::function<void(FbxMesh*)>>(
+        original, [](FbxMesh* value) { value->Destroy(); });
+    for (int polygon = mesh->GetPolygonCount() - 1; polygon >= 0; --polygon)
+        if (mesh->RemovePolygon(polygon) < 0) return false;
+    for (const auto& face : faces)
+    {
+        mesh->BeginPolygon(-1, -1, -1, false);
+        for (int point : face) mesh->AddPolygon(point);
+        mesh->EndPolygon();
+    }
+    mesh->BuildMeshEdgeArray();
+    std::vector<int> edges;
+    for (int edge = 0; edge < mesh->GetMeshEdgeCount(); ++edge)
+    {
+        int a, b;
+        bool reversed = false;
+        mesh->GetMeshEdgeVertices(edge, a, b);
+        edges.push_back(original->GetMeshEdgeIndex(a, b, reversed));
+    }
+#define REMAP_REPAIR_ELEMENT(Type) \
+    for (int i = 0; i < mesh->GetElement##Type##Count(); ++i) \
+        RemapRepairElement(mesh->GetElement##Type(i), original->GetElement##Type(i), polygons, corners, edges)
+    REMAP_REPAIR_ELEMENT(Normal);
+    REMAP_REPAIR_ELEMENT(Tangent);
+    REMAP_REPAIR_ELEMENT(Binormal);
+    REMAP_REPAIR_ELEMENT(UV);
+    for (int i = 0; i < mesh->GetElementMaterialCount(); ++i)
+        if (original->GetElementMaterial(i)->GetMappingMode() == FbxLayerElement::eByPolygon)
+            RemapRepairArray(mesh->GetElementMaterial(i)->GetIndexArray(), original->GetElementMaterial(i)->GetIndexArray(), polygons);
+    REMAP_REPAIR_ELEMENT(VertexColor);
+    REMAP_REPAIR_ELEMENT(PolygonGroup);
+    REMAP_REPAIR_ELEMENT(Smoothing);
+    REMAP_REPAIR_ELEMENT(VertexCrease);
+    REMAP_REPAIR_ELEMENT(EdgeCrease);
+    REMAP_REPAIR_ELEMENT(Hole);
+    REMAP_REPAIR_ELEMENT(Visibility);
+#undef REMAP_REPAIR_ELEMENT
+    for (int i = 0; i < mesh->GetElementUserDataCount(); ++i)
+    {
+        auto* destination = mesh->GetElementUserData(i);
+        const auto* source = original->GetElementUserData(i);
+        const auto mode = source->GetMappingMode();
+        const auto* mapping = mode == FbxLayerElement::eByPolygon ? &polygons
+            : mode == FbxLayerElement::eByPolygonVertex ? &corners
+            : mode == FbxLayerElement::eByEdge ? &edges : nullptr;
+        if (!mapping) continue;
+        if (source->GetReferenceMode() != FbxLayerElement::eDirect)
+        {
+            RemapRepairArray(destination->GetIndexArray(), source->GetIndexArray(), *mapping);
+            continue;
+        }
+        for (int channel = 0; channel < source->GetDirectArrayCount(); ++channel)
+        {
+#define REMAP_REPAIR_USER(Type) RemapRepairArray(FbxGetDirectArray<Type>(destination, channel), FbxGetDirectArray<Type>(source, channel), *mapping)
+            switch (source->GetDataType(channel).GetType())
+            {
+            case eFbxBool: REMAP_REPAIR_USER(bool); break;
+            case eFbxInt: REMAP_REPAIR_USER(int); break;
+            case eFbxFloat: REMAP_REPAIR_USER(float); break;
+            case eFbxDouble: REMAP_REPAIR_USER(double); break;
+            default: return false;
+            }
+#undef REMAP_REPAIR_USER
+        }
+    }
+    return true;
+}
+
 bool ApplyRemovedDegenerateTriangles(const LoadedFbxModel& model,
                                      const std::vector<bool>& deletedNodes, const std::vector<FbxNode*>& nodes,
                                      std::string& error)
@@ -2503,15 +2603,50 @@ bool ApplyRemovedDegenerateTriangles(const LoadedFbxModel& model,
             if (!source || source->GetAttributeType() != FbxNodeAttribute::eMesh) continue;
             auto* mesh = static_cast<FbxMesh*>(source);
             std::vector<int> removePolygons;
+            std::vector<std::vector<int>> faces;
+            std::vector<int> polygons, corners;
+            bool partialRepair = false;
             for (int polygon = 0; polygon < mesh->GetPolygonCount(); ++polygon, ++sourcePolygon)
             {
                 const int count = sourcePolygon < edited.sourcePolygonTriangleCounts.size()
                     ? edited.sourcePolygonTriangleCounts[sourcePolygon] : std::max(0, mesh->GetPolygonSize(polygon) - 2);
-                bool removed = count > 0;
+                int removed = 0;
                 for (int triangle = 0; triangle < count; ++triangle)
-                    removed = removed && IsRemovedTriangle(edited, vertex + triangle * 3);
-                if (removed) removePolygons.push_back(polygon);
+                    if (IsRemovedTriangle(edited, vertex + triangle * 3)) ++removed;
+                auto appendFace = [&](const std::vector<int>& sourceCorners)
+                {
+                    faces.emplace_back();
+                    polygons.push_back(polygon);
+                    for (int corner : sourceCorners)
+                    {
+                        faces.back().push_back(mesh->GetPolygonVertex(polygon, corner));
+                        corners.push_back(mesh->GetPolygonVertexIndex(polygon) + corner);
+                    }
+                };
+                if (removed > 0 && removed == count) removePolygons.push_back(polygon);
+                else if (removed > 0)
+                {
+                    partialRepair = true;
+                    for (int triangle = 0; triangle < count; ++triangle)
+                        if (!IsRemovedTriangle(edited, vertex + triangle * 3))
+                            appendFace({0, triangle + 1, triangle + 2});
+                }
+                else
+                {
+                    std::vector<int> sourceCorners;
+                    for (int corner = 0; corner < mesh->GetPolygonSize(polygon); ++corner) sourceCorners.push_back(corner);
+                    appendFace(sourceCorners);
+                }
                 vertex += count * 3;
+            }
+            if (partialRepair)
+            {
+                if (!RebuildPartiallyRepairedMesh(mesh, faces, polygons, corners))
+                {
+                    error = "Unable to rebuild partially repaired faces in " + edited.name;
+                    return false;
+                }
+                continue;
             }
             // Remove in reverse order; FBX updates polygon-associated layer data.
             // Control points, skin clusters, and surviving polygon topology stay intact.
