@@ -24,6 +24,7 @@ set(OPENFBX_SOURCES
     src/editor/UvPanel.inl
     src/editor/HierarchyPanel.inl
     src/editor/MenuTabsTimeline.inl
+    src/editor/LogPanel.inl
     src/editor/OpenFbxAppMain.inl
     src/core/MathUtils.cpp
     src/core/MathUtils.h

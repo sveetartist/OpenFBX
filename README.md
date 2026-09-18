@@ -104,3 +104,11 @@ To check cleanup and topology preservation on a local model without modifying it
 Valid quads and n-gons are preserved without triangulation. Degenerate display
 triangles within otherwise valid polygons remain flagged. The fix supports
 Undo/Redo and is included when saving the FBX.
+
+## Message log
+
+The **Log** panel below the animation timeline starts collapsed and keeps the
+latest 500 notices and errors. Scroll with the mouse wheel or drag its scrollbar; **Latest** resumes
+following new messages. **Copy** copies the history and **Clear** empties it.
+Collapse the panel with its arrow to leave only the latest message visible.
+Long messages wrap in the expanded panel.

@@ -520,12 +520,12 @@ void UpdateAnimation(AnimationState& animation, const LoadedFbxModel& loaded)
     }
 }
 
-void DrawTimeline(Font font, ModelTab& tab, RenameEditor& renameEditor, bool& collapsed)
+void DrawTimeline(Font font, ModelTab& tab, RenameEditor& renameEditor, bool& collapsed, float bottomOffset)
 {
     LoadedFbxModel& loaded = tab.loaded;
     AnimationState& animation = tab.animation;
     const int width = GetScreenWidth();
-    const int height = GetScreenHeight();
+    const int height = GetScreenHeight() - static_cast<int>(bottomOffset);
     const float panelHeight = collapsed ? kTimelineCollapsedHeight : kTimelinePanelHeight;
     const float panelY = static_cast<float>(height) - panelHeight;
     const float listWidth = 300.0f;

@@ -25,6 +25,7 @@ int RunOpenFbxApp(int argc, char** argv)
     VisibilityState visibility;
     std::string error;
     std::string notice;
+    LogPanelState logPanel;
     bool quitRequested = false;
     bool animationPanelCollapsed = false;
     bool compareResultVisible = false;
@@ -86,6 +87,7 @@ int RunOpenFbxApp(int argc, char** argv)
         {
             error = loadError;
             notice.clear();
+            CollectLogMessages(logPanel, notice, error);
             return;
         }
         const bool converted = path != sourcePath;
@@ -95,6 +97,7 @@ int RunOpenFbxApp(int argc, char** argv)
             error = loadError;
             notice.clear();
             std::cerr << error << "\n";
+            CollectLogMessages(logPanel, notice, error);
             return;
         }
 
@@ -109,8 +112,9 @@ int RunOpenFbxApp(int argc, char** argv)
         error = textureLoadError;
         notice = importedTextureCount > 0
             ? "Loaded " + std::to_string(importedTextureCount) + " FBX texture" + (importedTextureCount == 1 ? "." : "s.")
-            : "";
+            : "Loaded FBX: " + path;
         if (converted) notice = "Converted to FBX: " + path + (notice.empty() ? "" : ". " + notice);
+        CollectLogMessages(logPanel, notice, error);
     };
 
     auto restorePbrMaterialState = [&](ModelTab& tab,
@@ -241,10 +245,12 @@ int RunOpenFbxApp(int argc, char** argv)
     for (int i = 1; i < argc; ++i)
     {
         openPathInNewTab(argv[i]);
+        CollectLogMessages(logPanel, notice, error);
     }
 
     while (!WindowShouldClose() && !quitRequested)
     {
+        CollectLogMessages(logPanel, notice, error);
         // Use raw input here: capture remains active through the release frame,
         // even when a menu action or an outside click closes the popup.
         bool pointerGestureActive = false;
@@ -303,7 +309,7 @@ int RunOpenFbxApp(int argc, char** argv)
         {
             redoRequested = true;
         }
-        gBottomPanelReservedHeight = animationPanelCollapsed ? kTimelineCollapsedHeight : kTimelinePanelHeight;
+        gBottomPanelReservedHeight = (animationPanelCollapsed ? kTimelineCollapsedHeight : kTimelinePanelHeight) + GetLogPanelHeight(logPanel);
         const Vector2 mouse = GetMousePosition();
         std::vector<std::string> droppedPaths;
         bool droppedTextureHandled = false;
@@ -332,10 +338,11 @@ int RunOpenFbxApp(int argc, char** argv)
                                      !modalOpen &&
                                      !hierarchyPanel.resizing &&
                                      !hierarchyPanel.scrollDragging &&
+                                     !logPanel.dragging &&
                                      !mouseOverHierarchyContextMenu;
 
         const bool transformInfoConsumedMouse = !modalOpen && !renameEditor.active && UpdateSelectedInfoPanelInput(active, transformValueEditor, editPivotMode, notice, error);
-        const bool toolbarConsumedMouse = !modalOpen && !renameEditor.active && !transformValueEditor.active && UpdateTransformToolbarInput(transformTool, gizmoOrientation, editPivotMode, hierarchyBlockW);
+        const bool toolbarConsumedMouse = mouse.y < static_cast<float>(GetScreenHeight()) - gBottomPanelReservedHeight && !logPanel.dragging && !modalOpen && !renameEditor.active && !transformValueEditor.active && UpdateTransformToolbarInput(transformTool, gizmoOrientation, editPivotMode, hierarchyBlockW);
         if (!modalOpen && !renameEditor.active && !transformValueEditor.active && !controlDown && !altDown)
         {
             if (IsKeyPressed(KEY_Q))
@@ -692,25 +699,16 @@ int RunOpenFbxApp(int argc, char** argv)
             DrawUiText(uiFont, "No FBX loaded", hierarchyBlockW + 12.0f, 66, 16, Color{ 190, 190, 190, 255 });
         }
 
-        if (!error.empty())
-        {
-            DrawUiText(uiFont, error.c_str(), 12, static_cast<float>(GetScreenHeight() - 154), 18, Color{ 255, 140, 120, 255 });
-        }
-        else if (!notice.empty())
-        {
-            DrawUiText(uiFont, notice.c_str(), 12, static_cast<float>(GetScreenHeight() - 154), 18, Color{ 150, 225, 170, 255 });
-        }
-
         DrawSelectedInfoPanel(uiFont, active, transformValueEditor, editPivotMode);
 
         if (active)
         {
-            DrawTimeline(uiFont, *active, renameEditor, animationPanelCollapsed);
+            DrawTimeline(uiFont, *active, renameEditor, animationPanelCollapsed, GetLogPanelHeight(logPanel));
         }
         else
         {
             const float panelHeight = animationPanelCollapsed ? kTimelineCollapsedHeight : kTimelinePanelHeight;
-            const float panelY = static_cast<float>(GetScreenHeight()) - panelHeight;
+            const float panelY = static_cast<float>(GetScreenHeight()) - GetLogPanelHeight(logPanel) - panelHeight;
             const Rectangle toggleButton{ static_cast<float>(GetScreenWidth()) - 34.0f, panelY + 4.0f, 24.0f, 20.0f };
             DrawRectangle(0, static_cast<int>(panelY), GetScreenWidth(), static_cast<int>(panelHeight), Color{ 20, 22, 24, 238 });
             DrawLine(0, static_cast<int>(panelY), GetScreenWidth(), static_cast<int>(panelY), Color{ 76, 84, 92, 255 });
@@ -724,7 +722,7 @@ int RunOpenFbxApp(int argc, char** argv)
                 DrawUiText(uiFont, "Open an FBX file to show animation stacks", 12.0f, panelY + 38.0f, 16.0f, Color{ 128, 136, 144, 255 });
             }
         }
-        gBottomPanelReservedHeight = animationPanelCollapsed ? kTimelineCollapsedHeight : kTimelinePanelHeight;
+        gBottomPanelReservedHeight = (animationPanelCollapsed ? kTimelineCollapsedHeight : kTimelinePanelHeight) + GetLogPanelHeight(logPanel);
 
         DrawHierarchyPanel(uiFont,
                            active,
@@ -738,6 +736,10 @@ int RunOpenFbxApp(int argc, char** argv)
                            openMenu != OpenMenu::None || modalOpen);
         DrawTransformToolbar(uiFont, transformTool, gizmoOrientation, editPivotMode, hierarchyBlockW);
         DrawOrientationGizmo(uiFont, active ? active->orbit.camera : emptyOrbit.camera);
+
+        CollectLogMessages(logPanel, notice, error);
+        DrawLogPanel(uiFont, logPanel,
+                     menuBlocksPointer || modalOpen || hierarchyPanel.contextMenuOpen);
 
         DrawTabs(uiFont, tabs, activeTab);
         active = activeTab >= 0 && activeTab < static_cast<int>(tabs.size()) ? tabs[static_cast<size_t>(activeTab)].get() : nullptr;
@@ -1049,6 +1051,7 @@ int RunOpenFbxApp(int argc, char** argv)
                 }
             }
         }
+        CollectLogMessages(logPanel, notice, error);
     }
 
     for (std::unique_ptr<ModelTab>& tab : tabs)

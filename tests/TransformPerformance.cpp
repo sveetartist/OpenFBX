@@ -732,13 +732,91 @@ static int BenchmarkValidation(const char* path)
     return 0;
 }
 
+static int TestLogPanel(const char* previewPath = nullptr)
+{
+    LogPanelState panel;
+    Require(panel.collapsed, "Log should start collapsed");
+    panel.collapsed = false;
+    std::string notice = "Saved FBX.";
+    std::string error = "Missing texture.";
+    CollectLogMessages(panel, notice, error);
+    Require(panel.entries.size() == 2 && !panel.entries[0].error && panel.entries[1].error, "Log lost a simultaneous notice/error");
+    CollectLogMessages(panel, notice, error);
+    Require(panel.entries.size() == 2, "Log repeated a stale message");
+    notice = "Saved FBX.";
+    CollectLogMessages(panel, notice, error);
+    Require(panel.entries.size() == 3, "Log dropped a repeated user action");
+    for (int index = 0; index < 510; ++index)
+    {
+        notice = "Message " + std::to_string(index);
+        CollectLogMessages(panel, notice, error);
+    }
+    Require(panel.entries.size() == 500 && panel.entries.front().text == "Message 10", "Log history must retain only the newest 500 messages");
+    Require(GetLogPanelText(panel).find("INFO: Message 509\n") != std::string::npos, "Copy log lost the latest message");
+    SetTraceLogLevel(LOG_WARNING);
+    SetConfigFlags(FLAG_WINDOW_HIDDEN);
+    InitWindow(900, 600, "Log panel test");
+    Font font = LoadTechnicalFont();
+    notice = "Removed 52 zero-area faces; surviving quads and ngons preserved.";
+    error = "Cannot load texture: C:/Projects/Hero/Textures/A_very_long_texture_filename_that_needs_to_wrap_without_hiding_the_end_of_the_message_BaseColor.png\nThe original mesh is still available.";
+    CollectLogMessages(panel, notice, error);
+    WrapLogMessages(font, panel, 862.0f);
+    for (const auto& line : panel.lines)
+        Require(MeasureTextEx(font, line.text.c_str(), 14.0f, 1.0f).x <= 862.0f, "Wrapped log message exceeds panel width");
+    const size_t wideLines = panel.lines.size();
+    WrapLogMessages(font, panel, 320.0f);
+    Require(panel.lines.size() > wideLines, "Log did not rewrap after a resize");
+    RenderTexture2D preview = LoadRenderTexture(900, 600);
+    auto draw = [&]()
+    {
+        BeginDrawing();
+        BeginTextureMode(preview);
+        ClearBackground(Color{ 28, 31, 35, 255 });
+        DrawUiText(font, "VIEWPORT", 350, 180, 20, GRAY);
+        gBottomPanelReservedHeight = kTimelinePanelHeight + GetLogPanelHeight(panel);
+        DrawRectangle(0, 61, 250, static_cast<int>(GetHierarchyPanelHeight()), Color{ 18, 20, 23, 255 });
+        DrawUiText(font, "SCENE", 12, 72, 16, GRAY);
+        const int animationY = 600 - static_cast<int>(GetLogPanelHeight(panel)) - 124;
+        DrawRectangle(0, animationY, 900, 124, Color{ 20, 22, 24, 255 });
+        DrawUiText(font, "ANIMATIONS", 12, static_cast<float>(animationY + 9), 16, GRAY);
+        DrawLogPanel(font, panel, false);
+        EndTextureMode();
+        EndDrawing();
+    };
+    draw();
+    auto savePreview = [&](const char* path)
+    {
+        Image image = LoadImageFromTexture(preview.texture);
+        ImageFlipVertical(&image);
+        Require(ExportImage(image, path), "Could not write log panel preview");
+        UnloadImage(image);
+    };
+    if (previewPath) savePreview(previewPath);
+    panel.followLatest = false;
+    panel.scroll = 5;
+    notice = "New message while reading history";
+    CollectLogMessages(panel, notice, error);
+    draw();
+    Require(panel.scroll == 5, "New log message interrupted reading older history");
+    panel.collapsed = true;
+    draw();
+    if (previewPath) savePreview((std::string(previewPath) + ".collapsed.png").c_str());
+    UnloadRenderTexture(preview);
+    if (font.texture.id != GetFontDefault().texture.id) UnloadFont(font);
+    CloseWindow();
+    gBottomPanelReservedHeight = kTimelinePanelHeight;
+    return 0;
+}
+
 int main(int argc, char** argv)
 {
     try
     {
+        if (argc > 2 && std::string(argv[1]) == "--log-preview") return TestLogPanel(argv[2]);
         if (argc > 2 && std::string(argv[1]) == "--repair") return TestModelRepair(argv[2]);
         if (argc > 2 && std::string(argv[1]) == "--validation") return BenchmarkValidation(argv[2]);
         if (argc > 1) return BenchmarkFbx(argv[1]);
+        TestLogPanel();
         TestDegenerateTriangleRepair();
         TestUvOverlapSpatialSearch();
         TestValidationCache();

@@ -12,4 +12,5 @@
 #include "UvPanel.inl"
 #include "HierarchyPanel.inl"
 #include "MenuTabsTimeline.inl"
+#include "LogPanel.inl"
 #include "OpenFbxAppMain.inl"
