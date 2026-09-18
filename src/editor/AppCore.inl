@@ -12,6 +12,7 @@
 #include <filesystem>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 #include "core/MathUtils.h"
@@ -261,6 +262,7 @@ struct PbrMaterialSnapshot
 
 struct EditSnapshot
 {
+    std::vector<std::string> materialNames;
     std::vector<std::string> uvSetNames;
     std::vector<std::vector<float>> uvSets;
     std::vector<std::vector<unsigned char>> uvSetPresence;
@@ -326,6 +328,7 @@ struct ValidatorIssue
     std::string category;
     std::string message;
     int node = -1;
+    int uvSet = -1;
 };
 
 struct ValidationGroup
@@ -384,6 +387,13 @@ struct ModelTab
     int selectedUvSet = 0;
     int uvContextSet = -1;
     int uvSetScroll = 0;
+    int uvTextureSet = -1;
+    int uvTextureSetNode = -1;
+    int uvTextureSetScroll = 0;
+    int uvSelectionTextureSet = -1;
+    size_t uvOccupancyHash = 0;
+    float uvTextureOccupancy = 0.0f;
+    float uvMeshOccupancy = 0.0f;
     bool showUvTexelDensity = false;
     bool showUvSameMaterialMeshes = false;
     int uvDensityTileSize = 1024;
@@ -411,6 +421,9 @@ struct ModelTab
     int selectedNode = -1;
     std::vector<int> selectedNodes;
     int validationFixNode = -1;
+    bool validationFixScale = false;
+    std::string validationFixCategory;
+    int validationFixUvSet = -1;
     Vector2 validationFixPosition{};
     ValidationCache validationCache;
     std::unordered_map<std::string, bool> expandedValidationGroups;
@@ -1485,6 +1498,7 @@ EditSnapshot CaptureEditSnapshot(ModelTab& tab)
     EditSnapshot snapshot;
     snapshot.uvSetNames = tab.loaded.uvSetNames;
     snapshot.uvSets = tab.loaded.uvSets;
+    snapshot.materialNames = tab.loaded.materialNames;
     snapshot.uvSetPresence = tab.loaded.uvSetPresence;
     snapshot.uvSetsEdited = tab.loaded.uvSetsEdited;
     snapshot.selectedUvSet = tab.selectedUvSet;

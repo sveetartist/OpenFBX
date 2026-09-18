@@ -438,6 +438,101 @@ static void TestValidationCache()
     Require(RedoEdit(tab) && tab.validationCache.dirty, "Redo did not invalidate validation");
 }
 
+static void TestValidationFixes()
+{
+    UvTriangleSample coverage;
+    coverage.nodeIndex = 1;
+    coverage.uv[0] = {0, 0}; coverage.uv[1] = {1, 0}; coverage.uv[2] = {0, 1};
+    Require(std::fabs(CalculateUvTileOccupancy({coverage}) - 50.0f) < 0.01f, "UV occupancy area incorrect");
+    Require(std::fabs(CalculateUvTileOccupancy({coverage, coverage}) - 50.0f) < 0.01f, "UV occupancy double-counted overlap");
+    Require(CalculateUvTileOccupancy({coverage}, 2) == 0, "UV occupancy included another mesh");
+    for (auto& uv : coverage.uv) uv.x += 2;
+    Require(CalculateUvTileOccupancy({coverage}) == 0, "UV occupancy included outside-tile UVs");
+    ModelTab tab;
+    tab.loaded.hasMesh = true;
+    tab.loaded.nodes.resize(3);
+    tab.loaded.nodes[0].name = "RootNode";
+    for (int i = 1; i <= 2; ++i)
+    {
+        auto& node = tab.loaded.nodes[i];
+        node.parent = 0;
+        node.type = SceneNodeType::Mesh;
+        node.name = "Mesh";
+        node.materialName = "Material";
+        node.meshVertexStart = (i - 1) * 3;
+        node.meshVertexCount = 3;
+        node.meshTriangleCount = 1;
+    }
+    tab.loaded.materialNames = { "Material" };
+    tab.loaded.bindVertices = { 0,0,0, 1,0,0, 0,1,0, 2,0,0, 4,0,0, 2,2,0 };
+    tab.loaded.bindNormals.assign(18, 0.0f);
+    tab.loaded.uvSets = { { 0,0, 1,0, 0,1, 0,0, 1,0, 0,1 },
+                          { 0,0, 0.5f,0, 0,0.5f, 0,0, 1,0, 0,1 } };
+    tab.loaded.uvSetNames = { "First", "Second" };
+    tab.loaded.uvSetPresence = { {1,1,1,1,1,1}, {1,1,1,1,1,1} };
+    const auto original = tab.loaded.uvSets;
+    auto hasIssue = [&](const char* category)
+    {
+        const auto issues = BuildValidationIssues(tab);
+        return std::any_of(issues.begin(), issues.end(), [&](const auto& issue) { return issue.category == category; });
+    };
+    Require(hasIssue("Multiple UV sets"), "Missing multiple UV sets warning");
+    Require(hasIssue("Overlapping UVs"), "Stacked disconnected islands were not detected");
+    Require(hasIssue("Texel density"), "Unequal island density was not detected");
+    Require(PackValidationUvIslands(tab, 1, 0, false), "UV packing failed");
+    Require(tab.loaded.uvSets[1] == original[1], "Packing changed another UV set");
+    auto triangles = BuildUvScopeTriangles(tab, tab.loaded.uvSets[0], {1, 2});
+    auto islands = CalculateUvIslandStats(triangles, 1, 1);
+    Require(islands.size() == 2 && !UvIslandsOverlap(islands[0], islands[1], triangles), "Packed islands overlap");
+    Require(std::fabs(islands[0].density / islands[1].density - 2.0f) < 0.001f ||
+            std::fabs(islands[1].density / islands[0].density - 2.0f) < 0.001f, "Packing changed relative density");
+    Require(UndoEdit(tab) && tab.loaded.uvSets == original, "UV packing undo failed");
+    Require(PackValidationUvIslands(tab, 1, 0, true), "Average and pack failed");
+    triangles = BuildUvScopeTriangles(tab, tab.loaded.uvSets[0], {1, 2});
+    islands = CalculateUvIslandStats(triangles, 1, 1);
+    Require(!UvIslandsOverlap(islands[0], islands[1], triangles), "Averaged islands overlap");
+    Require(std::fabs(islands[0].density / islands[1].density - 1.0f) < 0.001f, "Island density was not equalized");
+    Require(!hasIssue("Texel density"), "Density warning persisted after fix");
+    for (float uv : tab.loaded.uvSets[0]) Require(uv > 0.0f && uv < 1.0f, "Packed UV outside tile or padding");
+    Require(UndoEdit(tab), "Average islands undo failed");
+    CombineAllUvSets(tab, 1);
+    Require(tab.loaded.uvSets.size() == 1 && tab.loaded.uvSets[0] == original[1], "Merge did not prefer chosen UV set");
+    Require(!hasIssue("Multiple UV sets"), "Merge warning persisted");
+    Require(UndoEdit(tab) && tab.loaded.uvSets == original, "Merge undo failed");
+    tab.loaded.nodes.push_back(SceneNode{});
+    tab.loaded.nodes.back().parent = 0;
+    tab.loaded.nodes.back().name = "Mesh_1";
+    tab.loaded.animations.resize(3);
+    tab.loaded.animations[0].name = "Take";
+    tab.loaded.animations[1].name = "Take";
+    tab.loaded.animations[2].name = "Take_1";
+    tab.loaded.materialNames = { "Material", "Material", "Material_1" };
+    Require(FixDuplicateNames(tab) == 3, "Duplicate names fix count incorrect");
+    Require(tab.loaded.nodes[2].name == "Mesh_2" && tab.loaded.animations[1].name == "Take_2" &&
+            tab.loaded.materialNames[1] == "Material_2", "Suffix collided with an existing name");
+    Require(!hasIssue("Duplicate name"), "Duplicate warning persisted");
+    Require(UndoEdit(tab) && tab.loaded.nodes[2].name == "Mesh" && tab.loaded.materialNames[1] == "Material" &&
+            tab.loaded.animations[1].name == "Take", "Duplicate names undo failed");
+
+    ModelTab bones;
+    bones.loaded.nodes.resize(3);
+    bones.loaded.nodes[0].name = "RootNode";
+    for (int i = 1; i <= 2; ++i)
+    {
+        bones.loaded.nodes[i].parent = 0;
+        bones.loaded.nodes[i].type = SceneNodeType::Bone;
+        bones.loaded.nodes[i].name = "Bone";
+        BonePose pose;
+        pose.node = i;
+        bones.loaded.bonePoses.push_back(pose);
+    }
+    bones.loaded.skinnedVertices.resize(1);
+    bones.loaded.skinnedVertices[0].influences.push_back(SkinnedVertexInfluence{ "Bone", 1.0f });
+    Require(FixDuplicateNames(bones) == 1 && bones.loaded.skinnedVertices[0].influences[0].boneName == "Bone_1",
+            "Duplicate bone repair changed the name-based skin target");
+    Require(UndoEdit(bones) && bones.loaded.skinnedVertices[0].influences[0].boneName == "Bone", "Bone rename undo failed");
+}
+
 static void TestUvOverlapSpatialSearch()
 {
     for (int scenario = 0; scenario < 80; ++scenario)
@@ -819,6 +914,7 @@ int main(int argc, char** argv)
         TestLogPanel();
         TestDegenerateTriangleRepair();
         TestUvOverlapSpatialSearch();
+        TestValidationFixes();
         TestValidationCache();
         TestVisibility();
         TestMarqueeSelection();

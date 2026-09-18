@@ -372,6 +372,61 @@ void ValidateSkinning(const LoadedFbxModel& loaded, std::vector<ValidatorIssue>&
 
 void ValidateTexelDensityConsistency(const ModelTab& tab, std::vector<ValidatorIssue>& issues);
 void ValidateUvIslandOverlaps(const ModelTab& tab, std::vector<ValidatorIssue>& issues);
+void CombineAllUvSets(ModelTab& tab, int preferred);
+bool PackValidationUvIslands(ModelTab& tab, int nodeIndex, int uvSet, bool averageDensity);
+
+int FixDuplicateNames(ModelTab& tab)
+{
+    EditSnapshot before = CaptureEditSnapshot(tab);
+    int changed = 0;
+    auto suffixDuplicates = [&](std::vector<std::string*>& names)
+    {
+        std::unordered_set<std::string> reserved, seen;
+        std::unordered_map<std::string, int> nextSuffix;
+        for (const auto* name : names) reserved.insert(*name);
+        for (auto* name : names)
+        {
+            if (name->empty() || seen.insert(*name).second) continue;
+            const std::string base = *name;
+            int& suffix = nextSuffix[base];
+            suffix = std::max(1, suffix);
+            std::string candidate;
+            do { candidate = base + "_" + std::to_string(suffix++); } while (reserved.count(candidate));
+            *name = candidate;
+            reserved.insert(candidate);
+            ++changed;
+        }
+    };
+    std::vector<std::string*> names;
+    for (int i = 0; i < static_cast<int>(tab.loaded.nodes.size()); ++i)
+        if (!IsSceneRootNode(tab.loaded, i) && !IsDeletedNode(tab, i)) names.push_back(&tab.loaded.nodes[i].name);
+    suffixDuplicates(names);
+    // Skinning resolves duplicate names to the last bind pose. Keep that target
+    // when its node receives a suffix, rather than redirecting every influence.
+    std::unordered_map<std::string, int> boneTargets;
+    for (const auto& pose : before.bonePoses)
+        if (pose.node >= 0 && pose.node < static_cast<int>(before.nodes.size()))
+            boneTargets[before.nodes[pose.node].name] = pose.node;
+    for (auto& vertex : tab.loaded.skinnedVertices)
+        for (auto& influence : vertex.influences)
+        {
+            const auto target = boneTargets.find(influence.boneName);
+            if (target != boneTargets.end()) influence.boneName = tab.loaded.nodes[target->second].name;
+        }
+    names.clear();
+    for (auto& name : tab.loaded.materialNames) names.push_back(&name);
+    suffixDuplicates(names);
+    names.clear();
+    for (auto& clip : tab.loaded.animations) names.push_back(&clip.name);
+    suffixDuplicates(names);
+    if (changed > 0)
+    {
+        PushUndoSnapshot(tab, std::move(before));
+        tab.skinningGeometry.reset();
+        InvalidateDisplayedAnimationCaches(tab);
+    }
+    return changed;
+}
 
 std::vector<ValidatorIssue> BuildValidationIssues(const ModelTab& tab)
 {
@@ -380,6 +435,9 @@ std::vector<ValidatorIssue> BuildValidationIssues(const ModelTab& tab)
     ValidateDuplicateNames(tab.loaded, issues);
     ValidateTransforms(tab.loaded, issues);
     ValidateGeometry(tab.loaded, issues);
+    if (tab.loaded.uvSets.size() > 1)
+        AddValidationIssue(issues, ValidatorSeverity::Warning, "Multiple UV sets",
+                           "Model has " + std::to_string(tab.loaded.uvSets.size()) + " UV sets.");
     ValidateTexelDensityConsistency(tab, issues);
     ValidateUvIslandOverlaps(tab, issues);
     ValidateSkinning(tab.loaded, issues);
@@ -434,6 +492,7 @@ void DrawValidatorPanel(Font font, ModelTab& tab, HierarchyPanelState& panel, fl
 
     if (issues.empty())
     {
+        tab.validationFixNode = -1;
         DrawUiTextClipped(font, "No validation issues found.", contentX, y, 14.0f, panelW - 24.0f, Color{ 128, 140, 152, 255 });
         panel.validatorScroll = 0.0f;
         return;
@@ -502,11 +561,19 @@ void DrawValidatorPanel(Font font, ModelTab& tab, HierarchyPanelState& panel, fl
                 DrawRectangleLinesEx(row, 1.0f, Color{ 54, 62, 70, 255 });
                 DrawUiText(font, GetValidatorSeverityName(issue.severity), row.x + 8.0f, row.y + 7.0f, 13.0f, GetValidatorSeverityColor(issue.severity));
                 DrawUiTextClipped(font, issue.message.c_str(), row.x + 8.0f, row.y + 27.0f, 13.0f, row.width - 16.0f, Color{ 154, 166, 178, 255 });
-                if (hovered && issue.node >= 0 && issue.category == "Degenerate triangles" &&
+                if (hovered &&
+                    (issue.category == "Degenerate triangles" || issue.category == "Unapplied scale" ||
+                     issue.category == "Multiple UV sets" || issue.category == "Overlapping UVs" ||
+                     issue.category == "Texel density" || issue.category == "Duplicate name") &&
                     openfbx::UiMouseButtonPressed(MOUSE_BUTTON_RIGHT))
                 {
-                    tab.validationFixNode = issue.node;
-                    tab.validationFixPosition = Vector2{ listBounds.x, ClampFloat(mouse.y, listBounds.y, listBounds.y + listBounds.height - 30.0f) };
+                    tab.validationFixNode = issue.node >= 0 ? issue.node : -2;
+                    tab.validationFixCategory = issue.category;
+                    tab.validationFixUvSet = issue.uvSet;
+                    tab.validationFixScale = issue.category == "Unapplied scale";
+                    const float menuHeight = tab.validationFixScale ? 56.0f : 28.0f;
+                    tab.validationFixPosition = Vector2{ listBounds.x, ClampFloat(mouse.y, listBounds.y,
+                        std::max(listBounds.y, listBounds.y + listBounds.height - menuHeight)) };
                 }
                 if (hovered && issue.node >= 0 && openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT))
                 {
@@ -529,18 +596,82 @@ void DrawValidatorPanel(Font font, ModelTab& tab, HierarchyPanelState& panel, fl
         DrawRectangle(static_cast<int>(trackX), static_cast<int>(listBounds.y), 4, static_cast<int>(listBounds.height), Color{ 44, 49, 55, 255 });
         DrawRectangle(static_cast<int>(trackX - 1.0f), static_cast<int>(thumbY), 6, static_cast<int>(thumbH), Color{ 112, 124, 136, 255 });
     }
-    if (tab.validationFixNode >= 0)
+    if (tab.validationFixNode != -1)
     {
-        const Rectangle menu{ tab.validationFixPosition.x, tab.validationFixPosition.y, listBounds.width, 28.0f };
+        const Rectangle menu{ tab.validationFixPosition.x, tab.validationFixPosition.y, listBounds.width,
+                              tab.validationFixScale ? 56.0f : 28.0f };
         openfbx::SetUiPointerBlocked(false);
-        if (DrawPanelButton(font, menu, "Fix Degenerate Triangles"))
+        if (tab.validationFixScale)
+        {
+            const bool applyOne = DrawPanelButton(font, Rectangle{ menu.x, menu.y, menu.width, 28.0f }, "Apply Scale");
+            const bool applyAll = DrawPanelButton(font, Rectangle{ menu.x, menu.y + 28.0f, menu.width, 28.0f }, "Apply to All");
+            if (applyOne || applyAll)
+            {
+                std::vector<int> nodes;
+                if (applyAll)
+                {
+                    for (const ValidatorIssue& issue : issues)
+                    {
+                        if (issue.category == "Unapplied scale" && issue.node >= 0)
+                            nodes.push_back(issue.node);
+                    }
+                }
+                else nodes.push_back(tab.validationFixNode);
+
+                EditSnapshot before = CaptureEditSnapshot(tab);
+                const int count = ApplyScaleToContextNodes(tab, nodes);
+                if (count > 0)
+                {
+                    PushUndoSnapshot(tab, std::move(before));
+                    tab.validationCache.dirty = true;
+                }
+                notice = count > 0 ? "Applied scale to " + std::to_string(count) + " object(s)." : "Scale already applied.";
+                error.clear();
+                tab.validationFixNode = -1;
+            }
+        }
+        else if (tab.validationFixCategory == "Multiple UV sets")
+        {
+            if (DrawPanelButton(font, menu, "Merge UV Sets"))
+            {
+                CombineAllUvSets(tab, ClampInt(tab.selectedUvSet, 0, static_cast<int>(tab.loaded.uvSets.size()) - 1));
+                notice = "Merged UV sets, preferring the selected set where UVs exist.";
+                error.clear();
+                tab.validationFixNode = -1;
+            }
+        }
+        else if (tab.validationFixCategory == "Overlapping UVs" || tab.validationFixCategory == "Texel density")
+        {
+            const bool average = tab.validationFixCategory == "Texel density";
+            if (DrawPanelButton(font, menu, average ? "Average Islands and Pack" : "Pack UV Islands"))
+            {
+                if (PackValidationUvIslands(tab, tab.validationFixNode, tab.validationFixUvSet, average))
+                {
+                    notice = average ? "Equalized island density and packed UVs." : "Packed UV islands.";
+                    error.clear();
+                }
+                else { error = "No valid UV islands to pack."; notice.clear(); }
+                tab.validationFixNode = -1;
+            }
+        }
+        else if (tab.validationFixCategory == "Duplicate name")
+        {
+            if (DrawPanelButton(font, menu, "Add Numeric Suffixes"))
+            {
+                const int count = FixDuplicateNames(tab);
+                notice = "Renamed " + std::to_string(count) + " duplicate name(s).";
+                error.clear();
+                tab.validationFixNode = -1;
+            }
+        }
+        else if (DrawPanelButton(font, menu, "Fix Degenerate Triangles"))
         {
             const int count = FixDegenerateTriangles(tab, tab.validationFixNode);
             notice = count > 0 ? "Removed " + std::to_string(count) + " degenerate triangle(s)." : "No whole degenerate faces to remove; valid polygons were preserved.";
             error.clear();
             tab.validationFixNode = -1;
         }
-        else if (IsKeyPressed(KEY_ESCAPE) || (openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT) && !CheckCollisionPointRec(mouse, menu)))
+        if (IsKeyPressed(KEY_ESCAPE) || (openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT) && !CheckCollisionPointRec(mouse, menu)))
             tab.validationFixNode = -1;
         openfbx::SetUiPointerBlocked(true);
     }

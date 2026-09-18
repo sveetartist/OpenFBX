@@ -17,6 +17,7 @@ struct UvTriangleSample
     Vector2 uv[3]{};
     Vector3 position[3]{};
     int nodeIndex = -1;
+    int vertexStart = -1;
 };
 
 struct UvIslandStats
@@ -179,6 +180,19 @@ std::string MakeUvEdgeKey(Vector2 a, Vector2 b)
     return std::to_string(bu) + "," + std::to_string(bv) + "|" + std::to_string(au) + "," + std::to_string(av);
 }
 
+std::string MakeUvTopologyEdgeKey(const UvTriangleSample& triangle, int a, int b)
+{
+    auto endpoint = [&](int i)
+    {
+        const Vector3 p = triangle.position[i];
+        return std::to_string(p.x) + "," + std::to_string(p.y) + "," + std::to_string(p.z) + ":" +
+               std::to_string(QuantizeUvCoord(triangle.uv[i].x)) + "," + std::to_string(QuantizeUvCoord(triangle.uv[i].y));
+    };
+    std::string first = endpoint(a), second = endpoint(b);
+    if (second < first) std::swap(first, second);
+    return std::to_string(triangle.nodeIndex) + ":" + first + "|" + second;
+}
+
 int FindIslandParent(std::vector<int>& parents, int value)
 {
     if (parents[static_cast<size_t>(value)] == value) return value;
@@ -214,6 +228,7 @@ void AppendNodeUvTriangles(const LoadedFbxModel& loaded,
         if (IsRemovedTriangle(node, vertex)) continue;
         UvTriangleSample triangle;
         triangle.nodeIndex = nodeIndex;
+        triangle.vertexStart = vertex;
         for (int i = 0; i < 3; ++i)
         {
             triangle.uv[i] = GetModelVertexUv(uvs, vertex + i);
@@ -276,9 +291,9 @@ std::vector<UvIslandStats> CalculateUvIslandStats(const std::vector<UvTriangleSa
     {
         const UvTriangleSample& triangle = triangles[static_cast<size_t>(triangleIndex)];
         const std::string edgeKeys[] = {
-            MakeUvEdgeKey(triangle.uv[0], triangle.uv[1]),
-            MakeUvEdgeKey(triangle.uv[1], triangle.uv[2]),
-            MakeUvEdgeKey(triangle.uv[2], triangle.uv[0])
+            MakeUvTopologyEdgeKey(triangle, 0, 1),
+            MakeUvTopologyEdgeKey(triangle, 1, 2),
+            MakeUvTopologyEdgeKey(triangle, 2, 0)
         };
 
         for (const std::string& edgeKey : edgeKeys)
@@ -764,6 +779,7 @@ void ValidateUvIslandOverlaps(const ModelTab& tab, std::vector<ValidatorIssue>& 
                                    "Overlapping UVs",
                                    entry.first + " " + uvSetName + " has overlapping UV islands in the same texture space.",
                                    issueNode);
+                issues.back().uvSet = uvSetIndex;
             }
         }
     }
@@ -789,12 +805,11 @@ void ValidateTexelDensityConsistency(const ModelTab& tab, std::vector<ValidatorI
         int textureHeight = 0;
         bool usingTexture = false;
         GetUvDensityTextureSize(tab, node, textureWidth, textureHeight, usingTexture);
-        const UvDensityStats stats = CalculateUvDensityStats(tab.loaded, node, uvs, textureWidth, textureHeight);
-        if (stats.density <= 0.0f) continue;
-
         const std::string materialName = GetPrimaryMaterialName(node);
-        if (materialName.empty()) continue;
-        densitiesByMaterial[materialName].push_back({ i, stats.density });
+        std::vector<UvTriangleSample> triangles;
+        AppendNodeUvTriangles(tab.loaded, uvs, i, triangles);
+        for (const auto& island : CalculateUvIslandStats(triangles, textureWidth, textureHeight))
+            if (island.density > 0.0f) densitiesByMaterial[materialName].push_back({ i, island.density });
     }
 
     for (const auto& entry : densitiesByMaterial)
@@ -814,12 +829,13 @@ void ValidateTexelDensityConsistency(const ModelTab& tab, std::vector<ValidatorI
         char message[256] = {};
         std::snprintf(message,
                       sizeof(message),
-                      "%s %s texel density is not uniform between meshes: %.1f..%.1f px/m.",
+                      "%s %s texel density is not uniform between islands: %.1f..%.1f px/m.",
                       entry.first.c_str(),
                       uvSetName.c_str(),
                       minMax.first->second,
                       minMax.second->second);
         AddValidationIssue(issues, ValidatorSeverity::Warning, "Texel density", message, minMax.second->first);
+        issues.back().uvSet = uvSetIndex;
     }
 }
 
@@ -865,7 +881,7 @@ void CombineAllUvSets(ModelTab& tab, int preferred)
             break;
         }
     }
-    const std::string name = loaded.uvSetNames[preferred];
+    const std::string name = preferred < static_cast<int>(loaded.uvSetNames.size()) ? loaded.uvSetNames[preferred] : "UVSet";
     loaded.uvSets = { std::move(combined) };
     loaded.uvSetPresence = { std::move(presence) };
     loaded.uvSetNames = { name };
@@ -880,17 +896,166 @@ void CombineAllUvSets(ModelTab& tab, int preferred)
     RefreshDisplayedMesh(tab);
 }
 
+bool PackValidationUvIslands(ModelTab& tab, int nodeIndex, int uvSet, bool averageDensity)
+{
+    if (nodeIndex < 0 || nodeIndex >= static_cast<int>(tab.loaded.nodes.size()) ||
+        uvSet < 0 || uvSet >= static_cast<int>(tab.loaded.uvSets.size())) return false;
+    const std::string material = GetPrimaryMaterialName(tab.loaded.nodes[nodeIndex]);
+    std::vector<int> nodes;
+    for (int i = 0; i < static_cast<int>(tab.loaded.nodes.size()); ++i)
+        if (!IsDeletedNode(tab, i) && NodeUsesSamePrimaryMaterial(tab.loaded.nodes[i], material)) nodes.push_back(i);
+    auto& uvs = tab.loaded.uvSets[uvSet];
+    const auto triangles = BuildUvScopeTriangles(tab, uvs, nodes);
+    for (const auto& triangle : triangles)
+        for (const auto& uv : triangle.uv)
+            if (!std::isfinite(uv.x) || !std::isfinite(uv.y)) return false;
+    const auto islands = CalculateUvIslandStats(triangles, 1, 1);
+    if (islands.empty()) return false;
+
+    // A common final scale preserves relative density after averaging the islands.
+    struct Box { int island; float scale, width, height; Vector2 origin{}; };
+    std::vector<Box> boxes;
+    float maxDimension = 0.0f;
+    for (int i = 0; i < static_cast<int>(islands.size()); ++i)
+    {
+        const auto& island = islands[i];
+        const float scale = averageDensity && island.density > 0.0f ? 1.0f / island.density : 1.0f;
+        const float width = (island.maxU - island.minU) * scale;
+        const float height = (island.maxV - island.minV) * scale;
+        if (!std::isfinite(width) || !std::isfinite(height)) return false;
+        boxes.push_back(Box{ i, scale, width, height });
+        maxDimension = std::max(maxDimension, std::max(width, height));
+    }
+    if (maxDimension <= 0.0f) return false;
+    std::stable_sort(boxes.begin(), boxes.end(), [](const Box& a, const Box& b) { return a.height > b.height; });
+    const float padding = std::min(0.002f, 0.1f / static_cast<float>(boxes.size() + 1));
+    auto place = [&](float scale)
+    {
+        float x = padding, y = padding, rowHeight = 0.0f;
+        for (auto& box : boxes)
+        {
+            const float width = box.width * scale, height = box.height * scale;
+            if (x + width + padding > 1.0f) { x = padding; y += rowHeight + padding; rowHeight = 0.0f; }
+            if (x + width + padding > 1.0f || y + height + padding > 1.0f) return false;
+            box.origin = Vector2{ x, y };
+            x += width + padding;
+            rowHeight = std::max(rowHeight, height);
+        }
+        return true;
+    };
+    float low = 0.0f, high = 1.0f / maxDimension;
+    for (int iteration = 0; iteration < 40; ++iteration)
+    {
+        const float middle = (low + high) * 0.5f;
+        if (place(middle)) low = middle; else high = middle;
+    }
+    if (low <= 0.0f || !place(low)) return false;
+    PushUndoSnapshot(tab);
+    for (const auto& box : boxes)
+    {
+        const auto& island = islands[box.island];
+        for (int triangleIndex : island.triangles)
+        {
+            const auto& triangle = triangles[triangleIndex];
+            for (int corner = 0; corner < 3; ++corner)
+            {
+                const size_t offset = static_cast<size_t>(triangle.vertexStart + corner) * 2;
+                uvs[offset] = box.origin.x + (triangle.uv[corner].x - island.minU) * box.scale * low;
+                uvs[offset + 1] = box.origin.y + (triangle.uv[corner].y - island.minV) * box.scale * low;
+            }
+        }
+    }
+    tab.loaded.uvSetsEdited = true;
+    tab.selectedUvSet = uvSet;
+    tab.selectedUvIslands.clear();
+    tab.viewportUvIslandCache = ViewportUvIslandCache{};
+    RefreshUvMeshBuffers(tab);
+    RefreshDisplayedMesh(tab);
+    return true;
+}
+
+std::vector<int> BuildUvVertexMaterials(const ModelTab& tab)
+{
+    std::vector<int> materials(tab.loaded.bindVertices.size() / 3, -1);
+    for (size_t mesh = 0; mesh < tab.loaded.meshGlobalVertexIndices.size(); ++mesh)
+    {
+        if (mesh >= static_cast<size_t>(tab.loaded.model.meshCount) || !tab.loaded.model.meshMaterial) continue;
+        for (int vertex : tab.loaded.meshGlobalVertexIndices[mesh])
+            if (vertex >= 0 && vertex < static_cast<int>(materials.size())) materials[vertex] = tab.loaded.model.meshMaterial[mesh];
+    }
+    return materials;
+}
+
+float CalculateUvTileOccupancy(const std::vector<UvTriangleSample>& triangles, int selectedNode = -1)
+{
+    // Union scanlines count overlapping shells once and clip coverage to the 0..1 tile.
+    constexpr int resolution = 256;
+    std::array<std::vector<std::pair<float, float>>, resolution> rows;
+    for (const auto& triangle : triangles)
+    {
+        if (selectedNode >= 0 && triangle.nodeIndex != selectedNode) continue;
+        bool finite = true;
+        for (auto uv : triangle.uv) finite = finite && std::isfinite(uv.x) && std::isfinite(uv.y);
+        if (!finite) continue;
+        const float minV = std::min({triangle.uv[0].y, triangle.uv[1].y, triangle.uv[2].y});
+        const float maxV = std::max({triangle.uv[0].y, triangle.uv[1].y, triangle.uv[2].y});
+        const int first = static_cast<int>(ClampFloat(minV, 0, 1) * resolution);
+        const int last = std::min(resolution - 1, static_cast<int>(ClampFloat(maxV, 0, 1) * resolution));
+        for (int row = first; row <= last; ++row)
+        {
+            const float y = (row + 0.5f) / resolution;
+            float intersections[3];
+            int count = 0;
+            for (int edge = 0; edge < 3; ++edge)
+            {
+                const auto a = triangle.uv[edge], b = triangle.uv[(edge + 1) % 3];
+                if ((a.y <= y && b.y > y) || (b.y <= y && a.y > y))
+                    intersections[count++] = a.x + (y - a.y) / (b.y - a.y) * (b.x - a.x);
+            }
+            if (count == 2)
+            {
+                const float left = ClampFloat(std::min(intersections[0], intersections[1]), 0, 1);
+                const float right = ClampFloat(std::max(intersections[0], intersections[1]), 0, 1);
+                if (right > left) rows[row].push_back({left, right});
+            }
+        }
+    }
+    float area = 0;
+    for (auto& row : rows)
+    {
+        std::sort(row.begin(), row.end());
+        float end = 0;
+        for (const auto& interval : row)
+        {
+            area += std::max(0.0f, interval.second - std::max(end, interval.first));
+            end = std::max(end, interval.second);
+        }
+    }
+    return ClampFloat(area / resolution * 100.0f, 0, 100);
+}
+
 void DrawUvPanel(Font font, ModelTab& tab, RenameEditor& renameEditor, float panelX, float panelY, float panelW)
 {
     const float contentX = panelX + 12.0f;
     float y = panelY;
+    const bool occupancyHasMesh = tab.selectedNode >= 0 && tab.selectedNode < static_cast<int>(tab.loaded.nodes.size()) &&
+        tab.loaded.nodes[tab.selectedNode].type == SceneNodeType::Mesh && !IsDeletedNode(tab, tab.selectedNode);
+    auto drawOccupancy = [&](bool available)
+    {
+        char text[128];
+        if (available && !occupancyHasMesh) std::snprintf(text, sizeof(text), "UV space: set ~%.1f%%", tab.uvTextureOccupancy);
+        else if (available) std::snprintf(text, sizeof(text), "UV space: set ~%.1f%% | mesh ~%.1f%%", tab.uvTextureOccupancy, tab.uvMeshOccupancy);
+        else std::snprintf(text, sizeof(text), "UV space: --");
+        DrawUiTextClipped(font, text, contentX, panelY + 26, 13, panelW - 24, Color{150, 225, 170, 255});
+    };
 
     DrawUiText(font, "UV EDITOR", contentX, y, 16.0f, Color{ 165, 182, 196, 255 });
-    y += 30.0f;
+    y += 52.0f;
 
     if (tab.loaded.uvSetNames.empty() || tab.loaded.uvSets.empty())
     {
         DrawUiTextClipped(font, "No UV sets found in this FBX.", contentX, y, 14.0f, panelW - 24.0f, Color{ 128, 140, 152, 255 });
+        drawOccupancy(false);
         return;
     }
 
@@ -977,65 +1142,142 @@ void DrawUvPanel(Font font, ModelTab& tab, RenameEditor& renameEditor, float pan
             CombineAllUvSets(tab, tab.uvContextSet);
         if (IsKeyPressed(KEY_ESCAPE) || (openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT) && !CheckCollisionPointRec(mouse, menu)))
             tab.uvContextSet = -1;
-        return;
+        y += 66.0f;
     }
 
-    if (tab.selectedNode < 0 || tab.selectedNode >= static_cast<int>(tab.loaded.nodes.size()) ||
-        tab.loaded.nodes[static_cast<size_t>(tab.selectedNode)].type != SceneNodeType::Mesh)
-    {
-        tab.selectedUvIslands.clear();
-        tab.uvIslandMarqueeSelecting = false;
-        DrawUiTextClipped(font, "Select a mesh in the viewport or hierarchy to display its UVs.", contentX, y, 14.0f, panelW - 24.0f, Color{ 128, 140, 152, 255 });
-        return;
-    }
-
-    const int selectedNodeIndex = tab.selectedNode;
-    const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(selectedNodeIndex)];
+    const bool hasSelectedMesh = tab.selectedNode >= 0 && tab.selectedNode < static_cast<int>(tab.loaded.nodes.size()) &&
+        tab.loaded.nodes[tab.selectedNode].type == SceneNodeType::Mesh && !IsDeletedNode(tab, tab.selectedNode);
+    const int selectedNodeIndex = hasSelectedMesh ? tab.selectedNode : -1;
     const std::vector<float>& uvs = tab.loaded.uvSets[static_cast<size_t>(tab.selectedUvSet)];
-    if (node.meshVertexStart < 0 || node.meshVertexCount <= 0 || uvs.size() < static_cast<size_t>(node.meshVertexStart + node.meshVertexCount) * 2)
-    {
-        tab.selectedUvIslands.clear();
-        tab.uvIslandMarqueeSelecting = false;
-        DrawUiTextClipped(font, "Selected mesh has no UV data for this set.", contentX, y, 14.0f, panelW - 24.0f, Color{ 128, 140, 152, 255 });
-        return;
-    }
-
-    char meshText[192] = {};
-    std::snprintf(meshText, sizeof(meshText), "Mesh: %s", node.name.c_str());
-    DrawUiTextClipped(font, meshText, contentX, y, 14.0f, panelW - 24.0f, Color{ 205, 213, 220, 255 });
-    y += 24.0f;
+    const std::string meshText = hasSelectedMesh ? "Mesh: " + tab.loaded.nodes[selectedNodeIndex].name : "All meshes in texture set";
+    DrawUiTextClipped(font, meshText.c_str(), contentX, y, 14, panelW - 24, Color{205, 213, 220, 255});
+    y += 24;
 
     EnsurePbrMaterialStates(tab);
     int densityTextureWidth = 0;
     int densityTextureHeight = 0;
     bool usingDensityTexture = false;
-    GetUvDensityTextureSize(tab, node, densityTextureWidth, densityTextureHeight, usingDensityTexture);
-    const std::vector<int> scopeNodeIndices = GetUvScopeNodeIndices(tab, node, selectedNodeIndex);
-    const std::vector<UvTriangleSample> scopeTriangles = BuildUvScopeTriangles(tab, uvs, scopeNodeIndices);
+    const auto vertexMaterials = BuildUvVertexMaterials(tab);
+    std::vector<UvTriangleSample> allTriangles;
+    for (int i = 0; i < static_cast<int>(tab.loaded.nodes.size()); ++i)
+        if (!IsDeletedNode(tab, i)) AppendNodeUvTriangles(tab.loaded, uvs, i, allTriangles);
+    auto triangleMaterial = [&](const UvTriangleSample& triangle)
+    {
+        const int vertex = triangle.vertexStart;
+        if (vertex >= 0 && vertex < static_cast<int>(vertexMaterials.size()) && vertexMaterials[vertex] >= 0)
+            return vertexMaterials[vertex];
+        return GetMaterialIndexForNode(tab, tab.loaded.nodes[triangle.nodeIndex]);
+    };
+    std::vector<int> textureSets;
+    for (int material = 0; material < static_cast<int>(tab.loaded.materialNames.size()); ++material)
+        textureSets.push_back(material);
+    for (const auto& triangle : allTriangles)
+    {
+        const int material = triangleMaterial(triangle);
+        if (std::find(textureSets.begin(), textureSets.end(), material) == textureSets.end()) textureSets.push_back(material);
+    }
+    std::sort(textureSets.begin(), textureSets.end());
+    const bool newMesh = hasSelectedMesh && tab.uvTextureSetNode != selectedNodeIndex;
+    if (newMesh || std::find(textureSets.begin(), textureSets.end(), tab.uvTextureSet) == textureSets.end())
+    {
+        tab.uvTextureSet = textureSets.empty() ? -1 : textureSets.front();
+        if (newMesh)
+        {
+            int firstMaterial = -1;
+            for (const auto& triangle : allTriangles)
+                if (triangle.nodeIndex == selectedNodeIndex)
+                {
+                    const int material = triangleMaterial(triangle);
+                    if (firstMaterial < 0 || material < firstMaterial) firstMaterial = material;
+                }
+            if (firstMaterial >= 0) tab.uvTextureSet = firstMaterial;
+        }
+        const auto selected = std::find(textureSets.begin(), textureSets.end(), tab.uvTextureSet);
+        tab.uvTextureSetScroll = selected == textureSets.end() ? 0 : static_cast<int>(selected - textureSets.begin());
+    }
+    tab.uvTextureSetNode = selectedNodeIndex;
+    DrawUiText(font, "TEXTURE SETS", contentX, y, 14, Color{165, 182, 196, 255});
+    y += 22;
+    const int textureRows = std::min(3, static_cast<int>(textureSets.size()));
+    const int textureMaxScroll = std::max(0, static_cast<int>(textureSets.size()) - textureRows);
+    const Rectangle textureList{contentX, y, panelW - 24, std::max(1, textureRows) * 24.0f};
+    if (CheckCollisionPointRec(mouse, textureList))
+        tab.uvTextureSetScroll -= static_cast<int>(openfbx::UiMouseWheelMove());
+    tab.uvTextureSetScroll = ClampInt(tab.uvTextureSetScroll, 0, textureMaxScroll);
+    DrawRectangleRec(textureList, Color{14, 16, 19, 245});
+    for (int rowIndex = 0; rowIndex < textureRows; ++rowIndex)
+    {
+        const int material = textureSets[tab.uvTextureSetScroll + rowIndex];
+        const Rectangle row{contentX + 1, y + rowIndex * 24 + 1, textureList.width - 8, 22};
+        const bool hovered = CheckCollisionPointRec(mouse, row);
+        if (!renameEditor.active && hovered && openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT))
+            tab.uvTextureSet = material;
+        const bool selected = tab.uvTextureSet == material;
+        DrawRectangleRec(row, selected ? Color{50, 70, 88, 255} : hovered ? Color{36, 42, 48, 255} : Color{14, 16, 19, 245});
+        const std::string name = material >= 0 && material < static_cast<int>(tab.loaded.materialNames.size()) ?
+            tab.loaded.materialNames[material] : "Unassigned";
+        const std::string label = std::string(selected ? "> " : "  ") + name;
+        DrawUiTextClipped(font, label.c_str(), row.x + 6, row.y + 4, 14, row.width - 12,
+                          selected ? RAYWHITE : Color{185, 194, 202, 255});
+    }
+    if (textureMaxScroll > 0)
+    {
+        const float thumbHeight = textureList.height * textureRows / static_cast<float>(textureSets.size());
+        const float thumbY = y + (textureList.height - thumbHeight) * tab.uvTextureSetScroll / textureMaxScroll;
+        DrawRectangleRec(Rectangle{textureList.x + textureList.width - 4, thumbY, 3, thumbHeight}, Color{130, 145, 158, 255});
+    }
+    DrawRectangleLinesEx(textureList, 1, Color{70, 80, 90, 255});
+    y += textureList.height + 8;
+    std::vector<UvTriangleSample> scopeTriangles;
+    for (const auto& triangle : allTriangles)
+        if (triangleMaterial(triangle) == tab.uvTextureSet) scopeTriangles.push_back(triangle);
+    size_t occupancyHash = std::hash<int>{}(selectedNodeIndex);
+    auto hashValue = [&](size_t value) { occupancyHash ^= value + 0x9e3779b9 + (occupancyHash << 6) + (occupancyHash >> 2); };
+    for (const auto& triangle : scopeTriangles)
+    {
+        hashValue(std::hash<int>{}(triangle.nodeIndex));
+        for (auto uv : triangle.uv) { hashValue(std::hash<float>{}(uv.x)); hashValue(std::hash<float>{}(uv.y)); }
+    }
+    if (occupancyHash != tab.uvOccupancyHash)
+    {
+        tab.uvOccupancyHash = occupancyHash;
+        tab.uvTextureOccupancy = CalculateUvTileOccupancy(scopeTriangles);
+        tab.uvMeshOccupancy = hasSelectedMesh ? CalculateUvTileOccupancy(scopeTriangles, selectedNodeIndex) : 0.0f;
+    }
+    drawOccupancy(true);
+    densityTextureWidth = densityTextureHeight = std::max(1, tab.uvDensityTileSize);
+    usingDensityTexture = false;
+    if (tab.uvTextureSet >= 0 && tab.uvTextureSet < static_cast<int>(tab.pbrMaterials.size()))
+    {
+        const auto& diffuse = GetPbrTexture(tab.pbrMaterials[tab.uvTextureSet], PbrTextureSlot::Diffuse);
+        if (diffuse.loaded && diffuse.texture.width > 0 && diffuse.texture.height > 0)
+        {
+            densityTextureWidth = diffuse.texture.width;
+            densityTextureHeight = diffuse.texture.height;
+            usingDensityTexture = true;
+        }
+    }
     const std::vector<UvIslandStats> islands = CalculateUvIslandStats(scopeTriangles, densityTextureWidth, densityTextureHeight);
     if (tab.uvSelectionNodeIndex != selectedNodeIndex ||
         tab.uvSelectionUvSet != tab.selectedUvSet ||
-        tab.uvSelectionSameMaterial != tab.showUvSameMaterialMeshes)
+        tab.uvSelectionTextureSet != tab.uvTextureSet)
     {
         tab.selectedUvIslands.clear();
         tab.uvIslandMarqueeSelecting = false;
         tab.uvSelectionNodeIndex = selectedNodeIndex;
         tab.uvSelectionUvSet = tab.selectedUvSet;
-        tab.uvSelectionSameMaterial = tab.showUvSameMaterialMeshes;
+        tab.uvSelectionTextureSet = tab.uvTextureSet;
     }
     PruneSelectedUvIslands(tab.selectedUvIslands, static_cast<int>(islands.size()));
 
     const float toggleW = (panelW - 30.0f) * 0.5f;
     const Rectangle densityToggle{ contentX, y, toggleW, 24.0f };
-    const Rectangle sameMaterialToggle{ contentX + toggleW + 6.0f, y, toggleW, 24.0f };
+
     if (DrawPanelButton(font, densityToggle, tab.showUvTexelDensity ? "Density On" : "Density Off"))
     {
         tab.showUvTexelDensity = !tab.showUvTexelDensity;
     }
-    if (DrawPanelButton(font, sameMaterialToggle, tab.showUvSameMaterialMeshes ? "Same Mat On" : "Same Mat Off"))
-    {
-        tab.showUvSameMaterialMeshes = !tab.showUvSameMaterialMeshes;
-    }
+    DrawUiTextClipped(font, hasSelectedMesh ? "Mesh highlighted" : "All meshes", contentX + toggleW + 6, y + 5, 12, toggleW, Color{95, 190, 245, 255});
     y += 32.0f;
 
     if (tab.showUvTexelDensity)
@@ -1273,13 +1515,16 @@ void DrawUvPanel(Font font, ModelTab& tab, RenameEditor& renameEditor, float pan
         Color{ 230, 128, 100, 230 }
     };
     constexpr int islandColorCount = static_cast<int>(sizeof(islandColors) / sizeof(islandColors[0]));
+    for (int highlightPass = 0; highlightPass < 2; ++highlightPass)
     for (int islandIndex = 0; islandIndex < static_cast<int>(islands.size()); ++islandIndex)
     {
         const UvIslandStats& island = islands[static_cast<size_t>(islandIndex)];
         const bool selectedIsland = IsUvIslandSelected(tab.selectedUvIslands, islandIndex);
-        const Color baseColor = islandColors[islandIndex % islandColorCount];
+        const bool meshIsland = island.nodeIndex == selectedNodeIndex;
+        if ((meshIsland || selectedIsland) != (highlightPass == 1)) continue;
+        const Color baseColor = (meshIsland || !hasSelectedMesh) ? islandColors[islandIndex % islandColorCount] : Color{85, 95, 108, 150};
         const Color lineColor = selectedIsland ? Color{ 255, 245, 180, 255 } : baseColor;
-        const unsigned char fillAlpha = selectedIsland ? 86 : 34;
+        const unsigned char fillAlpha = selectedIsland ? 110 : meshIsland ? 65 : hasSelectedMesh ? 12 : 34;
         const Color fillColor{ lineColor.r, lineColor.g, lineColor.b, fillAlpha };
         for (int triangleIndex : island.triangles)
         {
@@ -1290,7 +1535,8 @@ void DrawUvPanel(Font font, ModelTab& tab, RenameEditor& renameEditor, float pan
             const Vector2 b = uvToScreen(triangle.uv[1]);
             const Vector2 c = uvToScreen(triangle.uv[2]);
             DrawTriangle(a, b, c, fillColor);
-            if (selectedIsland)
+            DrawTriangle(c, b, a, fillColor);
+            if (selectedIsland || meshIsland)
             {
                 DrawLineEx(a, b, 2.0f, lineColor);
                 DrawLineEx(b, c, 2.0f, lineColor);

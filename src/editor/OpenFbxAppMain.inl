@@ -265,7 +265,7 @@ int RunOpenFbxApp(int argc, char** argv)
             menuPointerCaptured = true;
         }
         const bool validationMenuOpen = activeTab >= 0 && activeTab < static_cast<int>(tabs.size()) &&
-            tabs[static_cast<size_t>(activeTab)]->validationFixNode >= 0;
+            tabs[static_cast<size_t>(activeTab)]->validationFixNode != -1;
         const bool menuBlocksPointer = openMenu != OpenMenu::None || menuPointerCaptured || validationMenuOpen;
         openfbx::SetUiPointerBlocked(menuBlocksPointer);
 

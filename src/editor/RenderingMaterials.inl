@@ -25,6 +25,7 @@ void RestoreEditSnapshot(ModelTab& tab, const EditSnapshot& snapshot)
     tab.validationCache.dirty = true;
     tab.loaded.uvSetNames = snapshot.uvSetNames;
     tab.loaded.uvSets = snapshot.uvSets;
+    tab.loaded.materialNames = snapshot.materialNames;
     tab.loaded.uvSetPresence = snapshot.uvSetPresence;
     tab.loaded.uvSetsEdited = snapshot.uvSetsEdited;
     tab.selectedUvSet = snapshot.selectedUvSet;
