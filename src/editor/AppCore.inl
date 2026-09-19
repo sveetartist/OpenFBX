@@ -394,7 +394,6 @@ struct ModelTab
     size_t uvOccupancyHash = 0;
     float uvTextureOccupancy = 0.0f;
     float uvMeshOccupancy = 0.0f;
-    bool showUvTexelDensity = false;
     bool showUvSameMaterialMeshes = false;
     int uvDensityTileSize = 1024;
     std::vector<int> selectedUvIslands;

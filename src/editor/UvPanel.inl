@@ -1051,6 +1051,8 @@ void DrawUvPanel(Font font, ModelTab& tab, RenameEditor& renameEditor, float pan
 
     DrawUiText(font, "UV EDITOR", contentX, y, 16.0f, Color{ 165, 182, 196, 255 });
     y += 52.0f;
+    const float densityY = y;
+    constexpr float densityHeight = 102.0f;
 
     if (tab.loaded.uvSetNames.empty() || tab.loaded.uvSets.empty())
     {
@@ -1058,6 +1060,8 @@ void DrawUvPanel(Font font, ModelTab& tab, RenameEditor& renameEditor, float pan
         drawOccupancy(false);
         return;
     }
+
+    y += densityHeight;
 
     const int uvSetCount = static_cast<int>(tab.loaded.uvSets.size());
     tab.selectedUvSet = ClampInt(tab.selectedUvSet, 0, uvSetCount - 1);
@@ -1270,17 +1274,10 @@ void DrawUvPanel(Font font, ModelTab& tab, RenameEditor& renameEditor, float pan
     }
     PruneSelectedUvIslands(tab.selectedUvIslands, static_cast<int>(islands.size()));
 
-    const float toggleW = (panelW - 30.0f) * 0.5f;
-    const Rectangle densityToggle{ contentX, y, toggleW, 24.0f };
-
-    if (DrawPanelButton(font, densityToggle, tab.showUvTexelDensity ? "Density On" : "Density Off"))
-    {
-        tab.showUvTexelDensity = !tab.showUvTexelDensity;
-    }
-    DrawUiTextClipped(font, hasSelectedMesh ? "Mesh highlighted" : "All meshes", contentX + toggleW + 6, y + 5, 12, toggleW, Color{95, 190, 245, 255});
-    y += 32.0f;
-
-    if (tab.showUvTexelDensity)
+    const float editorY = y;
+    y = densityY;
+    DrawUiText(font, "TEXEL DENSITY", contentX, y, 14.0f, Color{ 165, 182, 196, 255 });
+    y += 22.0f;
     {
         char textureLine[192] = {};
         if (usingDensityTexture)
@@ -1343,9 +1340,12 @@ void DrawUvPanel(Font font, ModelTab& tab, RenameEditor& renameEditor, float pan
         y += 8.0f;
     }
 
+    y = editorY;
+
     const float panelBottom = 61.0f + GetHierarchyPanelHeight();
-    const float availableEditorSize = std::min(panelW - 24.0f, panelBottom - y - 12.0f);
-    if (availableEditorSize < 48.0f)
+    const float editorWidth = panelW - 24.0f;
+    const float editorHeight = panelBottom - y - 12.0f;
+    if (editorWidth < 48.0f || editorHeight < 48.0f)
     {
         tab.uvIslandMarqueeSelecting = false;
         if (y + 18.0f < panelBottom)
@@ -1355,8 +1355,7 @@ void DrawUvPanel(Font font, ModelTab& tab, RenameEditor& renameEditor, float pan
         return;
     }
 
-    const float editorSize = availableEditorSize;
-    const Rectangle editor{ contentX, y, editorSize, editorSize };
+    const Rectangle editor{ contentX, y, editorWidth, editorHeight };
     DrawRectangleRec(editor, Color{ 14, 16, 19, 245 });
     DrawRectangleLinesEx(editor, 1.0f, Color{ 88, 98, 108, 255 });
 
@@ -1364,23 +1363,24 @@ void DrawUvPanel(Font font, ModelTab& tab, RenameEditor& renameEditor, float pan
     const Vector2 editorCenter{ editor.x + editor.width * 0.5f, editor.y + editor.height * 0.5f };
     auto getUvScale = [&]()
     {
-        return editor.width * tab.uvViewZoom;
+        const float scale = std::min(editor.width, editor.height) * tab.uvViewZoom;
+        return Vector2{ scale, scale };
     };
 
     auto uvToScreen = [&](Vector2 uv)
     {
-        const float scale = getUvScale();
+        const Vector2 scale = getUvScale();
         return Vector2{
-            editorCenter.x + tab.uvViewPan.x + (uv.x - 0.5f) * scale,
-            editorCenter.y + tab.uvViewPan.y - (uv.y - 0.5f) * scale
+            editorCenter.x + tab.uvViewPan.x + (uv.x - 0.5f) * scale.x,
+            editorCenter.y + tab.uvViewPan.y - (uv.y - 0.5f) * scale.y
         };
     };
     auto screenToUv = [&](Vector2 point)
     {
-        const float scale = std::max(0.001f, getUvScale());
+        const Vector2 scale = getUvScale();
         return Vector2{
-            0.5f + (point.x - editorCenter.x - tab.uvViewPan.x) / scale,
-            0.5f - (point.y - editorCenter.y - tab.uvViewPan.y) / scale
+            0.5f + (point.x - editorCenter.x - tab.uvViewPan.x) / scale.x,
+            0.5f - (point.y - editorCenter.y - tab.uvViewPan.y) / scale.y
         };
     };
 
@@ -1393,9 +1393,9 @@ void DrawUvPanel(Font font, ModelTab& tab, RenameEditor& renameEditor, float pan
         {
             const Vector2 uvUnderMouse = screenToUv(mouse);
             tab.uvViewZoom = ClampFloat(tab.uvViewZoom * std::pow(1.18f, wheel), 0.2f, 80.0f);
-            const float scale = getUvScale();
-            tab.uvViewPan.x = mouse.x - editorCenter.x - (uvUnderMouse.x - 0.5f) * scale;
-            tab.uvViewPan.y = mouse.y - editorCenter.y + (uvUnderMouse.y - 0.5f) * scale;
+            const Vector2 scale = getUvScale();
+            tab.uvViewPan.x = mouse.x - editorCenter.x - (uvUnderMouse.x - 0.5f) * scale.x;
+            tab.uvViewPan.y = mouse.y - editorCenter.y + (uvUnderMouse.y - 0.5f) * scale.y;
         }
 
         if (openfbx::UiMouseButtonPressed(MOUSE_BUTTON_RIGHT) || openfbx::UiMouseButtonPressed(MOUSE_BUTTON_MIDDLE))
