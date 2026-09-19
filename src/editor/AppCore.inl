@@ -155,6 +155,7 @@ enum class OpenMenu
     Edit,
     View,
     Preferences,
+    Debug,
     Help
 };
 

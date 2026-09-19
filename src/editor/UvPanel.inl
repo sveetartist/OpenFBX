@@ -1034,6 +1034,38 @@ float CalculateUvTileOccupancy(const std::vector<UvTriangleSample>& triangles, i
     return ClampFloat(area / resolution * 100.0f, 0, 100);
 }
 
+Rectangle gUvDensityHelpBounds{};
+
+void DrawUvDensityHelp(Font font)
+{
+    const Vector2 mouse = GetMousePosition();
+    if (gUvDensityHelpBounds.width <= 0.0f || !CheckCollisionPointRec(mouse, gUvDensityHelpBounds)) return;
+
+    // Directional targets: https://thetechnicalartist.com/tools/texel-density/index.html
+    const char* lines[] = {
+        "SUGGESTED TARGETS (px/m)",
+        "Mobile: 128-256",
+        "Environments: 512-1024",
+        "Hero / first-person: 2048+",
+        "Distant: half the baseline",
+        "Adjust for distance and memory."
+    };
+    constexpr float padding = 10.0f;
+    constexpr float lineHeight = 19.0f;
+    const float width = std::min(280.0f, static_cast<float>(GetScreenWidth()) - 16.0f);
+    const float height = padding * 2.0f + lineHeight * static_cast<float>(sizeof(lines) / sizeof(lines[0]));
+    const float x = ClampFloat(mouse.x + 16.0f, 8.0f, std::max(8.0f, GetScreenWidth() - width - 8.0f));
+    const float y = ClampFloat(mouse.y + 18.0f, 8.0f, std::max(8.0f, GetScreenHeight() - height - 8.0f));
+    const Rectangle bounds{ x, y, width, height };
+    DrawRectangleRec(Rectangle{ x + 3.0f, y + 3.0f, width, height }, Color{ 0, 0, 0, 100 });
+    DrawRectangleRec(bounds, Color{ 25, 30, 36, 255 });
+    DrawRectangleLinesEx(bounds, 1.0f, Color{ 100, 120, 140, 255 });
+    for (int i = 0; i < static_cast<int>(sizeof(lines) / sizeof(lines[0])); ++i)
+        DrawUiTextClipped(font, lines[i], x + padding, y + padding + i * lineHeight,
+                          14.0f, width - padding * 2.0f,
+                          i == 0 ? Color{ 150, 225, 170, 255 } : Color{ 205, 213, 220, 255 });
+}
+
 void DrawUvPanel(Font font, ModelTab& tab, RenameEditor& renameEditor, float panelX, float panelY, float panelW)
 {
     const float contentX = panelX + 12.0f;
@@ -1052,7 +1084,7 @@ void DrawUvPanel(Font font, ModelTab& tab, RenameEditor& renameEditor, float pan
     DrawUiText(font, "UV EDITOR", contentX, y, 16.0f, Color{ 165, 182, 196, 255 });
     y += 52.0f;
     const float densityY = y;
-    constexpr float densityHeight = 102.0f;
+    constexpr float densityHeight = 54.0f;
 
     if (tab.loaded.uvSetNames.empty() || tab.loaded.uvSets.empty())
     {
@@ -1276,69 +1308,37 @@ void DrawUvPanel(Font font, ModelTab& tab, RenameEditor& renameEditor, float pan
 
     const float editorY = y;
     y = densityY;
-    DrawUiText(font, "TEXEL DENSITY", contentX, y, 14.0f, Color{ 165, 182, 196, 255 });
-    y += 22.0f;
+    const float densityLabelWidth = (panelW - 30.0f) * 0.5f;
+    const Rectangle resolutionBounds{ contentX + densityLabelWidth + 6.0f, y, densityLabelWidth, 22.0f };
+    gUvDensityHelpBounds = Rectangle{ contentX, y, densityLabelWidth, 48.0f };
+    DrawUiTextClipped(font, "Texel density [?]", contentX, y + 4.0f, 14.0f, densityLabelWidth, Color{ 165, 182, 196, 255 });
+    char resolutionLine[64] = {};
+    if (usingDensityTexture)
     {
-        char textureLine[192] = {};
-        if (usingDensityTexture)
-        {
-            std::snprintf(textureLine, sizeof(textureLine), "Texture: diffuse %dx%d", densityTextureWidth, densityTextureHeight);
-            DrawUiTextClipped(font, textureLine, contentX, y, 14.0f, panelW - 24.0f, Color{ 190, 200, 210, 255 });
-        }
-        else
-        {
-            std::snprintf(textureLine, sizeof(textureLine), "Tile %d px", tab.uvDensityTileSize);
-            if (DrawPanelButton(font, Rectangle{ contentX, y - 3.0f, panelW - 24.0f, 24.0f }, textureLine))
-            {
-                tab.uvDensityTileSize = NextUvDensityTileSize(tab.uvDensityTileSize);
-            }
-        }
-        y += 28.0f;
-
-        const UvSelectionSummary selectionSummary = CalculateUvSelectionSummary(islands, tab.selectedUvIslands);
-        if (selectionSummary.count > 0)
-        {
-            char selectionLine[192] = {};
-            if (selectionSummary.count == 1)
-            {
-                std::snprintf(selectionLine,
-                              sizeof(selectionLine),
-                              "Selected island: UV space %.2f%%",
-                              selectionSummary.uvArea * 100.0f);
-            }
-            else
-            {
-                std::snprintf(selectionLine,
-                              sizeof(selectionLine),
-                              "Selected islands %d: UV space %.2f%%",
-                              selectionSummary.count,
-                              selectionSummary.uvArea * 100.0f);
-            }
-            DrawUiTextClipped(font, selectionLine, contentX, y, 14.0f, panelW - 24.0f, Color{ 190, 200, 210, 255 });
-            y += 22.0f;
-
-            char densityLine[192] = {};
-            if (selectionSummary.mixedDensity)
-            {
-                std::snprintf(densityLine, sizeof(densityLine), "Texel density: multiple");
-            }
-            else
-            {
-                std::snprintf(densityLine, sizeof(densityLine), "Texel density: %.1f px/m", selectionSummary.density);
-            }
-            DrawUiTextClipped(font, densityLine, contentX, y, 14.0f, panelW - 24.0f, selectionSummary.density > 0.0f || selectionSummary.mixedDensity ? Color{ 150, 225, 170, 255 } : Color{ 255, 185, 125, 255 });
-            y += 22.0f;
-        }
-        else
-        {
-            char islandLine[128] = {};
-            std::snprintf(islandLine, sizeof(islandLine), "Click a UV island to inspect density");
-            DrawUiTextClipped(font, islandLine, contentX, y, 14.0f, panelW - 24.0f, Color{ 255, 185, 125, 255 });
-            y += 22.0f;
-        }
-
-        y += 8.0f;
+        std::snprintf(resolutionLine, sizeof(resolutionLine), "%dx%d px", densityTextureWidth, densityTextureHeight);
+        DrawUiTextClipped(font, resolutionLine, resolutionBounds.x, y + 4.0f, 13.0f, resolutionBounds.width, Color{ 190, 200, 210, 255 });
     }
+    else
+    {
+        std::snprintf(resolutionLine, sizeof(resolutionLine), "%d px", tab.uvDensityTileSize);
+        if (DrawPanelButton(font, resolutionBounds, resolutionLine))
+        {
+            tab.uvDensityTileSize = NextUvDensityTileSize(tab.uvDensityTileSize);
+        }
+    }
+    y += 28.0f;
+
+    const UvSelectionSummary selectionSummary = CalculateUvSelectionSummary(islands, tab.selectedUvIslands);
+    char densityLine[128] = {};
+    if (selectionSummary.count == 0)
+        std::snprintf(densityLine, sizeof(densityLine), "Select an island to inspect density");
+    else if (selectionSummary.mixedDensity)
+        std::snprintf(densityLine, sizeof(densityLine), "Multiple densities");
+    else
+        std::snprintf(densityLine, sizeof(densityLine), "%.1f px/m", selectionSummary.density);
+    DrawUiTextClipped(font, densityLine, contentX, y, 14.0f, panelW - 24.0f,
+                      selectionSummary.density > 0.0f || selectionSummary.mixedDensity ?
+                      Color{ 150, 225, 170, 255 } : Color{ 255, 185, 125, 255 });
 
     y = editorY;
 

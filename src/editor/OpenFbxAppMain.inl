@@ -724,6 +724,7 @@ int RunOpenFbxApp(int argc, char** argv)
         }
         gBottomPanelReservedHeight = (animationPanelCollapsed ? kTimelineCollapsedHeight : kTimelinePanelHeight) + GetLogPanelHeight(logPanel);
 
+        gUvDensityHelpBounds = Rectangle{};
         DrawHierarchyPanel(uiFont,
                            active,
                            hierarchyPanel,
@@ -743,6 +744,8 @@ int RunOpenFbxApp(int argc, char** argv)
 
         DrawTabs(uiFont, tabs, activeTab);
         active = activeTab >= 0 && activeTab < static_cast<int>(tabs.size()) ? tabs[static_cast<size_t>(activeTab)].get() : nullptr;
+
+        if (openMenu == OpenMenu::None && !modalOpen && !renameEditor.active) DrawUvDensityHelp(uiFont);
 
         bool menuOpenRequested = false;
         bool menuCloseTabRequested = false;

@@ -37,7 +37,8 @@ void DrawMenuBar(Font font,
         { "Edit", OpenMenu::Edit, Rectangle{ 66.0f, 3.0f, 58.0f, 22.0f } },
         { "View", OpenMenu::View, Rectangle{ 124.0f, 3.0f, 58.0f, 22.0f } },
         { "Preferences", OpenMenu::Preferences, Rectangle{ 186.0f, 3.0f, 118.0f, 22.0f } },
-        { "Help", OpenMenu::Help, Rectangle{ 308.0f, 3.0f, 58.0f, 22.0f } }
+        { "Debug", OpenMenu::Debug, Rectangle{ 308.0f, 3.0f, 66.0f, 22.0f } },
+        { "Help", OpenMenu::Help, Rectangle{ 378.0f, 3.0f, 58.0f, 22.0f } }
     };
 
     const Vector2 mouse = GetMousePosition();
@@ -57,7 +58,7 @@ void DrawMenuBar(Font font,
     switch (openMenu)
     {
     case OpenMenu::File:
-        openMenuBounds = Rectangle{ 8.0f, 29.0f, 300.0f, 338.0f };
+        openMenuBounds = Rectangle{ 8.0f, 29.0f, 300.0f, 278.0f };
         break;
     case OpenMenu::Edit:
         openMenuBounds = Rectangle{ 66.0f, 29.0f, 230.0f, 68.0f };
@@ -68,8 +69,11 @@ void DrawMenuBar(Font font,
     case OpenMenu::Preferences:
         openMenuBounds = Rectangle{ 186.0f, 29.0f, 420.0f, 608.0f };
         break;
+    case OpenMenu::Debug:
+        openMenuBounds = Rectangle{ 308.0f, 29.0f, 230.0f, 68.0f };
+        break;
     case OpenMenu::Help:
-        openMenuBounds = Rectangle{ 308.0f, 29.0f, 230.0f, 38.0f };
+        openMenuBounds = Rectangle{ 378.0f, 29.0f, 230.0f, 38.0f };
         break;
     case OpenMenu::None:
         break;
@@ -85,7 +89,7 @@ void DrawMenuBar(Font font,
 
     if (openMenu == OpenMenu::File)
     {
-        DrawRectangle(8, 29, 300, 338, Color{ 28, 31, 35, 245 });
+        DrawRectangle(8, 29, 300, 278, Color{ 28, 31, 35, 245 });
         if (DrawMenuItem(font, Rectangle{ 8.0f, 29.0f, 300.0f, 30.0f }, "Open Model...      Ctrl+O"))
         {
             openRequested = true;
@@ -126,17 +130,7 @@ void DrawMenuBar(Font font,
             importAnimationsRequested = true;
             openMenu = OpenMenu::None;
         }
-        if (DrawMenuItem(font, Rectangle{ 8.0f, 269.0f, 300.0f, 30.0f }, "Export JSON"))
-        {
-            exportJsonRequested = true;
-            openMenu = OpenMenu::None;
-        }
-        if (DrawMenuItem(font, Rectangle{ 8.0f, 299.0f, 300.0f, 30.0f }, "Compare FBX..."))
-        {
-            compareFbxRequested = true;
-            openMenu = OpenMenu::None;
-        }
-        if (DrawMenuItem(font, Rectangle{ 8.0f, 329.0f, 300.0f, 30.0f }, "Exit        Ctrl+Q"))
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 269.0f, 300.0f, 30.0f }, "Exit        Ctrl+Q"))
         {
             quitRequested = true;
             openMenu = OpenMenu::None;
@@ -341,10 +335,24 @@ void DrawMenuBar(Font font,
         DrawUiText(font, "Maya: Alt+LMB orbit, Shift snap, Alt+MMB pan, Alt+RMB/Wheel zoom", 198.0f, 578.0f, 15.0f, Color{ 205, 213, 220, 255 });
         DrawUiText(font, "Esc deselects    Ctrl+W closes tab    Ctrl+Q quits", 198.0f, 604.0f, 15.0f, Color{ 205, 213, 220, 255 });
     }
+    else if (openMenu == OpenMenu::Debug)
+    {
+        DrawRectangle(308, 29, 230, 68, Color{ 28, 31, 35, 245 });
+        if (DrawMenuItem(font, Rectangle{ 308.0f, 29.0f, 230.0f, 30.0f }, "Compare FBX..."))
+        {
+            compareFbxRequested = true;
+            openMenu = OpenMenu::None;
+        }
+        if (DrawMenuItem(font, Rectangle{ 308.0f, 59.0f, 230.0f, 30.0f }, "Export JSON"))
+        {
+            exportJsonRequested = true;
+            openMenu = OpenMenu::None;
+        }
+    }
     else if (openMenu == OpenMenu::Help)
     {
-        DrawRectangle(308, 29, 230, 38, Color{ 28, 31, 35, 245 });
-        if (DrawMenuItem(font, Rectangle{ 308.0f, 29.0f, 230.0f, 30.0f }, "About openfbx"))
+        DrawRectangle(378, 29, 230, 38, Color{ 28, 31, 35, 245 });
+        if (DrawMenuItem(font, Rectangle{ 378.0f, 29.0f, 230.0f, 30.0f }, "About openfbx"))
         {
             aboutRequested = true;
             openMenu = OpenMenu::None;
