@@ -94,7 +94,7 @@ bool DrawMenuItem(Font font, Rectangle bounds, const char* text, bool selected)
     const Vector2 mouse = GetMousePosition();
     const bool hovered = CheckCollisionPointRec(mouse, bounds);
     DrawRectangleRec(bounds, selected ? Color{ 48, 70, 90, 255 } : hovered ? Color{ 46, 50, 56, 255 } : Color{ 28, 31, 35, 245 });
-    DrawUiText(font, text, bounds.x + 10.0f, bounds.y + 5.0f, 16.0f, selected ? RAYWHITE : Color{ 205, 213, 220, 255 });
+    DrawUiTextClipped(font, text, bounds.x + 10.0f, bounds.y + 5.0f, 16.0f, bounds.width - 20.0f, selected ? RAYWHITE : Color{ 205, 213, 220, 255 });
     return hovered && openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT);
 }
 }

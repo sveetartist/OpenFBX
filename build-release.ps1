@@ -13,8 +13,8 @@ try {
         throw 'CMake was not found. Install CMake and Visual Studio 2022 with Desktop development with C++.'
     }
 
-    $configureArguments = @('--preset', 'vs2022')
-    if (-not $FbxSdkRoot -and -not (Test-Path -LiteralPath 'build/vs2022/CMakeCache.txt')) {
+    $configureArguments = @('--preset', 'release')
+    if (-not $FbxSdkRoot -and -not (Test-Path -LiteralPath 'build/.cmake/CMakeCache.txt')) {
         if ($env:FBXSDK_ROOT) { $FbxSdkRoot = $env:FBXSDK_ROOT }
         elseif ($env:FBXSDK_DIR) { $FbxSdkRoot = $env:FBXSDK_DIR }
         else {
@@ -45,7 +45,7 @@ try {
     & $cmakePath --build --preset release --target openfbx --parallel
     if ($LASTEXITCODE -ne 0) { throw "Release build failed (exit $LASTEXITCODE)." }
 
-    $appPath = Join-Path $PSScriptRoot 'build/vs2022/Release/openfbx.exe'
+    $appPath = Join-Path $PSScriptRoot 'build/openfbx.exe'
     if (-not (Test-Path -LiteralPath $appPath -PathType Leaf)) { throw "Build output missing: $appPath" }
     Write-Host "Release app ready: $appPath" -ForegroundColor Green
     if ($Run) { Start-Process -FilePath $appPath -WorkingDirectory (Split-Path -Parent $appPath) }

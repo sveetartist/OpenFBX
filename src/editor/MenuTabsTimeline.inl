@@ -1,3 +1,124 @@
+bool gUpdateWindowOpen = false;
+std::future<openfbx::UpdateResult> gUpdateCheck;
+openfbx::UpdateResult gUpdateResult;
+
+void StartUpdateCheck()
+{
+    gUpdateWindowOpen = true;
+    if (gUpdateCheck.valid()) return;
+    gUpdateResult = {"Checking GitHub releases..."};
+    try {
+        gUpdateCheck = std::async(std::launch::async, [] { return openfbx::CheckForUpdates(kAppVersion); });
+    } catch (...) { gUpdateResult = {"Could not start the update check. Please retry."}; }
+}
+
+void DrawUpdateWindow(Font font)
+{
+    if (gUpdateCheck.valid() && gUpdateCheck.wait_for(std::chrono::seconds(0)) == std::future_status::ready) {
+        try { gUpdateResult = gUpdateCheck.get(); }
+        catch (...) { gUpdateResult = {"Could not check for updates. Please retry."}; }
+    }
+    if (!gUpdateWindowOpen) return;
+    const float width = std::min(580.0f, static_cast<float>(GetScreenWidth()) - 16.0f);
+    const Rectangle bounds{(GetScreenWidth() - width) * 0.5f, (GetScreenHeight() - 190.0f) * 0.5f, width, 190};
+    DrawRectangle(0, 0, GetScreenWidth(), GetScreenHeight(), Color{0, 0, 0, 90});
+    DrawRectangleRec(bounds, Color{22, 25, 29, 255});
+    DrawRectangleLinesEx(bounds, 1, Color{86, 96, 108, 255});
+    DrawUiText(font, "CHECK FOR UPDATES", bounds.x + 16, bounds.y + 16, 17, RAYWHITE);
+    DrawUiText(font, TextFormat("Installed version: %s", kAppVersion), bounds.x + 16, bounds.y + 52, 16, RAYWHITE);
+    DrawUiTextClipped(font, gUpdateResult.message.c_str(), bounds.x + 16, bounds.y + 84, 15, width - 32, RAYWHITE);
+    if (DrawPanelButton(font, Rectangle{bounds.x + width - 38, bounds.y + 10, 26, 24}, "x") || IsKeyPressed(KEY_ESCAPE))
+        gUpdateWindowOpen = false;
+    if (!gUpdateCheck.valid() && DrawPanelButton(font, Rectangle{bounds.x + 16, bounds.y + 138, 100, 28}, "Check again")) StartUpdateCheck();
+    if (DrawPanelButton(font, Rectangle{bounds.x + 128, bounds.y + 138, 180, 28}, gUpdateResult.available ? "Download update" : "View GitHub releases"))
+        OpenURL("https://github.com/sveetartist/OpenFBX/releases/latest");
+}
+
+Rectangle GetPreferencesBounds()
+{
+    const float width = std::min(420.0f, GetScreenWidth() - 16.0f);
+    return Rectangle{ std::max(8.0f, std::min(186.0f, GetScreenWidth() - width - 8.0f)),
+                      29.0f, width, std::max(60.0f, std::min(452.0f, GetScreenHeight() - 37.0f)) };
+}
+
+bool DrawPreferences(Font font, Rectangle bounds, NavigationPreset& navigation)
+{
+    static float scroll = 0;
+    constexpr float contentHeight = 436.0f;
+    const float maxScroll = std::max(0.0f, contentHeight + 16.0f - bounds.height);
+    if (CheckCollisionPointRec(GetMousePosition(), bounds)) scroll -= GetMouseWheelMove() * 32.0f;
+    scroll = ClampFloat(scroll, 0, maxScroll);
+    DrawRectangleRec(bounds, Color{28, 31, 35, 255});
+    DrawRectangleLinesEx(bounds, 1, Color{70, 80, 90, 255});
+    const Rectangle clip{bounds.x + 8, bounds.y + 8, bounds.width - 20, bounds.height - 16};
+    BeginScissorMode(static_cast<int>(clip.x), static_cast<int>(clip.y), static_cast<int>(clip.width), static_cast<int>(clip.height));
+    float y = clip.y - scroll;
+    auto text = [&](const char* label, Color color = Color{185, 198, 210, 255})
+    {
+        DrawUiTextClipped(font, label, clip.x + 4, y + 4, 14, clip.width - 8, color);
+        y += 24;
+    };
+    auto button = [&](Rectangle rect, const char* label)
+    {
+        openfbx::SetUiPointerBlocked(!CheckCollisionPointRec(GetMousePosition(), clip));
+        const bool clicked = DrawPanelButton(font, rect, label);
+        openfbx::SetUiPointerBlocked(false);
+        return clicked;
+    };
+    auto numeric = [&](const char* label, auto& value, auto step, auto minimum, auto maximum, auto defaultValue, const char* units)
+    {
+        char line[96];
+        std::snprintf(line, sizeof(line), "%s: %.1f%s", label, static_cast<double>(value), units);
+        const float controlsX = clip.x + clip.width - 128;
+        DrawUiTextClipped(font, line, clip.x + 4, y + 6, 14, clip.width - 138, RAYWHITE);
+        if (button(Rectangle{controlsX, y, 28, 26}, "-")) value = std::max(minimum, value - step);
+        if (button(Rectangle{controlsX + 32, y, 28, 26}, "+")) value = std::min(maximum, value + step);
+        if (button(Rectangle{controlsX + 64, y, 64, 26}, "Reset")) value = defaultValue;
+        y += 32;
+    };
+    text("NAVIGATION", RAYWHITE);
+    const float half = (clip.width - 4) * 0.5f;
+    if (button(Rectangle{clip.x, y, half, 26}, navigation == NavigationPreset::Blender ? "[x] Blender" : "Blender")) navigation = NavigationPreset::Blender;
+    if (button(Rectangle{clip.x + half + 4, y, half, 26}, navigation == NavigationPreset::Maya ? "[x] Maya" : "Maya")) navigation = NavigationPreset::Maya;
+    y += 32;
+    text(navigation == NavigationPreset::Blender ? "Orbit: MMB | Pan: Shift+MMB" : "Orbit: Alt+LMB | Pan: Alt+MMB");
+    text(navigation == NavigationPreset::Blender ? "Zoom: wheel | Snap: Alt while orbiting" : "Zoom: Alt+RMB / wheel | Snap: Shift");
+    text("TRANSFORM GIZMO", RAYWHITE);
+    numeric("Scale", gTransformGizmoScale, 0.1f, kMinTransformGizmoScale, kMaxTransformGizmoScale, 1.0f, "x");
+    numeric("Thickness", gTransformGizmoLineWidth, 0.5f, kMinTransformGizmoLineWidth, kMaxTransformGizmoLineWidth, 6.0f, " px");
+    text("BONE ORIENTATION", RAYWHITE);
+    numeric("Scale", gBoneOrientationScale, 0.25f, kMinBoneOrientationScale, kMaxBoneOrientationScale, 1.0f, "x");
+    numeric("Thickness", gBoneOrientationLineWidth, 0.5f, kMinBoneOrientationLineWidth, kMaxBoneOrientationLineWidth, 2.0f, " px");
+    text("CHECKER TEXTURE", RAYWHITE);
+    if (button(Rectangle{clip.x, y, clip.width, 26}, gUseColoredChecker ? "[x] Colored checker" : "[ ] Colored checker")) gUseColoredChecker = !gUseColoredChecker;
+    y += 32;
+    if (gUseColoredChecker)
+    {
+        const std::string color = "Color: " + std::to_string(gCheckerColor) + " / 5";
+        if (button(Rectangle{clip.x, y, clip.width, 26}, color.c_str())) gCheckerColor = gCheckerColor % 5 + 1;
+    }
+    else DrawUiTextClipped(font, "Monochrome checker", clip.x + 4, y + 6, 14, clip.width - 8, Color{185, 198, 210, 255});
+    y += 32;
+    int& size = gUseColoredChecker ? gCheckerTextureSize : gCheckerSquares;
+    const std::string sizeLabel = gUseColoredChecker ? "Resolution: " + std::to_string(size) + " px" : "Squares / tile: " + std::to_string(size);
+    DrawUiTextClipped(font, sizeLabel.c_str(), clip.x + 4, y + 6, 14, clip.width - 138, RAYWHITE);
+    const float controlsX = clip.x + clip.width - 128;
+    if (button(Rectangle{controlsX, y, 28, 26}, "-")) size = std::max(gUseColoredChecker ? 512 : 2, size / 2);
+    if (button(Rectangle{controlsX + 32, y, 28, 26}, "+")) size = std::min(gUseColoredChecker ? 4096 : 128, size * 2);
+    if (button(Rectangle{controlsX + 64, y, 64, 26}, "Reset")) size = gUseColoredChecker ? 1024 : 16;
+    y += 40;
+    const bool edit = button(Rectangle{clip.x, y, clip.width, 28}, "Edit Hotkeys...");
+    EndScissorMode();
+    if (maxScroll > 0)
+    {
+        const float thumbHeight = clip.height * bounds.height / (contentHeight + 16);
+        DrawRectangleRec(Rectangle{bounds.x + bounds.width - 6, clip.y, 3, clip.height}, Color{45, 52, 60, 255});
+        DrawRectangleRec(Rectangle{bounds.x + bounds.width - 6, clip.y + (clip.height - thumbHeight) * scroll / maxScroll, 3, thumbHeight}, Color{140, 160, 180, 255});
+    }
+    if (edit) OpenHotkeyEditor();
+    return edit;
+}
+
 void DrawMenuBar(Font font,
                  OpenMenu& openMenu,
                  bool& openRequested,
@@ -67,13 +188,13 @@ void DrawMenuBar(Font font,
         openMenuBounds = Rectangle{ 124.0f, 29.0f, 230.0f, 458.0f };
         break;
     case OpenMenu::Preferences:
-        openMenuBounds = Rectangle{ 186.0f, 29.0f, 420.0f, 608.0f };
+        openMenuBounds = GetPreferencesBounds();
         break;
     case OpenMenu::Debug:
         openMenuBounds = Rectangle{ 308.0f, 29.0f, 230.0f, 68.0f };
         break;
     case OpenMenu::Help:
-        openMenuBounds = Rectangle{ 378.0f, 29.0f, 230.0f, 38.0f };
+        openMenuBounds = Rectangle{ 378.0f, 29.0f, 230.0f, 68.0f };
         break;
     case OpenMenu::None:
         break;
@@ -90,27 +211,27 @@ void DrawMenuBar(Font font,
     if (openMenu == OpenMenu::File)
     {
         DrawRectangle(8, 29, 300, 278, Color{ 28, 31, 35, 245 });
-        if (DrawMenuItem(font, Rectangle{ 8.0f, 29.0f, 300.0f, 30.0f }, "Open Model...      Ctrl+O"))
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 29.0f, 300.0f, 30.0f }, HotkeyLabel("Open Model...", HotkeyAction::Open).c_str()))
         {
             openRequested = true;
             openMenu = OpenMenu::None;
         }
-        if (DrawMenuItem(font, Rectangle{ 8.0f, 59.0f, 300.0f, 30.0f }, "Close Tab        Ctrl+W"))
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 59.0f, 300.0f, 30.0f }, HotkeyLabel("Close Tab", HotkeyAction::Close).c_str()))
         {
             closeTabRequested = true;
             openMenu = OpenMenu::None;
         }
-        if (DrawMenuItem(font, Rectangle{ 8.0f, 89.0f, 300.0f, 30.0f }, "Reload Tab        Ctrl+R"))
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 89.0f, 300.0f, 30.0f }, HotkeyLabel("Reload Tab", HotkeyAction::Reload).c_str()))
         {
             reloadTabRequested = true;
             openMenu = OpenMenu::None;
         }
-        if (DrawMenuItem(font, Rectangle{ 8.0f, 119.0f, 300.0f, 30.0f }, "Save FBX        Ctrl+S"))
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 119.0f, 300.0f, 30.0f }, HotkeyLabel("Save FBX", HotkeyAction::Save).c_str()))
         {
             saveFbxRequested = true;
             openMenu = OpenMenu::None;
         }
-        if (DrawMenuItem(font, Rectangle{ 8.0f, 149.0f, 300.0f, 30.0f }, "Save As...        Ctrl+Shift+S"))
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 149.0f, 300.0f, 30.0f }, HotkeyLabel("Save As...", HotkeyAction::SaveAs).c_str()))
         {
             saveAsFbxRequested = true;
             openMenu = OpenMenu::None;
@@ -130,7 +251,7 @@ void DrawMenuBar(Font font,
             importAnimationsRequested = true;
             openMenu = OpenMenu::None;
         }
-        if (DrawMenuItem(font, Rectangle{ 8.0f, 269.0f, 300.0f, 30.0f }, "Exit        Ctrl+Q"))
+        if (DrawMenuItem(font, Rectangle{ 8.0f, 269.0f, 300.0f, 30.0f }, HotkeyLabel("Exit", HotkeyAction::Quit).c_str()))
         {
             quitRequested = true;
             openMenu = OpenMenu::None;
@@ -139,12 +260,12 @@ void DrawMenuBar(Font font,
     else if (openMenu == OpenMenu::Edit)
     {
         DrawRectangle(66, 29, 230, 68, Color{ 28, 31, 35, 245 });
-        if (DrawMenuItem(font, Rectangle{ 66.0f, 29.0f, 230.0f, 30.0f }, canUndo ? "Undo        Ctrl+Z" : "Undo        Ctrl+Z", false))
+        if (DrawMenuItem(font, Rectangle{ 66.0f, 29.0f, 230.0f, 30.0f }, canUndo ? HotkeyLabel("Undo", HotkeyAction::Undo).c_str() : HotkeyLabel("Undo", HotkeyAction::Undo).c_str(), false))
         {
             if (canUndo) undoRequested = true;
             openMenu = OpenMenu::None;
         }
-        if (DrawMenuItem(font, Rectangle{ 66.0f, 59.0f, 230.0f, 30.0f }, canRedo ? "Redo        Ctrl+Y" : "Redo        Ctrl+Y", false))
+        if (DrawMenuItem(font, Rectangle{ 66.0f, 59.0f, 230.0f, 30.0f }, canRedo ? HotkeyLabel("Redo", HotkeyAction::Redo).c_str() : HotkeyLabel("Redo", HotkeyAction::Redo).c_str(), false))
         {
             if (canRedo) redoRequested = true;
             openMenu = OpenMenu::None;
@@ -152,12 +273,12 @@ void DrawMenuBar(Font font,
         if (!canUndo)
         {
             DrawRectangleRec(Rectangle{ 66.0f, 29.0f, 230.0f, 30.0f }, Color{ 28, 31, 35, 160 });
-            DrawUiText(font, "Undo        Ctrl+Z", 76.0f, 34.0f, 16.0f, Color{ 105, 115, 124, 255 });
+            DrawUiText(font, HotkeyLabel("Undo", HotkeyAction::Undo).c_str(), 76.0f, 34.0f, 16.0f, Color{ 105, 115, 124, 255 });
         }
         if (!canRedo)
         {
             DrawRectangleRec(Rectangle{ 66.0f, 59.0f, 230.0f, 30.0f }, Color{ 28, 31, 35, 160 });
-            DrawUiText(font, "Redo        Ctrl+Y", 76.0f, 64.0f, 16.0f, Color{ 105, 115, 124, 255 });
+            DrawUiText(font, HotkeyLabel("Redo", HotkeyAction::Redo).c_str(), 76.0f, 64.0f, 16.0f, Color{ 105, 115, 124, 255 });
         }
     }
     else if (openMenu == OpenMenu::View)
@@ -187,7 +308,7 @@ void DrawMenuBar(Font font,
         {
             viewMode = ViewMode::Checker;
         }
-        if (DrawMenuItem(font, Rectangle{ 124.0f, 217.0f, 230.0f, 30.0f }, visibility.geometry ? "[x] Geometry        G" : "[ ] Geometry        G"))
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 217.0f, 230.0f, 30.0f }, visibility.geometry ? HotkeyLabel("[x] Geometry", HotkeyAction::Geometry).c_str() : HotkeyLabel("[ ] Geometry", HotkeyAction::Geometry).c_str()))
         {
             visibility.geometry = !visibility.geometry;
         }
@@ -199,11 +320,11 @@ void DrawMenuBar(Font font,
         {
             visibility.backfaceCulling = !visibility.backfaceCulling;
         }
-        if (DrawMenuItem(font, Rectangle{ 124.0f, 307.0f, 230.0f, 30.0f }, visibility.bones ? "[x] Bones        B" : "[ ] Bones        B"))
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 307.0f, 230.0f, 30.0f }, visibility.bones ? HotkeyLabel("[x] Bones", HotkeyAction::Bones).c_str() : HotkeyLabel("[ ] Bones", HotkeyAction::Bones).c_str()))
         {
             visibility.bones = !visibility.bones;
         }
-        if (DrawMenuItem(font, Rectangle{ 124.0f, 337.0f, 230.0f, 30.0f }, visibility.boneRotations ? "[x] Bone Orientation  O" : "[ ] Bone Orientation  O"))
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 337.0f, 230.0f, 30.0f }, visibility.boneRotations ? HotkeyLabel("[x] Bone Orientation", HotkeyAction::BoneAxes).c_str() : HotkeyLabel("[ ] Bone Orientation", HotkeyAction::BoneAxes).c_str()))
         {
             visibility.boneRotations = !visibility.boneRotations;
         }
@@ -215,11 +336,11 @@ void DrawMenuBar(Font font,
         {
             visibility.skinWeights = !visibility.skinWeights;
         }
-        if (DrawMenuItem(font, Rectangle{ 124.0f, 427.0f, 230.0f, 30.0f }, "Hide / Show Selected  H") && activeTab)
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 427.0f, 230.0f, 30.0f }, HotkeyLabel("Hide / Show Selected", HotkeyAction::Hide).c_str()) && activeTab)
         {
             ToggleSelectedNodeVisibility(*activeTab);
         }
-        if (DrawMenuItem(font, Rectangle{ 124.0f, 457.0f, 230.0f, 30.0f }, "Show All        Alt+H"))
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 457.0f, 230.0f, 30.0f }, HotkeyLabel("Show All", HotkeyAction::ShowAll).c_str()))
         {
             if (activeTab) ShowAllNodes(*activeTab);
             visibility.geometry = true;
@@ -229,111 +350,7 @@ void DrawMenuBar(Font font,
     }
     else if (openMenu == OpenMenu::Preferences)
     {
-        DrawRectangle(186, 29, 420, 608, Color{ 28, 31, 35, 245 });
-        DrawUiText(font, "NAVIGATION", 198.0f, 39.0f, 16.0f, Color{ 165, 182, 196, 255 });
-        if (DrawMenuItem(font, Rectangle{ 196.0f, 64.0f, 185.0f, 30.0f }, "Blender", navigation == NavigationPreset::Blender))
-        {
-            navigation = NavigationPreset::Blender;
-        }
-        if (DrawMenuItem(font, Rectangle{ 391.0f, 64.0f, 185.0f, 30.0f }, "Maya", navigation == NavigationPreset::Maya))
-        {
-            navigation = NavigationPreset::Maya;
-        }
-
-        DrawUiText(font, "GIZMO", 198.0f, 110.0f, 16.0f, Color{ 165, 182, 196, 255 });
-        char gizmoSizeText[64] = {};
-        std::snprintf(gizmoSizeText, sizeof(gizmoSizeText), "Size: %d%%", static_cast<int>(std::round(gTransformGizmoScale * 100.0f)));
-        DrawUiText(font, gizmoSizeText, 198.0f, 139.0f, 15.0f, Color{ 205, 213, 220, 255 });
-        if (DrawPanelButton(font, Rectangle{ 330.0f, 132.0f, 34.0f, 26.0f }, "-"))
-        {
-            gTransformGizmoScale = ClampFloat(gTransformGizmoScale - 0.1f, kMinTransformGizmoScale, kMaxTransformGizmoScale);
-        }
-        if (DrawPanelButton(font, Rectangle{ 372.0f, 132.0f, 34.0f, 26.0f }, "+"))
-        {
-            gTransformGizmoScale = ClampFloat(gTransformGizmoScale + 0.1f, kMinTransformGizmoScale, kMaxTransformGizmoScale);
-        }
-        if (DrawPanelButton(font, Rectangle{ 416.0f, 132.0f, 70.0f, 26.0f }, "Reset"))
-        {
-            gTransformGizmoScale = 1.0f;
-        }
-
-        char gizmoThicknessText[64] = {};
-        std::snprintf(gizmoThicknessText, sizeof(gizmoThicknessText), "Thickness: %.1f px", gTransformGizmoLineWidth);
-        DrawUiText(font, gizmoThicknessText, 198.0f, 169.0f, 15.0f, Color{ 205, 213, 220, 255 });
-        if (DrawPanelButton(font, Rectangle{ 330.0f, 162.0f, 34.0f, 26.0f }, "-"))
-        {
-            gTransformGizmoLineWidth = ClampFloat(gTransformGizmoLineWidth - 0.5f, kMinTransformGizmoLineWidth, kMaxTransformGizmoLineWidth);
-        }
-        if (DrawPanelButton(font, Rectangle{ 372.0f, 162.0f, 34.0f, 26.0f }, "+"))
-        {
-            gTransformGizmoLineWidth = ClampFloat(gTransformGizmoLineWidth + 0.5f, kMinTransformGizmoLineWidth, kMaxTransformGizmoLineWidth);
-        }
-        if (DrawPanelButton(font, Rectangle{ 416.0f, 162.0f, 70.0f, 26.0f }, "Reset"))
-        {
-            gTransformGizmoLineWidth = 6.0f;
-        }
-
-        DrawUiText(font, "BONE ORIENTATION", 198.0f, 214.0f, 16.0f, Color{ 165, 182, 196, 255 });
-        char boneSizeText[64] = {};
-        std::snprintf(boneSizeText, sizeof(boneSizeText), "Size: %d%%", static_cast<int>(std::round(gBoneOrientationScale * 100.0f)));
-        DrawUiText(font, boneSizeText, 198.0f, 243.0f, 15.0f, Color{ 205, 213, 220, 255 });
-        if (DrawPanelButton(font, Rectangle{ 350.0f, 236.0f, 34.0f, 26.0f }, "-"))
-            gBoneOrientationScale = ClampFloat(gBoneOrientationScale - 0.25f, kMinBoneOrientationScale, kMaxBoneOrientationScale);
-        if (DrawPanelButton(font, Rectangle{ 392.0f, 236.0f, 34.0f, 26.0f }, "+"))
-            gBoneOrientationScale = ClampFloat(gBoneOrientationScale + 0.25f, kMinBoneOrientationScale, kMaxBoneOrientationScale);
-        if (DrawPanelButton(font, Rectangle{ 436.0f, 236.0f, 70.0f, 26.0f }, "Reset"))
-            gBoneOrientationScale = 1.0f;
-
-        char boneThicknessText[64] = {};
-        std::snprintf(boneThicknessText, sizeof(boneThicknessText), "Thickness: %.1f px", gBoneOrientationLineWidth);
-        DrawUiText(font, boneThicknessText, 198.0f, 273.0f, 15.0f, Color{ 205, 213, 220, 255 });
-        if (DrawPanelButton(font, Rectangle{ 350.0f, 266.0f, 34.0f, 26.0f }, "-"))
-            gBoneOrientationLineWidth = ClampFloat(gBoneOrientationLineWidth - 0.5f, kMinBoneOrientationLineWidth, kMaxBoneOrientationLineWidth);
-        if (DrawPanelButton(font, Rectangle{ 392.0f, 266.0f, 34.0f, 26.0f }, "+"))
-            gBoneOrientationLineWidth = ClampFloat(gBoneOrientationLineWidth + 0.5f, kMinBoneOrientationLineWidth, kMaxBoneOrientationLineWidth);
-        if (DrawPanelButton(font, Rectangle{ 436.0f, 266.0f, 70.0f, 26.0f }, "Reset"))
-            gBoneOrientationLineWidth = 2.0f;
-        DrawUiText(font, "View > Bone Orientation (O) toggles the axes", 198.0f, 302.0f, 14.0f, Color{ 165, 182, 196, 255 });
-
-        DrawUiText(font, "CHECKER TEXTURE", 198.0f, 330.0f, 16.0f, Color{ 165, 182, 196, 255 });
-        if (DrawMenuItem(font, Rectangle{ 198.0f, 350.0f, 390.0f, 28.0f },
-                         gUseColoredChecker ? "[x] Use Colored Checker" : "[ ] Use Colored Checker"))
-            gUseColoredChecker = !gUseColoredChecker;
-        char checkerSizeText[80] = {};
-        if (gUseColoredChecker)
-        {
-            char colorText[40] = {};
-            std::snprintf(colorText, sizeof(colorText), "Color: %d / 5", gCheckerColor);
-            DrawUiText(font, colorText, 198.0f, 391.0f, 15.0f, Color{ 205, 213, 220, 255 });
-            if (DrawPanelButton(font, Rectangle{ 414.0f, 384.0f, 152.0f, 26.0f }, "Next Color"))
-                gCheckerColor = gCheckerColor % 5 + 1;
-            std::snprintf(checkerSizeText, sizeof(checkerSizeText), "Texture: %dx%d", gCheckerTextureSize, gCheckerTextureSize);
-            DrawUiText(font, checkerSizeText, 198.0f, 425.0f, 15.0f, Color{ 205, 213, 220, 255 });
-            if (DrawPanelButton(font, Rectangle{ 414.0f, 418.0f, 34.0f, 26.0f }, "-"))
-                gCheckerTextureSize = std::max(512, gCheckerTextureSize / 2);
-            if (DrawPanelButton(font, Rectangle{ 454.0f, 418.0f, 34.0f, 26.0f }, "+"))
-                gCheckerTextureSize = std::min(4096, gCheckerTextureSize * 2);
-            if (DrawPanelButton(font, Rectangle{ 496.0f, 418.0f, 70.0f, 26.0f }, "Reset"))
-                gCheckerTextureSize = 1024;
-        }
-        else
-        {
-            std::snprintf(checkerSizeText, sizeof(checkerSizeText), "Squares / UV tile: %d", gCheckerSquares);
-            DrawUiText(font, checkerSizeText, 198.0f, 391.0f, 15.0f, Color{ 205, 213, 220, 255 });
-            if (DrawPanelButton(font, Rectangle{ 414.0f, 384.0f, 34.0f, 26.0f }, "-"))
-                gCheckerSquares = std::max(2, gCheckerSquares / 2);
-            if (DrawPanelButton(font, Rectangle{ 454.0f, 384.0f, 34.0f, 26.0f }, "+"))
-                gCheckerSquares = std::min(128, gCheckerSquares * 2);
-            if (DrawPanelButton(font, Rectangle{ 496.0f, 384.0f, 70.0f, 26.0f }, "Reset"))
-                gCheckerSquares = 16;
-        }
-
-        DrawUiText(font, "HOTKEYS", 198.0f, 474.0f, 16.0f, Color{ 165, 182, 196, 255 });
-        DrawUiText(font, "Q/W/E/R tools    Ctrl+O open FBX    Ctrl+R reload", 198.0f, 500.0f, 15.0f, Color{ 205, 213, 220, 255 });
-        DrawUiText(font, "Ctrl+Z undo    Ctrl+Y redo    T textures    C channels", 198.0f, 526.0f, 15.0f, Color{ 205, 213, 220, 255 });
-        DrawUiText(font, "Blender: MMB orbit, Alt snap, Shift+MMB pan, Wheel zoom", 198.0f, 552.0f, 15.0f, Color{ 205, 213, 220, 255 });
-        DrawUiText(font, "Maya: Alt+LMB orbit, Shift snap, Alt+MMB pan, Alt+RMB/Wheel zoom", 198.0f, 578.0f, 15.0f, Color{ 205, 213, 220, 255 });
-        DrawUiText(font, "Esc deselects    Ctrl+W closes tab    Ctrl+Q quits", 198.0f, 604.0f, 15.0f, Color{ 205, 213, 220, 255 });
+        if (DrawPreferences(font, openMenuBounds, navigation)) openMenu = OpenMenu::None;
     }
     else if (openMenu == OpenMenu::Debug)
     {
@@ -351,7 +368,12 @@ void DrawMenuBar(Font font,
     }
     else if (openMenu == OpenMenu::Help)
     {
-        DrawRectangle(378, 29, 230, 38, Color{ 28, 31, 35, 245 });
+        DrawRectangle(378, 29, 230, 68, Color{ 28, 31, 35, 245 });
+        if (DrawMenuItem(font, Rectangle{378.0f, 59.0f, 230.0f, 30.0f}, "Check for updates"))
+        {
+            StartUpdateCheck();
+            openMenu = OpenMenu::None;
+        }
         if (DrawMenuItem(font, Rectangle{ 378.0f, 29.0f, 230.0f, 30.0f }, "About openfbx"))
         {
             aboutRequested = true;
@@ -507,7 +529,7 @@ void DrawTabs(Font font, std::vector<std::unique_ptr<ModelTab>>& tabs, int& acti
 
 void UpdateAnimation(AnimationState& animation, const LoadedFbxModel& loaded)
 {
-    if (IsKeyPressed(KEY_SPACE) && !loaded.animations.empty())
+    if (HotkeyPressed(HotkeyAction::Play) && !loaded.animations.empty())
     {
         animation.playing = !animation.playing;
     }

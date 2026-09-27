@@ -1,7 +1,10 @@
-build/
-build-*/
-out/
-_trash/
+# Generated build trees and distributable packages.
+/build/
+/build-*/
+/out/
+/releases/
+/_trash/
+/public_git_page/
 
 .vs/
 *.user
@@ -17,6 +20,6 @@ _trash/
 *.lib
 *.exp
 
-test_models/
+/test_models/
 
-dev_plan.txt
+/dev_plan.txt

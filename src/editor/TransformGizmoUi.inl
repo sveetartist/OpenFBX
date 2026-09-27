@@ -10,14 +10,14 @@ const char* GetTransformToolName(TransformTool tool)
     return "Select";
 }
 
-const char* GetTransformToolHotkey(TransformTool tool)
+std::string GetTransformToolHotkey(TransformTool tool)
 {
     switch (tool)
     {
-    case TransformTool::Select: return "Q";
-    case TransformTool::Move: return "W";
-    case TransformTool::Rotate: return "E";
-    case TransformTool::Scale: return "R";
+    case TransformTool::Select: return HotkeyText(gHotkeys[static_cast<size_t>(HotkeyAction::Select)]);
+    case TransformTool::Move: return HotkeyText(gHotkeys[static_cast<size_t>(HotkeyAction::Move)]);
+    case TransformTool::Rotate: return HotkeyText(gHotkeys[static_cast<size_t>(HotkeyAction::Rotate)]);
+    case TransformTool::Scale: return HotkeyText(gHotkeys[static_cast<size_t>(HotkeyAction::Scale)]);
     }
     return "";
 }
@@ -539,8 +539,8 @@ void DrawTransformToolbar(Font font, TransformTool tool, GizmoOrientation orient
         const bool hovered = CheckCollisionPointRec(GetMousePosition(), bounds);
         DrawRectangleRec(bounds, selected ? Color{ 58, 78, 98, 245 } : hovered ? Color{ 42, 48, 55, 245 } : Color{ 24, 27, 31, 232 });
         DrawRectangleLinesEx(bounds, 1.0f, selected ? Color{ 128, 188, 235, 255 } : Color{ 78, 88, 98, 255 });
-        DrawUiText(font, GetTransformToolHotkey(tools[i]), bounds.x + 8.0f, bounds.y + 4.0f, 16.0f, RAYWHITE);
-        DrawUiText(font, GetTransformToolName(tools[i]), bounds.x + 48.0f, bounds.y + 7.0f, 13.0f, selected ? Color{ 205, 224, 238, 255 } : Color{ 154, 166, 178, 255 });
+        DrawUiText(font, GetTransformToolName(tools[i]), bounds.x + 8.0f, bounds.y + 2.0f, 13.0f, RAYWHITE);
+        DrawUiTextClipped(font, GetTransformToolHotkey(tools[i]).c_str(), bounds.x + 8.0f, bounds.y + 17.0f, 11.0f, bounds.width - 16.0f, Color{ 154, 166, 178, 255 });
     }
 
     DrawUiText(font, "Space", hierarchyBlockW + 12.0f, 280.0f, 13.0f, Color{ 154, 166, 178, 255 });

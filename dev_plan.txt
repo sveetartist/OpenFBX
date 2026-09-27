@@ -3,7 +3,7 @@ Dev notes for future versions:
 
 Ideas:
 
-preferences
+save preferences
 dedicated hotkey editor
 freeze objects
 multiple views for opened fbx
@@ -11,6 +11,7 @@ view for every open fbx
 pivot off on > rename edit pivot
 validation > too low texel density
 fix degenerate triangles > které to ale jsou > a co ngons?
+auto - load textures on open (name - based)
 
 
 

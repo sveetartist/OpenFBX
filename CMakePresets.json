@@ -2,23 +2,32 @@
   "version": 6,
   "configurePresets": [
     {
-      "name": "vs2022",
-      "displayName": "Visual Studio 2022 x64",
+      "name": "release",
+      "displayName": "Windows x64",
       "generator": "Visual Studio 17 2022",
       "architecture": "x64",
-      "binaryDir": "${sourceDir}/build/vs2022"
+      "binaryDir": "${sourceDir}/build/.cmake",
+      "cacheVariables": {
+        "OPENFBX_BUILD_TESTS": "ON",
+        "CMAKE_RUNTIME_OUTPUT_DIRECTORY_RELEASE": "${sourceDir}/build"
+      }
     }
   ],
   "buildPresets": [
     {
-      "name": "debug",
-      "configurePreset": "vs2022",
-      "configuration": "Debug"
-    },
-    {
       "name": "release",
-      "configurePreset": "vs2022",
+      "configurePreset": "release",
       "configuration": "Release"
+    }
+  ],
+  "testPresets": [
+    {
+      "name": "dev",
+      "configurePreset": "release",
+      "configuration": "Release",
+      "output": {
+        "outputOnFailure": true
+      }
     }
   ]
 }

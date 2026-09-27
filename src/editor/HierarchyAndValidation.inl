@@ -1091,7 +1091,7 @@ int ScoreTextureCandidate(const std::string& lowerStem, const std::string& lower
     {
     case PbrTextureSlot::Diffuse:
         if (hasAny({ "diffuse", "albedo", "basecolor", "base_color", "_col", "color" })) score += 10;
-        if (hasAny({ "normal", "nrm", "rough", "metal", "ao", "occlusion", "opacity", "alpha", "transparency", "mask" })) score -= 8;
+        if (hasAny({ "normal", "nrm", "rough", "metal", "ao", "occlusion", "opacity", "alpha", "transparency", "mask", "specular", "specgloss", "gloss", "smoothness" })) score -= 8;
         break;
     case PbrTextureSlot::Normal:
         if (hasAny({ "normal", "_nrm", "_nor" })) score += 10;
@@ -1113,6 +1113,12 @@ int ScoreTextureCandidate(const std::string& lowerStem, const std::string& lower
         break;
     case PbrTextureSlot::Opacity:
         if (hasAny({ "opacity", "alpha", "transparency", "_trans", "_mask", "cutout" })) score += 10;
+        break;
+    case PbrTextureSlot::Specular:
+        if (hasAny({ "specular", "_spec", "specgloss" })) score += 10;
+        break;
+    case PbrTextureSlot::Glossiness:
+        if (hasAny({ "glossiness", "gloss", "smoothness", "_smooth" })) score += 10;
         break;
     case PbrTextureSlot::Count:
         break;
@@ -1283,6 +1289,11 @@ int LoadPbrTexturesFromFolder(ModelTab& tab, int materialIndex, const std::files
         std::string loadError;
         if (LoadPbrTexture(tab, materialIndex, slot, path, loadError))
         {
+            if (slot == PbrTextureSlot::Glossiness)
+            {
+                const std::string stem = ToLower(std::filesystem::path(path).stem().string());
+                tab.pbrMaterials[materialIndex].glossinessChannel = stem.find("spec") != std::string::npos ? PackedChannel::A : PackedChannel::R;
+            }
             ++loadedCount;
         }
         else if (error.empty())
@@ -1300,6 +1311,7 @@ Color GetPackedChannelColor(PackedChannel channel, bool hovered)
     {
     case PackedChannel::R: return hovered ? Color{ 185, 56, 56, 255 } : Color{ 140, 42, 42, 255 };
     case PackedChannel::G: return hovered ? Color{ 62, 160, 76, 255 } : Color{ 45, 118, 58, 255 };
+    case PackedChannel::A: return hovered ? Color{ 155, 155, 155, 255 } : Color{ 110, 110, 110, 255 };
     case PackedChannel::B: return hovered ? Color{ 66, 106, 200, 255 } : Color{ 50, 78, 152, 255 };
     }
 

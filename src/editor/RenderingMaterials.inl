@@ -68,6 +68,8 @@ void RestoreEditSnapshot(ModelTab& tab, const EditSnapshot& snapshot)
     {
         const PbrMaterialSnapshot& materialSnapshot = snapshot.pbrMaterials[static_cast<size_t>(materialIndex)];
         PbrMaterialState& material = tab.pbrMaterials[static_cast<size_t>(materialIndex)];
+        material.workflow = materialSnapshot.workflow;
+        material.glossinessChannel = materialSnapshot.glossinessChannel;
         material.normalDirectX = materialSnapshot.normalDirectX;
         material.roughnessChannel = materialSnapshot.roughnessChannel;
         material.metallicChannel = materialSnapshot.metallicChannel;
@@ -115,21 +117,24 @@ void UpdateMaterialShader(const LitShader& lit, const PbrMaterialState* pbr, Mat
 {
     if (!lit.valid) return;
 
+    const bool specGloss = pbr && pbr->workflow == MaterialWorkflow::SpecularGlossiness;
+    const int workflow = specGloss ? 1 : 0;
     const int texturesEnabled = texturesVisible ? 1 : 0;
     const int hasDiffuse = texturesVisible && pbr && GetPbrTexture(*pbr, PbrTextureSlot::Diffuse).loaded ? 1 : 0;
     const int hasNormal = texturesVisible && pbr && GetPbrTexture(*pbr, PbrTextureSlot::Normal).loaded ? 1 : 0;
-    const int hasRoughness = texturesVisible && pbr && GetPbrTexture(*pbr, PbrTextureSlot::Roughness).loaded ? 1 : 0;
-    const int hasMetallic = texturesVisible && pbr && GetPbrTexture(*pbr, PbrTextureSlot::Metallic).loaded ? 1 : 0;
+    const int hasRoughness = texturesVisible && pbr && GetPbrTexture(*pbr, specGloss ? PbrTextureSlot::Glossiness : PbrTextureSlot::Roughness).loaded ? 1 : 0;
+    const int hasMetallic = texturesVisible && pbr && GetPbrTexture(*pbr, specGloss ? PbrTextureSlot::Specular : PbrTextureSlot::Metallic).loaded ? 1 : 0;
     const int hasAo = texturesVisible && pbr && GetPbrTexture(*pbr, PbrTextureSlot::AmbientOcclusion).loaded ? 1 : 0;
     const int hasEmissive = texturesVisible && pbr && GetPbrTexture(*pbr, PbrTextureSlot::Emissive).loaded ? 1 : 0;
     const int hasOpacity = texturesVisible && pbr && GetPbrTexture(*pbr, PbrTextureSlot::Opacity).loaded ? 1 : 0;
     const int normalDirectX = pbr && pbr->normalDirectX ? 1 : 0;
-    const int roughnessChannel = pbr ? ToInt(pbr->roughnessChannel) : 0;
+    const int roughnessChannel = pbr ? ToInt(specGloss ? pbr->glossinessChannel : pbr->roughnessChannel) : 0;
     const int metallicChannel = pbr ? ToInt(pbr->metallicChannel) : 0;
     const int aoChannel = pbr ? ToInt(pbr->aoChannel) : 0;
     const int opacityChannel = pbr ? ToInt(pbr->opacityChannel) : ToInt(OpacityChannel::RGB);
     const int materialPreviewMode = ToInt(previewMode);
 
+    SetShaderValue(lit.shader, lit.materialWorkflowLoc, &workflow, SHADER_UNIFORM_INT);
     SetShaderValue(lit.shader, lit.hasDiffuseMapLoc, &hasDiffuse, SHADER_UNIFORM_INT);
     SetShaderValue(lit.shader, lit.hasNormalMapLoc, &hasNormal, SHADER_UNIFORM_INT);
     SetShaderValue(lit.shader, lit.hasRoughnessMapLoc, &hasRoughness, SHADER_UNIFORM_INT);

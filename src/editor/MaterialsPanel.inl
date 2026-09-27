@@ -817,9 +817,10 @@ void DrawPbrTextureRow(Font font,
     DrawUiText(font, label, contentX + 52.0f, y, 15.0f, Color{ 205, 213, 220, 255 });
 
     float buttonRight = panelX + panelW - 14.0f;
-    if (slot == PbrTextureSlot::Roughness || slot == PbrTextureSlot::Metallic || slot == PbrTextureSlot::AmbientOcclusion)
+    if (slot == PbrTextureSlot::Roughness || slot == PbrTextureSlot::Metallic || slot == PbrTextureSlot::AmbientOcclusion || slot == PbrTextureSlot::Glossiness)
     {
-        PackedChannel* channel = slot == PbrTextureSlot::Roughness ? &material.roughnessChannel :
+        PackedChannel* channel = slot == PbrTextureSlot::Glossiness ? &material.glossinessChannel :
+                                 slot == PbrTextureSlot::Roughness ? &material.roughnessChannel :
                                  slot == PbrTextureSlot::Metallic ? &material.metallicChannel : &material.aoChannel;
         const Rectangle channelButton{ buttonRight - 38.0f, y - 2.0f, 34.0f, 22.0f };
         if (!inputBlocked && DrawChannelButton(font, channelButton, *channel))
@@ -927,10 +928,22 @@ void DrawMaterialsPanel(Font font,
         }
         y += 24.0f;
     }
+    PbrMaterialState& material = tab.pbrMaterials[static_cast<size_t>(tab.selectedMaterial)];
+    const bool specGloss = material.workflow == MaterialWorkflow::SpecularGlossiness;
+    const Rectangle workflowButton{contentX, y, panelW - 24.0f, 24.0f};
+    const bool switchWorkflow = DrawPanelButton(font, workflowButton,
+        specGloss ? "Specular - Glossiness" : "Metallic - Roughness");
+    if (!inputBlocked && switchWorkflow)
+    {
+        PushUndoSnapshot(tab);
+        SetMaterialWorkflow(tab, tab.selectedMaterial, specGloss ? MaterialWorkflow::MetallicRoughness : MaterialWorkflow::SpecularGlossiness);
+        clipboard.menuOpen = false;
+    }
+    y += 30.0f;
     const float clearAllW = 74.0f;
     const Rectangle loadFolderButton{ contentX, y, panelW - 30.0f - clearAllW, 24.0f };
     const Rectangle clearAllButton{ contentX + loadFolderButton.width + 6.0f, y, clearAllW, 24.0f };
-    if (!inputBlocked && DrawPanelButton(font, loadFolderButton, "Load Textures From Folder"))
+    if (!inputBlocked && DrawPanelButton(font, loadFolderButton, "Load Folder"))
     {
         const std::string pickedPath = openfbx::OpenTextureFolderDialog();
         std::string autoloadError;
@@ -980,8 +993,8 @@ void DrawMaterialsPanel(Font font,
     DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Diffuse, panelX, panelW, y, droppedPaths, droppedTextureHandled, clipboard, notice, error, inputBlocked);
     DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Normal, panelX, panelW, y, droppedPaths, droppedTextureHandled, clipboard, notice, error, inputBlocked);
 
-    DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Roughness, panelX, panelW, y, droppedPaths, droppedTextureHandled, clipboard, notice, error, inputBlocked);
-    DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Metallic, panelX, panelW, y, droppedPaths, droppedTextureHandled, clipboard, notice, error, inputBlocked);
+    DrawPbrTextureRow(font, tab, tab.selectedMaterial, material.workflow == MaterialWorkflow::SpecularGlossiness ? PbrTextureSlot::Glossiness : PbrTextureSlot::Roughness, panelX, panelW, y, droppedPaths, droppedTextureHandled, clipboard, notice, error, inputBlocked);
+    DrawPbrTextureRow(font, tab, tab.selectedMaterial, material.workflow == MaterialWorkflow::SpecularGlossiness ? PbrTextureSlot::Specular : PbrTextureSlot::Metallic, panelX, panelW, y, droppedPaths, droppedTextureHandled, clipboard, notice, error, inputBlocked);
     DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::AmbientOcclusion, panelX, panelW, y, droppedPaths, droppedTextureHandled, clipboard, notice, error, inputBlocked);
     DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Emissive, panelX, panelW, y, droppedPaths, droppedTextureHandled, clipboard, notice, error, inputBlocked);
     DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Opacity, panelX, panelW, y, droppedPaths, droppedTextureHandled, clipboard, notice, error, inputBlocked);

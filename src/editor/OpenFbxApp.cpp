@@ -1,4 +1,5 @@
 #include "AppCore.inl"
+#include "Hotkeys.inl"
 #include "RenderingMaterials.inl"
 #include "SelectionHierarchyOps.inl"
 #include "AnimationPlayback.inl"

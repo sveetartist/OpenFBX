@@ -6,6 +6,9 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <future>
+#include <chrono>
+#include "platform/UpdateChecker.h"
 #include <iostream>
 #include <limits>
 #include <memory>
@@ -168,6 +171,12 @@ enum class LeftPanelTab
     Validator
 };
 
+enum class MaterialWorkflow
+{
+    MetallicRoughness,
+    SpecularGlossiness
+};
+
 enum class PbrTextureSlot
 {
     Diffuse,
@@ -177,6 +186,8 @@ enum class PbrTextureSlot
     AmbientOcclusion,
     Emissive,
     Opacity,
+    Specular,
+    Glossiness,
     Count
 };
 
@@ -184,7 +195,8 @@ enum class PackedChannel
 {
     R,
     G,
-    B
+    B,
+    A
 };
 
 enum class OpacityChannel
@@ -238,6 +250,8 @@ struct PbrTexture
 struct PbrMaterialState
 {
     std::array<PbrTexture, static_cast<size_t>(PbrTextureSlot::Count)> textures;
+    MaterialWorkflow workflow = MaterialWorkflow::MetallicRoughness;
+    PackedChannel glossinessChannel = PackedChannel::R;
     bool normalDirectX = false;
     PackedChannel roughnessChannel = PackedChannel::G;
     PackedChannel metallicChannel = PackedChannel::B;
@@ -254,6 +268,8 @@ struct PbrTextureSnapshot
 struct PbrMaterialSnapshot
 {
     std::array<PbrTextureSnapshot, static_cast<size_t>(PbrTextureSlot::Count)> textures;
+    MaterialWorkflow workflow = MaterialWorkflow::MetallicRoughness;
+    PackedChannel glossinessChannel = PackedChannel::R;
     bool normalDirectX = false;
     PackedChannel roughnessChannel = PackedChannel::G;
     PackedChannel metallicChannel = PackedChannel::B;
@@ -478,6 +494,7 @@ struct LitShader
     int lightDirectionLoc = -1;
     int lightColorLoc = -1;
     int ambientLoc = -1;
+    int materialWorkflowLoc = -1;
     int hasDiffuseMapLoc = -1;
     int hasNormalMapLoc = -1;
     int hasRoughnessMapLoc = -1;
@@ -557,6 +574,7 @@ uniform vec3 viewPos;
 uniform vec3 lightDir;
 uniform vec4 lightColor;
 uniform vec4 ambient;
+uniform int materialWorkflow;
 uniform int hasDiffuseMap;
 uniform int hasNormalMap;
 uniform int hasRoughnessMap;
@@ -578,6 +596,7 @@ float readPackedChannel(vec4 value, int channel)
 {
     if (channel == 1) return value.g;
     if (channel == 2) return value.b;
+    if (channel == 3) return value.a;
     return value.r;
 }
 
@@ -606,12 +625,13 @@ void main()
             normal = normalize(mat3(tangent, bitangent, normal)*tangentNormal);
         }
     }
-    vec4 roughnessTexel = texturesVisible == 1 && hasRoughnessMap == 1 ? texture(texture3, fragTexCoord) : vec4(1.0);
+    vec4 roughnessTexel = texturesVisible == 1 && hasRoughnessMap == 1 ? texture(texture3, fragTexCoord) : vec4(materialWorkflow == 1 ? 0.5 : 1.0);
     vec4 metallicTexel = texturesVisible == 1 && hasMetallicMap == 1 ? texture(texture1, fragTexCoord) : vec4(0.0);
     vec4 aoTexel = texturesVisible == 1 && hasAoMap == 1 ? texture(texture4, fragTexCoord) : vec4(1.0);
     vec4 emissiveTexel = texturesVisible == 1 && hasEmissiveMap == 1 ? texture(texture5, fragTexCoord) : vec4(0.0);
     vec4 opacityTexel = texturesVisible == 1 && hasOpacityMap == 1 ? texture(texture6, fragTexCoord) : vec4(1.0);
-    float roughness = readPackedChannel(roughnessTexel, roughnessChannel);
+    float surfaceValue = readPackedChannel(roughnessTexel, roughnessChannel);
+    float roughness = materialWorkflow == 1 ? 1.0 - surfaceValue : surfaceValue;
     float metallic = readPackedChannel(metallicTexel, metallicChannel);
     float ao = readPackedChannel(aoTexel, aoChannel);
     float opacity = readOpacity(opacityTexel, opacityChannel);
@@ -628,10 +648,22 @@ void main()
     vec3 base = colDiffuse.rgb * fragColor.rgb * diffuseTexel.rgb;
     vec3 shaded = base * ambient.rgb * ao + base * lightColor.rgb * diffuse * ao + lightColor.rgb * specular * (1.0 - roughness * 0.6) * (0.35 + metallic * 0.65) + emissiveTexel.rgb;
 
+    if (materialWorkflow == 1)
+    {
+        // Specular RGB is sRGB; glossiness is linear and roughness = 1 - glossiness.
+        vec3 specularColor = hasMetallicMap == 1 ? pow(metallicTexel.rgb, vec3(2.2)) : vec3(0.04);
+        vec3 diffuseColor = pow(base, vec3(2.2)) * (1.0 - max(max(specularColor.r, specularColor.g), specularColor.b));
+        float exponent = clamp(2.0 / max(pow(roughness, 4.0), 0.0001) - 2.0, 2.0, 2048.0);
+        float highlight = pow(max(dot(normal, halfwayDir), 0.0), exponent) * (exponent + 2.0) / 8.0;
+        vec3 linearColor = diffuseColor * (ambient.rgb + lightColor.rgb * diffuse) * ao +
+                           specularColor * lightColor.rgb * highlight * diffuse + pow(emissiveTexel.rgb, vec3(2.2));
+        shaded = pow(max(linearColor, vec3(0.0)), vec3(1.0 / 2.2));
+    }
+
     if (materialPreviewMode == 1) finalColor = vec4(diffuseTexel.rgb, 1.0);
     else if (materialPreviewMode == 2) finalColor = vec4(normalTexel.rgb, 1.0);
-    else if (materialPreviewMode == 3) finalColor = vec4(vec3(roughness), 1.0);
-    else if (materialPreviewMode == 4) finalColor = vec4(vec3(metallic), 1.0);
+    else if (materialPreviewMode == 3) finalColor = vec4(vec3(surfaceValue), 1.0);
+    else if (materialPreviewMode == 4) finalColor = vec4(materialWorkflow == 1 ? (hasMetallicMap == 1 ? metallicTexel.rgb : vec3(0.22)) : vec3(metallic), 1.0);
     else if (materialPreviewMode == 5) finalColor = vec4(vec3(ao), 1.0);
     else if (materialPreviewMode == 6) finalColor = vec4(emissiveTexel.rgb, 1.0);
     else if (materialPreviewMode == 7) finalColor = vec4(vec3(opacity), 1.0);
@@ -646,6 +678,7 @@ void main()
     lit.lightDirectionLoc = GetShaderLocation(lit.shader, "lightDir");
     lit.lightColorLoc = GetShaderLocation(lit.shader, "lightColor");
     lit.ambientLoc = GetShaderLocation(lit.shader, "ambient");
+    lit.materialWorkflowLoc = GetShaderLocation(lit.shader, "materialWorkflow");
     lit.hasDiffuseMapLoc = GetShaderLocation(lit.shader, "hasDiffuseMap");
     lit.hasNormalMapLoc = GetShaderLocation(lit.shader, "hasNormalMap");
     lit.hasRoughnessMapLoc = GetShaderLocation(lit.shader, "hasRoughnessMap");
@@ -703,6 +736,7 @@ const char* GetPackedChannelName(PackedChannel channel)
     case PackedChannel::R: return "R";
     case PackedChannel::G: return "G";
     case PackedChannel::B: return "B";
+    case PackedChannel::A: return "A";
     }
 
     return "R";
@@ -736,21 +770,22 @@ PackedChannel NextPackedChannel(PackedChannel channel)
     {
     case PackedChannel::R: return PackedChannel::G;
     case PackedChannel::G: return PackedChannel::B;
-    case PackedChannel::B: return PackedChannel::R;
+    case PackedChannel::B: return PackedChannel::A;
+    case PackedChannel::A: return PackedChannel::R;
     }
 
     return PackedChannel::R;
 }
 
-const char* GetMaterialPreviewModeName(MaterialPreviewMode mode)
+const char* GetMaterialPreviewModeName(MaterialPreviewMode mode, MaterialWorkflow workflow = MaterialWorkflow::MetallicRoughness)
 {
     switch (mode)
     {
     case MaterialPreviewMode::Shaded: return "Shaded";
     case MaterialPreviewMode::Diffuse: return "Diffuse";
     case MaterialPreviewMode::Normal: return "Normal";
-    case MaterialPreviewMode::Roughness: return "Roughness";
-    case MaterialPreviewMode::Metallic: return "Metallic";
+    case MaterialPreviewMode::Roughness: return workflow == MaterialWorkflow::SpecularGlossiness ? "Glossiness" : "Roughness";
+    case MaterialPreviewMode::Metallic: return workflow == MaterialWorkflow::SpecularGlossiness ? "Specular" : "Metallic";
     case MaterialPreviewMode::AmbientOcclusion: return "AO";
     case MaterialPreviewMode::Emissive: return "Emissive";
     case MaterialPreviewMode::Opacity: return "Opacity";
@@ -787,6 +822,8 @@ MaterialMapIndex GetMaterialMapIndex(PbrTextureSlot slot)
     case PbrTextureSlot::AmbientOcclusion: return MATERIAL_MAP_OCCLUSION;
     case PbrTextureSlot::Emissive: return MATERIAL_MAP_EMISSION;
     case PbrTextureSlot::Opacity: return MATERIAL_MAP_HEIGHT;
+    case PbrTextureSlot::Specular: return MATERIAL_MAP_METALNESS;
+    case PbrTextureSlot::Glossiness: return MATERIAL_MAP_ROUGHNESS;
     case PbrTextureSlot::Count: break;
     }
 
@@ -804,6 +841,8 @@ const char* GetPbrTextureSlotName(PbrTextureSlot slot)
     case PbrTextureSlot::AmbientOcclusion: return "AO";
     case PbrTextureSlot::Emissive: return "Emissive";
     case PbrTextureSlot::Opacity: return "Opacity";
+    case PbrTextureSlot::Specular: return "Specular";
+    case PbrTextureSlot::Glossiness: return "Glossiness";
     case PbrTextureSlot::Count: break;
     }
 
@@ -907,9 +946,30 @@ void ApplyPbrTextureToModel(ModelTab& tab, int materialIndex, PbrTextureSlot slo
     if (materialIndex < 0 || materialIndex >= tab.loaded.model.materialCount) return;
 
     EnsurePbrMaterialStates(tab);
-    const PbrTexture& texture = GetPbrTexture(tab.pbrMaterials[static_cast<size_t>(materialIndex)], slot);
+    const auto& material = tab.pbrMaterials[static_cast<size_t>(materialIndex)];
+    const bool specGloss = material.workflow == MaterialWorkflow::SpecularGlossiness;
+    if ((specGloss && (slot == PbrTextureSlot::Roughness || slot == PbrTextureSlot::Metallic)) ||
+        (!specGloss && (slot == PbrTextureSlot::Glossiness || slot == PbrTextureSlot::Specular))) return;
+    const PbrTexture& texture = GetPbrTexture(material, slot);
     const MaterialMapIndex mapIndex = GetMaterialMapIndex(slot);
     tab.loaded.model.materials[materialIndex].maps[mapIndex].texture = texture.loaded ? texture.texture : Texture2D{};
+}
+
+void SetMaterialWorkflow(ModelTab& tab, int materialIndex, MaterialWorkflow workflow)
+{
+    EnsurePbrMaterialStates(tab);
+    if (materialIndex < 0 || materialIndex >= static_cast<int>(tab.pbrMaterials.size())) return;
+    tab.pbrMaterials[materialIndex].workflow = workflow;
+    ApplyPbrTextureToModel(tab, materialIndex, workflow == MaterialWorkflow::SpecularGlossiness ? PbrTextureSlot::Specular : PbrTextureSlot::Metallic);
+    ApplyPbrTextureToModel(tab, materialIndex, workflow == MaterialWorkflow::SpecularGlossiness ? PbrTextureSlot::Glossiness : PbrTextureSlot::Roughness);
+}
+
+void SyncMaterialSettings(ModelTab& tab)
+{
+    tab.loaded.materialSettings.clear();
+    for (int i = 0; i < static_cast<int>(tab.pbrMaterials.size()) && i < static_cast<int>(tab.loaded.materialNames.size()); ++i)
+        tab.loaded.materialSettings.push_back(FbxMaterialSettings{tab.loaded.materialNames[i],
+            tab.pbrMaterials[i].workflow == MaterialWorkflow::SpecularGlossiness, static_cast<int>(tab.pbrMaterials[i].glossinessChannel)});
 }
 
 void UnloadPbrTexture(ModelTab& tab, int materialIndex, PbrTextureSlot slot)
@@ -977,6 +1037,8 @@ FbxTextureUsage ToFbxTextureUsage(PbrTextureSlot slot)
     case PbrTextureSlot::AmbientOcclusion: return FbxTextureUsage::AmbientOcclusion;
     case PbrTextureSlot::Emissive: return FbxTextureUsage::Emissive;
     case PbrTextureSlot::Opacity: return FbxTextureUsage::Opacity;
+    case PbrTextureSlot::Specular: return FbxTextureUsage::Specular;
+    case PbrTextureSlot::Glossiness: return FbxTextureUsage::Glossiness;
     case PbrTextureSlot::Count: break;
     }
     return FbxTextureUsage::Diffuse;
@@ -993,6 +1055,8 @@ PbrTextureSlot ToPbrTextureSlot(FbxTextureUsage usage)
     case FbxTextureUsage::AmbientOcclusion: return PbrTextureSlot::AmbientOcclusion;
     case FbxTextureUsage::Emissive: return PbrTextureSlot::Emissive;
     case FbxTextureUsage::Opacity: return PbrTextureSlot::Opacity;
+    case FbxTextureUsage::Specular: return PbrTextureSlot::Specular;
+    case FbxTextureUsage::Glossiness: return PbrTextureSlot::Glossiness;
     }
     return PbrTextureSlot::Diffuse;
 }
@@ -1179,6 +1243,14 @@ int LoadImportedPbrTextures(ModelTab& tab, std::string& error)
     error.clear();
     EnsurePbrMaterialStates(tab);
 
+    for (const auto& settings : tab.loaded.materialSettings)
+    {
+        const int index = FindMaterialIndexByName(tab, settings.materialName);
+        if (index < 0 || index >= static_cast<int>(tab.pbrMaterials.size())) continue;
+        SetMaterialWorkflow(tab, index, settings.specularGlossiness ? MaterialWorkflow::SpecularGlossiness : MaterialWorkflow::MetallicRoughness);
+        tab.pbrMaterials[index].glossinessChannel = static_cast<PackedChannel>(ClampInt(settings.glossinessChannel, 0, 3));
+    }
+
     int loadedCount = 0;
     std::unordered_map<std::string, bool> loadedSlots;
     for (const FbxTextureReference& reference : tab.loaded.textureReferences)
@@ -1362,7 +1434,23 @@ bool CollectPackageTextures(ModelTab& tab,
     return true;
 }
 
-bool ExtractPackagedFbxTextures(const ModelTab& tab, std::string& notice, std::string& error)
+bool SaveEditedFbx(ModelTab& tab, const std::string& outputPath, std::string& error)
+{
+    std::vector<FbxTextureReference> references;
+    int textureCount = 0;
+    if (!CollectPackageTextures(tab, references, textureCount, error)) return false;
+    for (auto& reference : references)
+    {
+        std::error_code relativeError;
+        const auto relative = std::filesystem::relative(reference.filePath, std::filesystem::absolute(outputPath).parent_path(), relativeError);
+        reference.relativePath = relativeError ? reference.filePath : relative.generic_string();
+    }
+    SyncMaterialSettings(tab);
+    return SaveFbxModelAnimations(tab.path, outputPath, tab.loaded, tab.deletedNodes, references,
+                                  tab.loaded.sourceHasEmbeddedMedia, true, error);
+}
+
+bool ExtractPackagedFbxTextures(ModelTab& tab, std::string& notice, std::string& error)
 {
     notice.clear();
     error.clear();
@@ -1446,6 +1534,7 @@ bool ExtractPackagedFbxTextures(const ModelTab& tab, std::string& notice, std::s
 
     std::string saveError;
     const std::string outputFbxString = outputFbx.string();
+    SyncMaterialSettings(tab);
     if (!SaveFbxModelAnimations(tab.path, outputFbxString, tab.loaded, tab.deletedNodes, extractedTextureReferences, false, true, saveError))
     {
         error = saveError;
@@ -1476,6 +1565,7 @@ bool PackageFbxWithTextures(ModelTab& tab, std::string& notice, std::string& err
 
     std::string saveError;
     const std::string outputPathString = outputPath.string();
+    SyncMaterialSettings(tab);
     if (!SaveFbxModelAnimations(tab.path, outputPathString, tab.loaded, tab.deletedNodes, textureReferences, true, true, saveError))
     {
         error = saveError;
@@ -1528,6 +1618,8 @@ EditSnapshot CaptureEditSnapshot(ModelTab& tab)
     for (const PbrMaterialState& material : tab.pbrMaterials)
     {
         PbrMaterialSnapshot materialSnapshot;
+        materialSnapshot.workflow = material.workflow;
+        materialSnapshot.glossinessChannel = material.glossinessChannel;
         materialSnapshot.normalDirectX = material.normalDirectX;
         materialSnapshot.roughnessChannel = material.roughnessChannel;
         materialSnapshot.metallicChannel = material.metallicChannel;

@@ -4,9 +4,11 @@ int RunOpenFbxApp(int argc, char** argv)
     char windowTitle[128] = {};
     std::snprintf(windowTitle, sizeof(windowTitle), "%s %s", kAppName, kAppVersion);
     InitWindow(1280, 800, windowTitle);
+    SetWindowMinSize(640, 360);
     rlSetClipPlanes(kNearClipPlane, kFarClipPlane);
     SetExitKey(KEY_NULL);
     ApplyWindowIcon();
+    LoadHotkeys();
     SetTargetFPS(60);
 
     Font uiFont = LoadTechnicalFont();
@@ -149,6 +151,8 @@ int RunOpenFbxApp(int argc, char** argv)
 
             const PbrMaterialSnapshot& previous = previousMaterials[static_cast<size_t>(previousIndex)];
             PbrMaterialState& material = tab.pbrMaterials[static_cast<size_t>(materialIndex)];
+            SetMaterialWorkflow(tab, materialIndex, previous.workflow);
+            material.glossinessChannel = previous.glossinessChannel;
             material.normalDirectX = previous.normalDirectX;
             material.roughnessChannel = previous.roughnessChannel;
             material.metallicChannel = previous.metallicChannel;
@@ -266,17 +270,17 @@ int RunOpenFbxApp(int argc, char** argv)
         }
         const bool validationMenuOpen = activeTab >= 0 && activeTab < static_cast<int>(tabs.size()) &&
             tabs[static_cast<size_t>(activeTab)]->validationFixNode != -1;
-        const bool menuBlocksPointer = openMenu != OpenMenu::None || menuPointerCaptured || validationMenuOpen;
+        const bool menuBlocksPointer = openMenu != OpenMenu::None || menuPointerCaptured || validationMenuOpen || gHotkeyEditorOpen;
         openfbx::SetUiPointerBlocked(menuBlocksPointer);
 
         const bool controlDown = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
         const bool shiftDown = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
         const bool altDown = IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT);
-        const bool modalOpen = aboutVisible;
-        bool openRequested = !modalOpen && !renameEditor.active && controlDown && IsKeyPressed(KEY_O);
-        bool reloadFbxRequested = !modalOpen && !renameEditor.active && !transformValueEditor.active && controlDown && !shiftDown && !altDown && IsKeyPressed(KEY_R);
-        bool saveFbxRequested = !modalOpen && !renameEditor.active && controlDown && !shiftDown && IsKeyPressed(KEY_S);
-        bool saveAsFbxRequested = !modalOpen && !renameEditor.active && controlDown && shiftDown && IsKeyPressed(KEY_S);
+        const bool modalOpen = aboutVisible || gHotkeyEditorOpen || gUpdateWindowOpen;
+        bool openRequested = !modalOpen && !renameEditor.active && !transformValueEditor.active && HotkeyPressed(HotkeyAction::Open);
+        bool reloadFbxRequested = !modalOpen && !renameEditor.active && !transformValueEditor.active && HotkeyPressed(HotkeyAction::Reload);
+        bool saveFbxRequested = !modalOpen && !renameEditor.active && !transformValueEditor.active && HotkeyPressed(HotkeyAction::Save);
+        bool saveAsFbxRequested = !modalOpen && !renameEditor.active && !transformValueEditor.active && HotkeyPressed(HotkeyAction::SaveAs);
         bool undoRequested = false;
         bool redoRequested = false;
 
@@ -290,7 +294,7 @@ int RunOpenFbxApp(int argc, char** argv)
         }
 
         ModelTab* active = activeTab >= 0 && activeTab < static_cast<int>(tabs.size()) ? tabs[static_cast<size_t>(activeTab)].get() : nullptr;
-        if (!modalOpen && active && controlDown && !shiftDown && !altDown && IsKeyPressed(KEY_W))
+        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && active && HotkeyPressed(HotkeyAction::Close))
         {
             closeActiveTab();
         }
@@ -300,12 +304,12 @@ int RunOpenFbxApp(int argc, char** argv)
         {
             CancelTransformValueEdit(transformValueEditor);
         }
-        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && active && controlDown && !shiftDown && IsKeyPressed(KEY_Z))
+        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && active && HotkeyPressed(HotkeyAction::Undo))
         {
             undoRequested = true;
         }
         if (!modalOpen && !renameEditor.active && !transformValueEditor.active && active &&
-            ((controlDown && IsKeyPressed(KEY_Y)) || (controlDown && shiftDown && IsKeyPressed(KEY_Z))))
+            (HotkeyPressed(HotkeyAction::Redo) || HotkeyPressed(HotkeyAction::RedoAlternate)))
         {
             redoRequested = true;
         }
@@ -343,22 +347,22 @@ int RunOpenFbxApp(int argc, char** argv)
 
         const bool transformInfoConsumedMouse = !modalOpen && !renameEditor.active && UpdateSelectedInfoPanelInput(active, transformValueEditor, editPivotMode, notice, error);
         const bool toolbarConsumedMouse = mouse.y < static_cast<float>(GetScreenHeight()) - gBottomPanelReservedHeight && !logPanel.dragging && !modalOpen && !renameEditor.active && !transformValueEditor.active && UpdateTransformToolbarInput(transformTool, gizmoOrientation, editPivotMode, hierarchyBlockW);
-        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && !controlDown && !altDown)
+        if (!modalOpen && !renameEditor.active && !transformValueEditor.active)
         {
-            if (IsKeyPressed(KEY_Q))
+            if (HotkeyPressed(HotkeyAction::Select))
             {
                 transformTool = TransformTool::Select;
                 editPivotMode = false;
             }
-            if (IsKeyPressed(KEY_W))
+            if (HotkeyPressed(HotkeyAction::Move))
             {
                 transformTool = TransformTool::Move;
             }
-            if (IsKeyPressed(KEY_E))
+            if (HotkeyPressed(HotkeyAction::Rotate))
             {
                 transformTool = TransformTool::Rotate;
             }
-            if (IsKeyPressed(KEY_R))
+            if (HotkeyPressed(HotkeyAction::Scale))
             {
                 transformTool = TransformTool::Scale;
                 editPivotMode = false;
@@ -370,11 +374,11 @@ int RunOpenFbxApp(int argc, char** argv)
                                             !transformValueEditor.active &&
                                             !transformInfoConsumedMouse &&
                                             UpdateTransformGizmoInput(active, transformGizmo, transformTool, gizmoOrientation, editPivotMode, mouseInViewport, notice, error);
-        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && active && altDown && IsKeyPressed(KEY_Q))
+        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && active && HotkeyPressed(HotkeyAction::Isolate))
         {
             ToggleSelectedNodeIsolation(*active, notice, error);
         }
-        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && controlDown && !altDown && IsKeyPressed(KEY_Q))
+        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && HotkeyPressed(HotkeyAction::Quit))
         {
             quitRequested = true;
             continue;
@@ -386,7 +390,7 @@ int RunOpenFbxApp(int argc, char** argv)
             else if (active) ClearNodeSelection(*active);
         }
 
-        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && active && IsKeyPressed(KEY_F) && active->loaded.valid)
+        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && active && HotkeyPressed(HotkeyAction::Focus) && active->loaded.valid)
         {
             if (!FocusCameraOnSelection(*active))
             {
@@ -395,44 +399,44 @@ int RunOpenFbxApp(int argc, char** argv)
         }
 
         if (!modalOpen && !renameEditor.active && !transformValueEditor.active && active &&
-            !controlDown && !shiftDown && !altDown && !transformGizmo.dragging && IsKeyPressed(KEY_H))
+            !transformGizmo.dragging && HotkeyPressed(HotkeyAction::Hide))
         {
             ToggleSelectedNodeVisibility(*active);
         }
         if (!modalOpen && !renameEditor.active && !transformValueEditor.active &&
-            !controlDown && !shiftDown && altDown && !transformGizmo.dragging && IsKeyPressed(KEY_H))
+            !transformGizmo.dragging && HotkeyPressed(HotkeyAction::ShowAll))
         {
             if (active) ShowAllNodes(*active);
             visibility.geometry = true;
             visibility.bones = true;
             visibility.empties = true;
         }
-        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && IsKeyPressed(KEY_V))
+        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && HotkeyPressed(HotkeyAction::View))
         {
             viewMode = NextViewMode(viewMode);
         }
-        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && IsKeyPressed(KEY_C))
+        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && HotkeyPressed(HotkeyAction::Channel))
         {
             materialPreviewMode = NextMaterialPreviewMode(materialPreviewMode);
         }
-        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && IsKeyPressed(KEY_M))
+        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && HotkeyPressed(HotkeyAction::Shaded))
         {
             viewMode = ViewMode::Shaded;
             materialPreviewMode = MaterialPreviewMode::Shaded;
         }
-        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && IsKeyPressed(KEY_T))
+        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && HotkeyPressed(HotkeyAction::Textures))
         {
             visibility.textures = !visibility.textures;
         }
-        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && IsKeyPressed(KEY_G))
+        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && HotkeyPressed(HotkeyAction::Geometry))
         {
             visibility.geometry = !visibility.geometry;
         }
-        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && IsKeyPressed(KEY_B))
+        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && HotkeyPressed(HotkeyAction::Bones))
         {
             visibility.bones = !visibility.bones;
         }
-        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && !controlDown && IsKeyPressed(KEY_O))
+        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && HotkeyPressed(HotkeyAction::BoneAxes))
         {
             visibility.boneRotations = !visibility.boneRotations;
         }
@@ -656,7 +660,7 @@ int RunOpenFbxApp(int argc, char** argv)
 
         char statusText[256] = {};
         const char* activeToolName = editPivotMode ? (transformTool == TransformTool::Rotate ? "Edit Pivot Rotate" : "Edit Pivot Move") : GetTransformToolName(transformTool);
-        std::snprintf(statusText, sizeof(statusText), "VIEW: %s    MAT: %s    TOOL: %s    SPACE: %s    PIVOT: %s    NAV: %s", GetViewModeName(viewMode), GetMaterialPreviewModeName(materialPreviewMode), activeToolName, GetGizmoOrientationName(gizmoOrientation), editPivotMode ? "ON" : "OFF", GetNavigationPresetName(navigation));
+        std::snprintf(statusText, sizeof(statusText), "VIEW: %s    MAT: %s    TOOL: %s    SPACE: %s    PIVOT: %s    NAV: %s", GetViewModeName(viewMode), GetMaterialPreviewModeName(materialPreviewMode, active ? GetSelectedPbrMaterial(*active).workflow : MaterialWorkflow::MetallicRoughness), activeToolName, GetGizmoOrientationName(gizmoOrientation), editPivotMode ? "ON" : "OFF", GetNavigationPresetName(navigation));
         DrawUiText(uiFont, statusText, static_cast<float>(GetScreenWidth() - 660), 8, 16, Color{ 165, 220, 255, 255 });
 
         if (active)
@@ -686,7 +690,7 @@ int RunOpenFbxApp(int argc, char** argv)
             }
             else
             {
-                std::snprintf(channelText, sizeof(channelText), "Material Channel: %s", GetMaterialPreviewModeName(materialPreviewMode));
+                std::snprintf(channelText, sizeof(channelText), "Material Channel: %s", GetMaterialPreviewModeName(materialPreviewMode, active ? GetSelectedPbrMaterial(*active).workflow : MaterialWorkflow::MetallicRoughness));
             }
             const Vector2 channelSize = MeasureTextEx(uiFont, channelText, 16.0f, 1.0f);
             const Rectangle channelBadge{ hierarchyBlockW + 12.0f, 66.0f, channelSize.x + 18.0f, 26.0f };
@@ -761,7 +765,7 @@ int RunOpenFbxApp(int argc, char** argv)
         bool compareFbxRequested = false;
         bool aboutRequested = false;
         openfbx::SetUiPointerBlocked(false);
-        if (!aboutVisible)
+        if (!aboutVisible && !gHotkeyEditorOpen && !gUpdateWindowOpen)
         {
             DrawMenuBar(uiFont,
                         openMenu,
@@ -795,6 +799,8 @@ int RunOpenFbxApp(int argc, char** argv)
         DrawSkeletonCompareResultWindow(uiFont, compareResultVisible, compareResultCompatible, compareResultPath, compareResultText);
         DrawRenameEditor(uiFont, active, renameEditor, notice, error);
         DrawAboutWindow(uiFont, aboutVisible);
+        DrawUpdateWindow(uiFont);
+        DrawHotkeyEditor(uiFont);
         EndDrawing();
         openfbx::SetUiPointerBlocked(false);
 
@@ -927,7 +933,7 @@ int RunOpenFbxApp(int argc, char** argv)
             else
             {
                 std::string saveError;
-                if (SaveFbxModelAnimations(active->path, active->path, active->loaded, active->deletedNodes, saveError))
+                if (SaveEditedFbx(*active, active->path, saveError))
                 {
                     notice = "Saved FBX: " + active->path;
                     error.clear();
@@ -953,7 +959,7 @@ int RunOpenFbxApp(int argc, char** argv)
                 if (!savePath.empty())
                 {
                     std::string saveError;
-                    if (SaveFbxModelAnimations(active->path, savePath, active->loaded, active->deletedNodes, saveError))
+                    if (SaveEditedFbx(*active, savePath, saveError))
                     {
                         active->path = savePath;
                         active->title = MakeTabTitle(savePath);

@@ -45,6 +45,7 @@ struct MeshBuilder
     std::vector<std::vector<float>> uvSets;
     std::vector<std::vector<unsigned char>> uvSetPresence;
     std::vector<FbxTextureReference> textureReferences;
+    std::vector<FbxMaterialSettings> materialSettings;
     std::vector<SkinnedVertex> skinnedVertices;
     std::vector<unsigned int> indices;
     std::vector<RenderVertexRef> renderVertices;
@@ -2007,6 +2008,8 @@ const char* GetTextureUsagePropertyName(FbxTextureUsage usage)
     case FbxTextureUsage::AmbientOcclusion: return "Maya|ambientOcclusion";
     case FbxTextureUsage::Emissive: return "EmissiveColor";
     case FbxTextureUsage::Opacity: return "TransparencyFactor";
+    case FbxTextureUsage::Specular: return "SpecularColor";
+    case FbxTextureUsage::Glossiness: return "Maya|glossiness";
     }
     return "DiffuseColor";
 }
@@ -2022,32 +2025,46 @@ const char* GetTextureUsageLabel(FbxTextureUsage usage)
     case FbxTextureUsage::AmbientOcclusion: return "AmbientOcclusion";
     case FbxTextureUsage::Emissive: return "Emissive";
     case FbxTextureUsage::Opacity: return "Opacity";
+    case FbxTextureUsage::Specular: return "Specular";
+    case FbxTextureUsage::Glossiness: return "Glossiness";
     }
     return "Texture";
 }
 
 bool IsScalarTextureUsage(FbxTextureUsage usage)
 {
-    return usage == FbxTextureUsage::Roughness ||
+    return usage == FbxTextureUsage::Glossiness ||
+           usage == FbxTextureUsage::Roughness ||
            usage == FbxTextureUsage::Metallic ||
            usage == FbxTextureUsage::AmbientOcclusion ||
            usage == FbxTextureUsage::Opacity;
 }
 
-FbxProperty GetOrCreateTextureProperty(FbxSurfaceMaterial* material, FbxTextureUsage usage)
+FbxProperty GetOrCreateMaterialProperty(FbxSurfaceMaterial* material, const char* name, const FbxDataType& type)
 {
     if (!material) return FbxProperty();
-
-    const char* propertyName = GetTextureUsagePropertyName(usage);
-    FbxProperty property = material->FindProperty(propertyName);
+    auto property = material->FindProperty(name);
+    if (!property.IsValid()) property = material->FindPropertyHierarchical(name);
     if (property.IsValid()) return property;
-
-    property = FbxProperty::Create(material, IsScalarTextureUsage(usage) ? FbxDoubleDT : FbxDouble3DT, propertyName);
-    if (property.IsValid())
+    const std::string path(name);
+    const auto separator = path.find('|');
+    if (separator != std::string::npos)
     {
-        property.ModifyFlag(FbxPropertyFlags::eUserDefined, true);
+        const auto groupName = path.substr(0, separator);
+        auto group = material->FindProperty(groupName.c_str());
+        if (!group.IsValid()) group = FbxProperty::Create(material, FbxCompoundDT, groupName.c_str());
+        group.ModifyFlag(FbxPropertyFlags::eUserDefined, true);
+        property = FbxProperty::Create(group, type, path.substr(separator + 1).c_str());
     }
+    else property = FbxProperty::Create(material, type, name);
+    if (property.IsValid()) property.ModifyFlag(FbxPropertyFlags::eUserDefined, true);
     return property;
+}
+
+FbxProperty GetOrCreateTextureProperty(FbxSurfaceMaterial* material, FbxTextureUsage usage)
+{
+    return GetOrCreateMaterialProperty(material, GetTextureUsagePropertyName(usage),
+                                      IsScalarTextureUsage(usage) ? FbxDoubleDT : FbxDouble3DT);
 }
 
 void DisconnectTextureSources(FbxProperty& property, bool destroyDisconnectedTextures)
@@ -2400,7 +2417,9 @@ void CollectImportedTextureReferences(FbxScene* scene,
         FbxTextureUsage::Metallic,
         FbxTextureUsage::AmbientOcclusion,
         FbxTextureUsage::Emissive,
-        FbxTextureUsage::Opacity
+        FbxTextureUsage::Opacity,
+        FbxTextureUsage::Specular,
+        FbxTextureUsage::Glossiness
     };
 
     for (const auto& entry : materialsByName)
@@ -2408,6 +2427,26 @@ void CollectImportedTextureReferences(FbxScene* scene,
         for (FbxSurfaceMaterial* material : entry.second)
         {
             if (!material) continue;
+
+            FbxMaterialSettings settings;
+            settings.materialName = entry.first;
+            auto workflow = material->FindPropertyHierarchical("openfbx|MaterialWorkflow");
+            if (workflow.IsValid()) settings.specularGlossiness = workflow.Get<FbxInt>() == 1;
+            else
+            {
+                auto hasTexture = [&](FbxTextureUsage usage)
+                {
+                    const char* name = GetTextureUsagePropertyName(usage);
+                    auto property = material->FindProperty(name);
+                    if (!property.IsValid()) property = material->FindPropertyHierarchical(name);
+                    return property.IsValid() && property.GetSrcObjectCount<FbxTexture>() > 0;
+                };
+                settings.specularGlossiness = (hasTexture(FbxTextureUsage::Specular) || hasTexture(FbxTextureUsage::Glossiness)) &&
+                    !hasTexture(FbxTextureUsage::Metallic) && !hasTexture(FbxTextureUsage::Roughness);
+            }
+            auto channel = material->FindPropertyHierarchical("openfbx|GlossinessChannel");
+            if (channel.IsValid()) settings.glossinessChannel = std::clamp(channel.Get<FbxInt>(), 0, 3);
+            out.materialSettings.push_back(settings);
 
             for (FbxTextureUsage usage : usages)
             {
@@ -2434,6 +2473,29 @@ void CollectImportedTextureReferences(FbxScene* scene,
                                                  extractionDirectory,
                                                  seenReferences,
                                                  out);
+        }
+    }
+}
+
+void ApplyMaterialSettingsToScene(FbxScene* scene, const std::vector<FbxMaterialSettings>& settings)
+{
+    std::unordered_map<std::string, std::vector<FbxSurfaceMaterial*>> materialsByName;
+    std::unordered_set<FbxSurfaceMaterial*> seen;
+    CollectMaterialsByName(scene->GetRootNode(), materialsByName, seen);
+    for (const auto& value : settings)
+    {
+        const auto found = materialsByName.find(value.materialName);
+        if (found == materialsByName.end()) continue;
+        for (auto* material : found->second)
+        {
+            auto write = [&](const char* name, int number)
+            {
+                auto property = GetOrCreateMaterialProperty(material, name, FbxIntDT);
+                property.ModifyFlag(FbxPropertyFlags::eUserDefined, true);
+                property.Set<FbxInt>(number);
+            };
+            write("openfbx|MaterialWorkflow", value.specularGlossiness ? 1 : 0);
+            write("openfbx|GlossinessChannel", value.glossinessChannel);
         }
     }
 }
@@ -2970,6 +3032,7 @@ bool BuildRaylibModel(const MeshBuilder& builder, LoadedFbxModel& outModel, std:
     outModel.uvSetPresence = builder.uvSetPresence;
     outModel.materialNames = builder.materialNames.empty() ? std::vector<std::string>{ "Default" } : builder.materialNames;
     outModel.textureReferences = builder.textureReferences;
+    outModel.materialSettings = builder.materialSettings;
     outModel.bounds = builder.hasBounds ? builder.bounds : BoundingBox{ { -1.0f, -1.0f, -1.0f }, { 1.0f, 1.0f, 1.0f } };
     outModel.valid = true;
 
@@ -3365,6 +3428,7 @@ bool SaveFbxModelAnimations(const std::string& sourcePath,
         RemoveEmbeddedTextureExtractionDirectory(saveExtractionDirectory);
         return false;
     }
+    ApplyMaterialSettingsToScene(scene, model.materialSettings);
     if (replaceTextureReferences)
     {
         ApplyTextureReferencesToScene(scene, textureReferences);

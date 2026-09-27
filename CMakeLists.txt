@@ -35,6 +35,7 @@ set(OPENFBX_SOURCES
     src/geometry/DeferredSkinning.h
     src/geometry/MeshTangents.h
     src/platform/FileDialogs.cpp
+    src/platform/UpdateChecker.cpp
     src/platform/FileDialogs.h
     src/platform/ModelConversion.h
     src/platform/BlenderConversion.cpp
@@ -145,7 +146,7 @@ target_link_libraries(openfbx PRIVATE
 )
 
 if(WIN32)
-    target_link_libraries(openfbx PRIVATE bcrypt winmm comdlg32 ole32 uuid)
+    target_link_libraries(openfbx PRIVATE bcrypt winmm comdlg32 ole32 uuid winhttp)
 endif()
 
 if(EXISTS "${FBXSDK_ROOT}/bin/${_fbxsdk_arch_dir}")
@@ -187,6 +188,10 @@ target_link_libraries(openfbx PRIVATE raylib)
 option(OPENFBX_BUILD_TESTS "Build headless editor regression tests" OFF)
 if(OPENFBX_BUILD_TESTS)
     enable_testing()
+    add_executable(openfbx_update_tests tests/UpdateChecker.cpp src/platform/UpdateChecker.cpp)
+    target_include_directories(openfbx_update_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    target_link_libraries(openfbx_update_tests PRIVATE winhttp)
+    add_test(NAME update_checker_regression COMMAND openfbx_update_tests)
     set(OPENFBX_TEST_SOURCES ${OPENFBX_SOURCES})
     list(REMOVE_ITEM OPENFBX_TEST_SOURCES src/main.cpp src/editor/OpenFbxApp.cpp src/openfbx.rc)
     add_executable(openfbx_transform_tests tests/TransformPerformance.cpp ${OPENFBX_TEST_SOURCES})
@@ -198,6 +203,16 @@ if(OPENFBX_BUILD_TESTS)
     target_include_directories(openfbx_conversion_tests PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src" "${FBXSDK_INCLUDE_DIR}")
     target_link_libraries(openfbx_conversion_tests PRIVATE ${OPENFBX_TEST_LIBRARIES})
+    add_executable(openfbx_hotkey_tests tests/HotkeyPreferences.cpp ${OPENFBX_TEST_SOURCES})
+    target_include_directories(openfbx_hotkey_tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src" "${FBXSDK_INCLUDE_DIR}")
+    target_link_libraries(openfbx_hotkey_tests PRIVATE ${OPENFBX_TEST_LIBRARIES})
+    add_test(NAME hotkey_preferences_regression COMMAND openfbx_hotkey_tests)
+    add_executable(openfbx_material_tests tests/MaterialWorkflows.cpp ${OPENFBX_TEST_SOURCES})
+    target_include_directories(openfbx_material_tests PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/src" "${FBXSDK_INCLUDE_DIR}")
+    target_link_libraries(openfbx_material_tests PRIVATE ${OPENFBX_TEST_LIBRARIES})
+    add_test(NAME material_workflow_regression COMMAND openfbx_material_tests)
     add_test(NAME model_conversion_regression COMMAND openfbx_conversion_tests)
     add_test(NAME transform_regression COMMAND openfbx_transform_tests)
 endif()

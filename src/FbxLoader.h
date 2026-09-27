@@ -135,7 +135,16 @@ enum class FbxTextureUsage
     Metallic,
     AmbientOcclusion,
     Emissive,
-    Opacity
+    Opacity,
+    Specular,
+    Glossiness
+};
+
+struct FbxMaterialSettings
+{
+    std::string materialName;
+    bool specularGlossiness = false;
+    int glossinessChannel = 0;
 };
 
 struct FbxTextureReference
@@ -163,6 +172,7 @@ struct LoadedFbxModel
     bool uvSetsEdited = false;
     std::vector<std::string> materialNames;
     std::vector<FbxTextureReference> textureReferences;
+    std::vector<FbxMaterialSettings> materialSettings;
     std::string embeddedMediaExtractionDirectory;
     std::vector<BoneSegment> bones;
     std::vector<BonePose> bonePoses;
