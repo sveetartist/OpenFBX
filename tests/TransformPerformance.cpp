@@ -479,6 +479,17 @@ static void TestValidationFixes()
     Require(hasIssue("Multiple UV sets"), "Missing multiple UV sets warning");
     Require(hasIssue("Overlapping UVs"), "Stacked disconnected islands were not detected");
     Require(hasIssue("Texel density"), "Unequal island density was not detected");
+    Require(!hasIssue("Low texel density"), "Density at the environment baseline must not warn");
+    tab.uvDensityTileSize = 512;
+    Require(hasIssue("Low texel density"), "Missing low density warning below environment baseline");
+    tab.selectedUvSet = 1;
+    std::vector<ValidatorIssue> lowDensityIssues;
+    ValidateTexelDensityConsistency(tab, lowDensityIssues);
+    Require(std::count_if(lowDensityIssues.begin(), lowDensityIssues.end(), [](const auto& issue)
+        { return issue.category == "Low texel density" && issue.uvSet == 1 && issue.severity == ValidatorSeverity::Warning; }) == 2,
+        "Uniformly low density must warn for each mesh in the selected UV set");
+    tab.selectedUvSet = 0;
+    tab.uvDensityTileSize = 1024;
     Require(PackValidationUvIslands(tab, 1, 0, false), "UV packing failed");
     Require(tab.loaded.uvSets[1] == original[1], "Packing changed another UV set");
     auto triangles = BuildUvScopeTriangles(tab, tab.loaded.uvSets[0], {1, 2});

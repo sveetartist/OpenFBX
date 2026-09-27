@@ -1,3 +1,5 @@
+constexpr float kEnvironmentMinTexelDensity = 512.0f;
+
 struct UvDensityStats
 {
     float surfaceArea = 0.0f;
@@ -799,6 +801,7 @@ void ValidateTexelDensityConsistency(const ModelTab& tab, std::vector<ValidatorI
     {
         const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(i)];
         if (node.type != SceneNodeType::Mesh || node.meshVertexStart < 0 || node.meshVertexCount <= 0) continue;
+        if (IsDeletedNode(tab, i)) continue;
         if (uvs.size() < static_cast<size_t>(node.meshVertexStart + node.meshVertexCount) * 2) continue;
 
         int textureWidth = 0;
@@ -808,8 +811,27 @@ void ValidateTexelDensityConsistency(const ModelTab& tab, std::vector<ValidatorI
         const std::string materialName = GetPrimaryMaterialName(node);
         std::vector<UvTriangleSample> triangles;
         AppendNodeUvTriangles(tab.loaded, uvs, i, triangles);
+        int lowIslandCount = 0;
+        float lowestDensity = kEnvironmentMinTexelDensity;
         for (const auto& island : CalculateUvIslandStats(triangles, textureWidth, textureHeight))
+        {
             if (island.density > 0.0f) densitiesByMaterial[materialName].push_back({ i, island.density });
+            if (island.surfaceArea > 0.0000001f && island.density < kEnvironmentMinTexelDensity)
+            {
+                ++lowIslandCount;
+                lowestDensity = std::min(lowestDensity, island.density);
+            }
+        }
+        if (lowIslandCount > 0)
+        {
+            char message[512] = {};
+            std::snprintf(message, sizeof(message),
+                "%s (%s): %d UV island(s) below the environment baseline of %.0f px/m (lowest %.1f px/m; %dx%d %s). Increase texture resolution or UV coverage; mobile/distant assets may use less.",
+                node.name.c_str(), uvSetName.c_str(), lowIslandCount, kEnvironmentMinTexelDensity,
+                lowestDensity, textureWidth, textureHeight, usingTexture ? "texture" : "assumed resolution");
+            AddValidationIssue(issues, ValidatorSeverity::Warning, "Low texel density", message, i);
+            issues.back().uvSet = uvSetIndex;
+        }
     }
 
     for (const auto& entry : densitiesByMaterial)
@@ -1042,10 +1064,12 @@ void DrawUvDensityHelp(Font font)
     if (gUvDensityHelpBounds.width <= 0.0f || !CheckCollisionPointRec(mouse, gUvDensityHelpBounds)) return;
 
     // Directional targets: https://thetechnicalartist.com/tools/texel-density/index.html
+    char environmentTarget[64] = {};
+    std::snprintf(environmentTarget, sizeof(environmentTarget), "Environments: %.0f-1024", kEnvironmentMinTexelDensity);
     const char* lines[] = {
         "SUGGESTED TARGETS (px/m)",
         "Mobile: 128-256",
-        "Environments: 512-1024",
+        environmentTarget,
         "Hero / first-person: 2048+",
         "Distant: half the baseline",
         "Adjust for distance and memory."
@@ -1324,6 +1348,7 @@ void DrawUvPanel(Font font, ModelTab& tab, RenameEditor& renameEditor, float pan
         if (DrawPanelButton(font, resolutionBounds, resolutionLine))
         {
             tab.uvDensityTileSize = NextUvDensityTileSize(tab.uvDensityTileSize);
+            tab.validationCache.dirty = true;
         }
     }
     y += 28.0f;

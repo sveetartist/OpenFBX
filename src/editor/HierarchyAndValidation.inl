@@ -1164,6 +1164,66 @@ std::string FindAutoTexturePath(const std::string& modelPath, const std::filesys
     return bestScore > 0 ? bestPath.string() : std::string{};
 }
 
+// Scan once on open; fill only confidently identified, unoccupied slots.
+int AutoLoadModelTextures(ModelTab& tab)
+{
+    EnsurePbrMaterialStates(tab);
+    auto directory = std::filesystem::path(tab.path).parent_path();
+    if (directory.empty()) directory = ".";
+    std::vector<std::filesystem::path> paths;
+    std::error_code scanError;
+    std::filesystem::recursive_directory_iterator entries(directory,
+        std::filesystem::directory_options::skip_permission_denied, scanError), end;
+    for (; !scanError && entries != end; entries.increment(scanError))
+    {
+        std::error_code entryError;
+        if (entries->is_regular_file(entryError) && IsTextureExtension(entries->path()))
+            paths.push_back(entries->path());
+    }
+    const auto modelName = ToLower(std::filesystem::path(tab.path).stem().string());
+    int loaded = 0;
+    for (int materialIndex = 0; materialIndex < static_cast<int>(tab.pbrMaterials.size()); ++materialIndex)
+    {
+        const auto materialName = materialIndex < static_cast<int>(tab.loaded.materialNames.size())
+            ? ToLower(tab.loaded.materialNames[materialIndex]) : std::string{};
+        for (int slotIndex = 0; slotIndex < static_cast<int>(PbrTextureSlot::Count); ++slotIndex)
+        {
+            const auto slot = static_cast<PbrTextureSlot>(slotIndex);
+            auto& material = tab.pbrMaterials[materialIndex];
+            if (GetPbrTexture(material, slot).loaded) continue;
+            int bestScore = 0;
+            std::filesystem::path bestPath;
+            bool ambiguous = false;
+            for (const auto& path : paths)
+            {
+                const auto stem = ToLower(path.stem().string());
+                if (tab.pbrMaterials.size() > 1 && !TextureNameMatchesMaterial(path, materialName)) continue;
+                // A material/model name alone does not identify the texture's usage.
+                if (ScoreTextureCandidate(stem, "", "", slot) < 10) continue;
+                const int score = ScoreTextureCandidate(stem, modelName, materialName, slot);
+                if (score > bestScore)
+                {
+                    bestScore = score;
+                    bestPath = path;
+                    ambiguous = false;
+                }
+                else if (score == bestScore) ambiguous = true;
+            }
+            if (bestPath.empty() || ambiguous) continue;
+            std::string loadError;
+            if (!LoadPbrTexture(tab, materialIndex, slot, bestPath.string(), loadError)) continue;
+            ++loaded;
+            if (IsOrmTextureName(ToLower(bestPath.stem().string())))
+            {
+                if (slot == PbrTextureSlot::AmbientOcclusion) material.aoChannel = PackedChannel::R;
+                if (slot == PbrTextureSlot::Roughness) material.roughnessChannel = PackedChannel::G;
+                if (slot == PbrTextureSlot::Metallic) material.metallicChannel = PackedChannel::B;
+            }
+        }
+    }
+    return loaded;
+}
+
 int AutoAssignDroppedTextures(ModelTab& tab, const std::vector<std::string>& droppedPaths, std::string& notice, std::string& error)
 {
     EnsurePbrMaterialStates(tab);

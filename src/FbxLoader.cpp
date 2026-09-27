@@ -2267,16 +2267,25 @@ std::filesystem::path FindFileBelowDirectory(const std::filesystem::path& direct
     if (!std::filesystem::exists(directory, existsError) || existsError) return {};
 
     std::error_code iterateError;
-    for (std::filesystem::recursive_directory_iterator it(directory, iterateError), end; it != end && !iterateError; it.increment(iterateError))
+    auto lower = [](std::string value)
     {
-        if (!it->is_regular_file()) continue;
-        if (it->path().filename() == filename)
+        std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+        return value;
+    };
+    const auto target = lower(filename.string());
+    std::filesystem::path match;
+    for (std::filesystem::recursive_directory_iterator it(directory, std::filesystem::directory_options::skip_permission_denied, iterateError), end; it != end && !iterateError; it.increment(iterateError))
+    {
+        std::error_code entryError;
+        if (!it->is_regular_file(entryError)) continue;
+        if (lower(it->path().filename().string()) == target)
         {
-            return it->path();
+            if (!match.empty()) return {}; // Duplicate names are unsafe to guess.
+            match = it->path();
         }
     }
 
-    return {};
+    return match;
 }
 
 std::string ResolveFbxTexturePath(const FbxFileTexture* texture,
@@ -2294,12 +2303,14 @@ std::string ResolveFbxTexturePath(const FbxFileTexture* texture,
     {
         candidates.push_back(fileName);
         candidates.push_back(modelDirectory / fileName);
+        candidates.push_back(modelDirectory / fileName.filename());
         candidates.push_back(extractionDirectory / fileName.filename());
     }
     if (!relativeName.empty())
     {
         candidates.push_back(relativeName);
         candidates.push_back(modelDirectory / relativeName);
+        candidates.push_back(modelDirectory / relativeName.filename());
         candidates.push_back(extractionDirectory / relativeName);
         candidates.push_back(extractionDirectory / relativeName.filename());
     }
@@ -2317,6 +2328,12 @@ std::string ResolveFbxTexturePath(const FbxFileTexture* texture,
     if (!foundExtractedFile.empty())
     {
         return AbsoluteExistingFile(foundExtractedFile).string();
+    }
+
+    for (const auto& name : { relativeName.filename(), fileName.filename() })
+    {
+        const auto found = FindFileBelowDirectory(modelDirectory.empty() ? std::filesystem::path(".") : modelDirectory, name);
+        if (!found.empty()) return AbsoluteExistingFile(found).string();
     }
 
     if (!fileName.empty()) return fileName.string();

@@ -7,7 +7,7 @@ static void Check(bool condition, const std::string& message)
     if (!condition) throw std::runtime_error(message);
 }
 
-static void CreateFixture(const std::string& path)
+static void CreateFixture(const std::string& path, const std::string& texturePath = {})
 {
     auto* manager = FbxManager::Create();
     manager->SetIOSettings(FbxIOSettings::Create(manager, IOSROOT));
@@ -20,7 +20,14 @@ static void CreateFixture(const std::string& path)
     mesh->SetControlPointAt(FbxVector4(-1, -1, 0), 0);
     mesh->SetControlPointAt(FbxVector4(1, -1, 0), 1);
     mesh->SetControlPointAt(FbxVector4(0, 1, 0), 2);
-    node->AddMaterial(FbxSurfacePhong::Create(scene, "Surface"));
+    auto* surface = FbxSurfacePhong::Create(scene, "Surface");
+    node->AddMaterial(surface);
+    if (!texturePath.empty())
+    {
+        auto* texture = FbxFileTexture::Create(scene, "Diffuse");
+        texture->SetFileName(texturePath.c_str());
+        surface->Diffuse.ConnectSrcObject(texture);
+    }
     auto* materials = mesh->CreateElementMaterial();
     materials->SetMappingMode(FbxLayerElement::eAllSame);
     materials->SetReferenceMode(FbxLayerElement::eIndexToDirect);
@@ -147,6 +154,38 @@ int main()
               ScoreTextureCandidate("surface_specgloss", "", "", PbrTextureSlot::Glossiness) >= 10,
               "Folder discovery must recognize combined maps");
         Font font = LoadTechnicalFont();
+        // Opening discovers named maps, preserves existing maps, and skips ties.
+        const auto discoveryFolder = folder / "discovery";
+        std::filesystem::create_directories(discoveryFolder / "textures");
+        const auto discoverySource = discoveryFolder / "asset.fbx";
+        CreateFixture(discoverySource.string());
+        auto writeTexture = [&](const std::filesystem::path& path)
+        {
+            Image fixture = GenImageColor(4, 4, WHITE);
+            Check(ExportImage(fixture, path.string().c_str()), "Discovery texture export failed");
+            UnloadImage(fixture);
+        };
+        writeTexture(discoveryFolder / "textures/surface_albedo.png");
+        writeTexture(discoveryFolder / "textures/surface_orm.png");
+        writeTexture(discoveryFolder / "surface_normal.png");
+        writeTexture(discoveryFolder / "textures/surface_normal.png");
+        ModelTab discovered;
+        discovered.path = discoverySource.string();
+        Check(LoadFbxModel(discovered.path, discovered.loaded, error), error);
+        Check(AutoLoadModelTextures(discovered) == 4, "Discovery must load albedo and ORM, skipping ambiguous normals");
+        Check(discovered.pbrMaterials[0].roughnessChannel == PackedChannel::G &&
+              discovered.pbrMaterials[0].metallicChannel == PackedChannel::B, "Discovery must configure ORM channels");
+        Check(AutoLoadModelTextures(discovered) == 0, "Discovery must preserve loaded maps");
+        UnloadPbrTextures(discovered);
+        UnloadFbxModel(discovered.loaded);
+        const auto relocated = discoveryFolder / "textures/relocated.PNG";
+        writeTexture(relocated);
+        CreateFixture(discoverySource.string(), (discoveryFolder / "missing/RELOCATED.png").string());
+        Check(LoadFbxModel(discovered.path, discovered.loaded, error), error);
+        Check(LoadImportedPbrTextures(discovered, error) == 1,
+              "Missing absolute references must resolve by filename in model subfolders: " + error);
+        UnloadPbrTextures(discovered);
+        UnloadFbxModel(discovered.loaded);
         TextureClipboard clipboard;
         bool dropped = false;
         std::string notice;

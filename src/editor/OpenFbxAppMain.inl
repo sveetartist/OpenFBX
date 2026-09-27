@@ -107,7 +107,8 @@ int RunOpenFbxApp(int argc, char** argv)
         tab->loaded = std::move(loaded);
         initializeLoadedTab(*tab, path);
         std::string textureLoadError;
-        const int importedTextureCount = LoadImportedPbrTextures(*tab, textureLoadError);
+        int importedTextureCount = LoadImportedPbrTextures(*tab, textureLoadError);
+        importedTextureCount += AutoLoadModelTextures(*tab);
 
         tabs.push_back(std::move(tab));
         activeTab = static_cast<int>(tabs.size()) - 1;
