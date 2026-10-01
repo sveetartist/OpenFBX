@@ -627,9 +627,14 @@ int RunOpenFbxApp(int argc, char** argv)
                     DrawSkinWeightHeatMap(*active);
                 }
 
-                if (viewMode == ViewMode::ShadedWireframe || viewMode == ViewMode::Wireframe)
+                if (visibility.skinWeights || viewMode == ViewMode::ShadedWireframe || viewMode == ViewMode::Wireframe)
                 {
-                    DrawVisibleMeshWireframe(*active, viewMode == ViewMode::Wireframe ? Color{ 220, 225, 230, 255 } : Color{ 25, 28, 31, 180 });
+                    // Place the edges above the heat map while retaining depth occlusion.
+                    const float wireOffset = visibility.skinWeights
+                        ? ClampFloat(GetBoundsDiagonal(active->loaded.bounds) * 0.0008f, 0.0002f, 0.01f) * 1.5f : 0.0f;
+                    const Color wireColor = visibility.skinWeights ? Color{20, 23, 27, 230} :
+                        viewMode == ViewMode::Wireframe ? Color{220, 225, 230, 255} : Color{25, 28, 31, 180};
+                    DrawVisibleMeshWireframe(*active, wireColor, wireOffset);
                 }
 
                 rlDisableBackfaceCulling();

@@ -49,27 +49,35 @@ void ForEachMeshNodeWireframeEdge(const LoadedFbxModel& loaded, const SceneNode&
     }
 }
 
-void DrawMeshNodeWireframe(const ModelTab& tab, const SceneNode& node, Color color)
+void DrawMeshNodeWireframe(const ModelTab& tab, const SceneNode& node, Color color, float normalOffset = 0.0f)
 {
     const float* vertices = GetCurrentMeshVertices(tab);
     if (!vertices) return;
+    const float* normals = normalOffset > 0 ? GetCurrentMeshNormals(tab) : nullptr;
+    const auto point = [&](int vertex)
+    {
+        const int base = vertex * 3;
+        Vector3 position{vertices[base], vertices[base + 1], vertices[base + 2]};
+        if (normals && base + 2 < static_cast<int>(tab.loaded.bindNormals.size()))
+        {
+            const Vector3 normal = NormalizeOrFallback(Vector3{normals[base], normals[base + 1], normals[base + 2]}, Vector3{0, 1, 0});
+            position = Vector3Add(position, Vector3Scale(normal, normalOffset));
+        }
+        return position;
+    };
     ForEachMeshNodeWireframeEdge(tab.loaded, node, [&](int a, int b)
     {
-        const int i0 = a * 3;
-        const int i1 = b * 3;
-        const Vector3 p0{ vertices[i0], vertices[i0 + 1], vertices[i0 + 2] };
-        const Vector3 p1{ vertices[i1], vertices[i1 + 1], vertices[i1 + 2] };
-        DrawLine3D(p0, p1, color);
+        DrawLine3D(point(a), point(b), color);
     });
 }
 
-void DrawVisibleMeshWireframe(const ModelTab& tab, Color color)
+void DrawVisibleMeshWireframe(const ModelTab& tab, Color color, float normalOffset = 0.0f)
 {
     for (int nodeIndex = 0; nodeIndex < static_cast<int>(tab.loaded.nodes.size()); ++nodeIndex)
     {
         const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(nodeIndex)];
         if (node.type != SceneNodeType::Mesh || !IsViewportNodeVisible(tab, nodeIndex)) continue;
-        DrawMeshNodeWireframe(tab, node, color);
+        DrawMeshNodeWireframe(tab, node, color, normalOffset);
     }
 }
 
