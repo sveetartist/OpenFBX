@@ -677,7 +677,11 @@ int RunOpenFbxApp(int argc, char** argv)
         if (active)
         {
             char channelText[128] = {};
-            if (viewMode == ViewMode::MaterialColors)
+            if (visibility.skinWeights)
+            {
+                std::snprintf(channelText, sizeof(channelText), "Viewport: Skin Weights");
+            }
+            else if (viewMode == ViewMode::MaterialColors)
             {
                 std::snprintf(channelText, sizeof(channelText), "Viewport: Material Colors");
             }
