@@ -9,7 +9,8 @@ int RunOpenFbxApp(int argc, char** argv)
     SetExitKey(KEY_NULL);
     ApplyWindowIcon();
     LoadHotkeys();
-    SetTargetFPS(60);
+    LoadViewportSettings();
+    SetTargetFPS(0);
 
     Font uiFont = LoadTechnicalFont();
     LitShader litShader = LoadBasicLitShader();
@@ -742,6 +743,7 @@ int RunOpenFbxApp(int argc, char** argv)
                            openMenu != OpenMenu::None || modalOpen);
         DrawTransformToolbar(uiFont, transformTool, gizmoOrientation, editPivotMode, hierarchyBlockW);
         DrawOrientationGizmo(uiFont, active ? active->orbit.camera : emptyOrbit.camera);
+        DrawViewportFps(uiFont);
 
         CollectLogMessages(logPanel, notice, error);
         DrawLogPanel(uiFont, logPanel,

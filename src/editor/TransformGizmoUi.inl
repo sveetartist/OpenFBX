@@ -563,9 +563,19 @@ void DrawTransformToolbar(Font font, TransformTool tool, GizmoOrientation orient
 
 }
 
+void DrawViewportFps(Font font)
+{
+    if (!gShowViewportFps) return;
+    const Rectangle bounds{static_cast<float>(GetScreenWidth()) - 112.0f, 66.0f, 100.0f, 26.0f};
+    DrawRectangleRec(bounds, Color{24, 27, 31, 255});
+    DrawUiText(font, TextFormat("%d FPS", GetFPS()), bounds.x + 8.0f, bounds.y + 5.0f,
+               16, Color{165, 220, 255, 255});
+}
+
 void DrawOrientationGizmo(Font font, const Camera3D& camera)
 {
-    const Vector2 center{ static_cast<float>(GetScreenWidth()) - 70.0f, 96.0f };
+    // Reserve the top-right row for FPS and keep every axis label below the tabs.
+    const Vector2 center{ static_cast<float>(GetScreenWidth()) - 70.0f, 150.0f };
     constexpr float axisLength = 38.0f;
     const Vector3 forward = Vector3Normalize(Vector3Subtract(camera.target, camera.position));
     Vector3 right = Vector3CrossProduct(forward, camera.up);

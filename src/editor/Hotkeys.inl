@@ -118,6 +118,32 @@ std::filesystem::path HotkeySettingsPath()
     return folder / "openfbx" / "hotkeys.txt";
 }
 
+std::filesystem::path ViewportSettingsPath()
+{
+    return HotkeySettingsPath().parent_path() / "viewport.txt";
+}
+
+void LoadViewportSettings(const std::filesystem::path& path = ViewportSettingsPath())
+{
+    gShowViewportFps = true;
+    std::ifstream input(path);
+    std::string key;
+    int value;
+    while (input >> key >> value)
+        if (key == "show_fps" && (value == 0 || value == 1)) gShowViewportFps = value != 0;
+}
+
+bool SaveViewportSettings(const std::filesystem::path& path = ViewportSettingsPath())
+{
+    std::error_code error;
+    std::filesystem::create_directories(path.parent_path(), error);
+    if (error) return false;
+    std::ofstream output(path);
+    output << "show_fps " << (gShowViewportFps ? 1 : 0) << '\n';
+    output.close();
+    return static_cast<bool>(output);
+}
+
 void LoadHotkeys(const std::filesystem::path& path = HotkeySettingsPath())
 {
     gHotkeys = kDefaultHotkeys;

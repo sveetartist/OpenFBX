@@ -4,15 +4,13 @@ Dev notes for future versions:
 Ideas:
 
 save preferences
-dedicated hotkey editor
 freeze objects
 multiple views for opened fbx
 view for every open fbx
 pivot off on > rename edit pivot
 validation > too low texel density
 fix degenerate triangles > které to ale jsou > a co ngons?
-auto - load textures on open (name - based)
-
+too small texel density warning
 
 
 Finished:
@@ -21,3 +19,6 @@ hide/show objects
 folded warning
 Convert any model to fbx when loading > converts blend, obj, glb, gltf, stl
 colored checkers
+dedicated hotkey editor
+textures packaging orm se neloadguje, 
+auto - load textures on open (name - based)

@@ -44,7 +44,7 @@ Rectangle GetPreferencesBounds()
 bool DrawPreferences(Font font, Rectangle bounds, NavigationPreset& navigation)
 {
     static float scroll = 0;
-    constexpr float contentHeight = 436.0f;
+    constexpr float contentHeight = 492.0f;
     const float maxScroll = std::max(0.0f, contentHeight + 16.0f - bounds.height);
     if (CheckCollisionPointRec(GetMousePosition(), bounds)) scroll -= GetMouseWheelMove() * 32.0f;
     scroll = ClampFloat(scroll, 0, maxScroll);
@@ -76,6 +76,13 @@ bool DrawPreferences(Font font, Rectangle bounds, NavigationPreset& navigation)
         if (button(Rectangle{controlsX + 64, y, 64, 26}, "Reset")) value = defaultValue;
         y += 32;
     };
+    text("VIEWPORT", RAYWHITE);
+    if (button(Rectangle{clip.x, y, clip.width, 26}, gShowViewportFps ? "[x] Show FPS" : "[ ] Show FPS"))
+    {
+        gShowViewportFps = !gShowViewportFps;
+        if (!SaveViewportSettings()) TraceLog(LOG_WARNING, "Could not save viewport preferences");
+    }
+    y += 32;
     text("NAVIGATION", RAYWHITE);
     const float half = (clip.width - 4) * 0.5f;
     if (button(Rectangle{clip.x, y, half, 26}, navigation == NavigationPreset::Blender ? "[x] Blender" : "Blender")) navigation = NavigationPreset::Blender;

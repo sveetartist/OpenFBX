@@ -35,6 +35,14 @@ struct UvIslandStats
     int nodeIndex = -1;
 };
 
+struct UvIslandCache
+{
+    std::vector<UvTriangleSample> triangles;
+    std::vector<UvIslandStats> islands;
+    int width = 0;
+    int height = 0;
+};
+
 float TriangleArea3D(Vector3 a, Vector3 b, Vector3 c)
 {
     return Vector3Length(Vector3CrossProduct(Vector3Subtract(b, a), Vector3Subtract(c, a))) * 0.5f;
@@ -653,6 +661,35 @@ struct UvSelectionSummary
     float density = 0.0f;
     bool mixedDensity = false;
 };
+
+const std::vector<UvIslandStats>& GetCachedUvIslands(ModelTab& tab,
+    const std::vector<UvTriangleSample>& triangles, int width, int height)
+{
+    // Compare inputs rather than relying on edit notifications: transforms, undo,
+    // deleted faces, UV edits, and material selection can all change this scope.
+    const auto sameTriangle = [](const UvTriangleSample& a, const UvTriangleSample& b)
+    {
+        if (a.nodeIndex != b.nodeIndex || a.vertexStart != b.vertexStart) return false;
+        for (int i = 0; i < 3; ++i)
+            if (a.uv[i].x != b.uv[i].x || a.uv[i].y != b.uv[i].y ||
+                a.position[i].x != b.position[i].x || a.position[i].y != b.position[i].y ||
+                a.position[i].z != b.position[i].z) return false;
+        return true;
+    };
+    const auto& cache = tab.uvIslandCache;
+    if (!cache || cache->width != width || cache->height != height ||
+        cache->triangles.size() != triangles.size() ||
+        !std::equal(triangles.begin(), triangles.end(), cache->triangles.begin(), sameTriangle))
+    {
+        auto updated = std::make_shared<UvIslandCache>();
+        updated->triangles = triangles;
+        updated->width = width;
+        updated->height = height;
+        updated->islands = CalculateUvIslandStats(triangles, width, height);
+        tab.uvIslandCache = std::move(updated);
+    }
+    return tab.uvIslandCache->islands;
+}
 
 UvSelectionSummary CalculateUvSelectionSummary(const std::vector<UvIslandStats>& islands,
                                                const std::vector<int>& selectedIslands)
@@ -1317,7 +1354,7 @@ void DrawUvPanel(Font font, ModelTab& tab, RenameEditor& renameEditor, float pan
             usingDensityTexture = true;
         }
     }
-    const std::vector<UvIslandStats> islands = CalculateUvIslandStats(scopeTriangles, densityTextureWidth, densityTextureHeight);
+    const auto& islands = GetCachedUvIslands(tab, scopeTriangles, densityTextureWidth, densityTextureHeight);
     if (tab.uvSelectionNodeIndex != selectedNodeIndex ||
         tab.uvSelectionUvSet != tab.selectedUvSet ||
         tab.uvSelectionTextureSet != tab.uvTextureSet)

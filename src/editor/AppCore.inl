@@ -84,6 +84,8 @@ constexpr float kMinBoneOrientationLineWidth = 1.0f;
 constexpr float kMaxBoneOrientationLineWidth = 10.0f;
 int gCheckerSquares = 16;
 bool gUseColoredChecker = false;
+bool gShowViewportFps = true;
+struct UvIslandCache;
 int gCheckerColor = 1;
 int gCheckerTextureSize = 1024;
 float gBoneOrientationScale = 1.0f;
@@ -409,6 +411,7 @@ struct ModelTab
     int uvTextureSetScroll = 0;
     int uvSelectionTextureSet = -1;
     size_t uvOccupancyHash = 0;
+    std::shared_ptr<UvIslandCache> uvIslandCache;
     float uvTextureOccupancy = 0.0f;
     float uvMeshOccupancy = 0.0f;
     bool showUvSameMaterialMeshes = false;

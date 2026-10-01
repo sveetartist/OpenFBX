@@ -46,6 +46,20 @@ int main()
         Check(gHotkeys[move].key == KEY_W, "Missing settings must use defaults");
 
         SetConfigFlags(FLAG_WINDOW_HIDDEN);
+        const auto viewportPath = temp / "viewport.txt";
+        gShowViewportFps = true;
+        Check(SaveViewportSettings(viewportPath), "FPS preference must save");
+        gShowViewportFps = false;
+        LoadViewportSettings(viewportPath);
+        Check(gShowViewportFps, "FPS preference must survive reload");
+        gShowViewportFps = false;
+        Check(SaveViewportSettings(viewportPath), "Disabled FPS preference must save");
+        gShowViewportFps = true;
+        LoadViewportSettings(viewportPath);
+        Check(!gShowViewportFps, "Explicitly disabled FPS preference must survive reload");
+        std::filesystem::remove(viewportPath);
+        LoadViewportSettings(viewportPath);
+        Check(gShowViewportFps, "FPS display must default to on");
         InitWindow(640, 360, "Preferences regression");
         Font font = LoadTechnicalFont();
         NavigationPreset navigation = NavigationPreset::Blender;
@@ -76,6 +90,23 @@ int main()
         checkBounds();
         capture("preferences.png", false);
         capture("hotkeys.png", true);
+        // Capture the overlays with the toolbar and tab strip drawn as in the app.
+        gShowViewportFps = true;
+        RenderTexture2D overlays = LoadRenderTexture(800, 600);
+        BeginTextureMode(overlays);
+        ClearBackground(Color{40, 44, 50, 255});
+        DrawTransformToolbar(font, TransformTool::Move, GizmoOrientation::Global, false, 260);
+        DrawOrientationGizmo(font, Camera3D{Vector3{0, 0, 5}, Vector3{}, Vector3{0, 1, 0}, 45, CAMERA_PERSPECTIVE});
+        DrawViewportFps(font);
+        std::vector<std::unique_ptr<ModelTab>> tabs;
+        int activeTab = -1;
+        DrawTabs(font, tabs, activeTab);
+        EndTextureMode();
+        Image overlayImage = LoadImageFromTexture(overlays.texture);
+        ImageFlipVertical(&overlayImage);
+        Check(ExportImage(overlayImage, (temp / "viewport-overlays.png").string().c_str()), "Overlay capture must save");
+        UnloadImage(overlayImage);
+        UnloadRenderTexture(overlays);
         if (font.texture.id != GetFontDefault().texture.id) UnloadFont(font);
         CloseWindow();
         std::cout << "Hotkey and Preferences checks passed. Captures: " << temp << '\n';

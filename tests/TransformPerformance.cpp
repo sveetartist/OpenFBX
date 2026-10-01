@@ -444,6 +444,24 @@ static void TestValidationFixes()
     coverage.nodeIndex = 1;
     coverage.uv[0] = {0, 0}; coverage.uv[1] = {1, 0}; coverage.uv[2] = {0, 1};
     Require(std::fabs(CalculateUvTileOccupancy({coverage}) - 50.0f) < 0.01f, "UV occupancy area incorrect");
+    coverage.position[1] = {1, 0, 0};
+    coverage.position[2] = {0, 1, 0};
+    ModelTab cacheTab;
+    std::vector<UvTriangleSample> cacheTriangles{coverage};
+    Require(GetCachedUvIslands(cacheTab, cacheTriangles, 1024, 1024)[0].density == 1024,
+            "Cached island density incorrect");
+    const auto firstCache = cacheTab.uvIslandCache;
+    GetCachedUvIslands(cacheTab, cacheTriangles, 1024, 1024);
+    Require(cacheTab.uvIslandCache == firstCache, "Unchanged UV islands rebuilt");
+    cacheTriangles[0].position[1].x = 4;
+    Require(GetCachedUvIslands(cacheTab, cacheTriangles, 1024, 1024)[0].density == 512,
+            "Geometry edit left stale density");
+    cacheTriangles[0].uv[1].x = 0.25f;
+    Require(GetCachedUvIslands(cacheTab, cacheTriangles, 1024, 1024)[0].density == 256,
+            "UV edit left stale density");
+    Require(GetCachedUvIslands(cacheTab, cacheTriangles, 2048, 2048)[0].density == 512,
+            "Texture resolution left stale density");
+    Require(GetCachedUvIslands(cacheTab, {}, 2048, 2048).empty(), "Deleted triangles remained cached");
     Require(std::fabs(CalculateUvTileOccupancy({coverage, coverage}) - 50.0f) < 0.01f, "UV occupancy double-counted overlap");
     Require(CalculateUvTileOccupancy({coverage}, 2) == 0, "UV occupancy included another mesh");
     for (auto& uv : coverage.uv) uv.x += 2;
@@ -850,6 +868,17 @@ static int BenchmarkValidation(const char* path)
     stage("Density", [&](auto& out) { ValidateTexelDensityConsistency(tab, out); });
     stage("UV overlaps", [&](auto& out) { ValidateUvIslandOverlaps(tab, out); });
     stage("Skin", [&](auto& out) { ValidateSkinning(tab.loaded, out); });
+    if (!tab.loaded.uvSets.empty())
+    {
+        std::vector<UvTriangleSample> triangles;
+        for (int i = 0; i < static_cast<int>(tab.loaded.nodes.size()); ++i)
+            AppendNodeUvTriangles(tab.loaded, tab.loaded.uvSets[0], i, triangles);
+        stage("UV panel islands uncached", [&](auto&) { CalculateUvIslandStats(triangles, 1024, 1024); });
+        GetCachedUvIslands(tab, triangles, 1024, 1024);
+        stage("UV panel islands cached (100 frames)", [&](auto&) {
+            for (int i = 0; i < 100; ++i) GetCachedUvIslands(tab, triangles, 1024, 1024);
+        });
+    }
     UnloadFbxModel(tab.loaded);
     CloseWindow();
     return 0;
