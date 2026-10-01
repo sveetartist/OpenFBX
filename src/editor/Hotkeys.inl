@@ -35,6 +35,8 @@ bool gHotkeyEditorOpen = false;
 bool gHotkeyEditorJustOpened = false;
 int gHotkeyCapture = -1;
 int gHotkeyScroll = 0;
+bool gHotkeyScrollDragging = false;
+float gHotkeyScrollDragOffset = 0.0f;
 std::string gHotkeyMessage;
 std::string gHotkeySearch;
 bool gHotkeySearchFocused = true;
@@ -212,6 +214,7 @@ void OpenHotkeyEditor()
     gHotkeyDraft = gHotkeys;
     gHotkeyCapture = -1;
     gHotkeyScroll = 0;
+    gHotkeyScrollDragging = false;
     gHotkeyMessage.clear();
     gHotkeySearch.clear();
     gHotkeySearchFocused = true;
@@ -270,7 +273,11 @@ void DrawHotkeyEditor(Font font)
         gHotkeySearch.clear();
         gHotkeySearchFocused = true;
     }
-    if (gHotkeySearch != oldSearch) gHotkeyScroll = 0;
+    if (gHotkeySearch != oldSearch)
+    {
+        gHotkeyScroll = 0;
+        gHotkeyScrollDragging = false;
+    }
     const Rectangle list{panel.x + 12, panel.y + 118, w - 24, std::max(32.0f, h - 204)};
     const int rows = std::max(1, static_cast<int>(list.height / 32));
 
@@ -304,6 +311,21 @@ void DrawHotkeyEditor(Font font)
     if (CheckCollisionPointRec(GetMousePosition(), list))
         gHotkeyScroll -= static_cast<int>(openfbx::UiMouseWheelMove() * 3);
     gHotkeyScroll = ClampInt(gHotkeyScroll, 0, maxScroll);
+    const Rectangle scrollTrack{list.x + list.width - 12, list.y, 12, list.height};
+    const float thumbHeight = std::min(list.height, std::max(24.0f, list.height * rows / std::max(1.0f, static_cast<float>(filtered.size()))));
+    const float scrollTravel = list.height - thumbHeight;
+    const float thumbY = list.y + (maxScroll > 0 ? scrollTravel * gHotkeyScroll / maxScroll : 0.0f);
+    if (!openfbx::UiMouseButtonDown(MOUSE_BUTTON_LEFT) || maxScroll == 0)
+        gHotkeyScrollDragging = false;
+    if (maxScroll > 0 && openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(GetMousePosition(), scrollTrack))
+    {
+        gHotkeyScrollDragging = true;
+        gHotkeyScrollDragOffset = CheckCollisionPointRec(GetMousePosition(), Rectangle{scrollTrack.x, thumbY, scrollTrack.width, thumbHeight})
+            ? GetMousePosition().y - thumbY : thumbHeight * 0.5f;
+        gHotkeySearchFocused = false;
+    }
+    if (gHotkeyScrollDragging && scrollTravel > 0)
+        gHotkeyScroll = ClampInt(static_cast<int>(std::round(maxScroll * (GetMousePosition().y - list.y - gHotkeyScrollDragOffset) / scrollTravel)), 0, maxScroll);
     if (filtered.empty()) DrawUiTextClipped(font, "No matching hotkeys", list.x + 4, list.y + 7, 14, list.width - 8, Color{155, 170, 185, 255});
 
     for (int row = 0; row < rows && row + gHotkeyScroll < static_cast<int>(filtered.size()); ++row)
@@ -312,7 +334,7 @@ void DrawHotkeyEditor(Font font)
         const float y = list.y + row * 32;
         DrawUiTextClipped(font, gHotkeyDraft[i].label, list.x + 4, y + 7, 14, list.width * 0.52f - 8, RAYWHITE);
         const std::string label = i == gHotkeyCapture ? "Press keys..." : HotkeyText(gHotkeyDraft[i]);
-        if (DrawPanelButton(font, Rectangle{list.x + list.width * 0.52f, y + 2, list.width * 0.48f - 10, 28}, label.c_str()))
+        if (DrawPanelButton(font, Rectangle{list.x + list.width * 0.52f, y + 2, list.width * 0.48f - 16, 28}, label.c_str()))
         {
             gHotkeyCapture = i;
             gHotkeySearchFocused = false;
@@ -323,10 +345,15 @@ void DrawHotkeyEditor(Font font)
     }
     if (maxScroll > 0)
     {
-        const float thumbHeight = list.height * rows / static_cast<float>(filtered.size());
-        DrawRectangleRec(Rectangle{list.x + list.width - 4, list.y, 3, list.height}, Color{45, 52, 60, 255});
-        DrawRectangleRec(Rectangle{list.x + list.width - 4, list.y + (list.height - thumbHeight) * gHotkeyScroll / maxScroll, 3, thumbHeight}, Color{140, 160, 180, 255});
+        DrawRectangleRec(scrollTrack, Color{45, 52, 60, 255});
+        DrawRectangleRec(Rectangle{scrollTrack.x + 2, list.y + scrollTravel * gHotkeyScroll / maxScroll, 8, thumbHeight},
+                         gHotkeyScrollDragging || CheckCollisionPointRec(GetMousePosition(), scrollTrack)
+                             ? Color{128, 188, 235, 255} : Color{140, 160, 180, 255});
     }
+    const std::string count = filtered.empty() ? "0 shortcuts" :
+        std::to_string(gHotkeyScroll + 1) + "-" + std::to_string(std::min(gHotkeyScroll + rows, static_cast<int>(filtered.size()))) +
+        " of " + std::to_string(filtered.size()) + " shortcuts";
+    DrawUiTextClipped(font, count.c_str(), panel.x + 12, panel.y + h - 84, 12, w - 24, Color{155, 170, 185, 255});
     DrawUiTextClipped(font, gHotkeyMessage.c_str(), panel.x + 12, panel.y + h - 70, 13, w - 24, Color{240, 195, 120, 255});
     const float buttonWidth = (w - 40) / 3;
     const float buttonY = panel.y + h - 40;

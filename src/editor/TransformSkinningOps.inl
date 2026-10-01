@@ -415,7 +415,8 @@ bool SetMeshPivotToBoundsBottom(ModelTab& tab, int nodeIndex)
 }
 
 template <typename PointTransform, typename DirectionTransform>
-void TransformMeshNodeRange(ModelTab& tab, SceneNode& node, PointTransform transformPoint, DirectionTransform transformDirection, bool deferAnimationRebuild = false)
+void TransformMeshNodeRange(ModelTab& tab, SceneNode& node, PointTransform transformPoint, DirectionTransform transformDirection,
+                            bool deferAnimationRebuild = false, std::shared_ptr<SkinningGeometry>* editedGeometry = nullptr)
 {
     const auto previousGeometry = deferAnimationRebuild ? tab.skinningGeometry : nullptr;
     tab.skinningGeometry.reset();
@@ -436,7 +437,11 @@ void TransformMeshNodeRange(ModelTab& tab, SceneNode& node, PointTransform trans
     if (previousGeometry)
     {
         // Only fallback bind positions changed. Reuse the immutable influence topology.
-        auto geometry = std::make_shared<SkinningGeometry>(*previousGeometry);
+        // All rigid attachments in one bone edit share one new snapshot. Existing
+        // animation/undo snapshots keep their original immutable geometry.
+        if (editedGeometry && !*editedGeometry)
+            *editedGeometry = std::make_shared<SkinningGeometry>(*previousGeometry);
+        auto geometry = editedGeometry ? *editedGeometry : std::make_shared<SkinningGeometry>(*previousGeometry);
         for (int vertex = start; vertex < end && vertex < static_cast<int>(geometry->vertices.size()); ++vertex)
         {
             geometry->vertices[vertex].position = tab.loaded.skinnedVertices[vertex].bindPosition;
@@ -579,7 +584,8 @@ bool StoreMeshFrameAsBindMesh(ModelTab& tab, const MeshFrame& meshFrame)
 
     const int vertexCount = std::min(static_cast<int>(tab.loaded.skinnedVertices.size()),
                                      static_cast<int>(tab.loaded.bindVertices.size() / 3));
-    for (int vertex = 0; vertex < vertexCount; ++vertex)
+    auto refreshed = tab.skinningGeometry ? std::make_shared<SkinningGeometry>(*tab.skinningGeometry) : nullptr;
+    auto storeVertex = [&](int vertex)
     {
         const size_t base = static_cast<size_t>(vertex) * 3;
         SkinnedVertex& skinned = tab.loaded.skinnedVertices[static_cast<size_t>(vertex)];
@@ -593,18 +599,28 @@ bool StoreMeshFrameAsBindMesh(ModelTab& tab, const MeshFrame& meshFrame)
             tab.loaded.bindNormals[base + 1],
             tab.loaded.bindNormals[base + 2]
         }, skinned.bindNormal);
-    }
-
-    if (tab.skinningGeometry)
-    {
-        auto refreshed = std::make_shared<SkinningGeometry>(*tab.skinningGeometry);
-        for (size_t vertex = 0; vertex < refreshed->vertices.size(); ++vertex)
+        if (refreshed && static_cast<size_t>(vertex) < refreshed->vertices.size())
         {
-            refreshed->vertices[vertex].position = tab.loaded.skinnedVertices[vertex].bindPosition;
-            refreshed->vertices[vertex].normal = tab.loaded.skinnedVertices[vertex].bindNormal;
+            refreshed->vertices[vertex].position = skinned.bindPosition;
+            refreshed->vertices[vertex].normal = skinned.bindNormal;
         }
-        tab.skinningGeometry = std::move(refreshed);
+    };
+    constexpr int chunkVertices = 4096;
+    if (vertexCount < chunkVertices * 2)
+    {
+        for (int vertex = 0; vertex < vertexCount; ++vertex) storeVertex(vertex);
     }
+    else
+    {
+        std::vector<int> chunks((vertexCount + chunkVertices - 1) / chunkVertices);
+        std::iota(chunks.begin(), chunks.end(), 0);
+        std::for_each(std::execution::par, chunks.begin(), chunks.end(), [&](int chunk)
+        {
+            const int end = std::min((chunk + 1) * chunkVertices, vertexCount);
+            for (int vertex = chunk * chunkVertices; vertex < end; ++vertex) storeVertex(vertex);
+        });
+    }
+    if (refreshed) tab.skinningGeometry = std::move(refreshed);
     return true;
 }
 
@@ -1089,6 +1105,7 @@ void ApplyTransformToSelectedSubtree(ModelTab& tab,
     if (rootNodes.empty()) return;
     const bool canCpuSkin = HasCpuSkinnedMesh(tab.loaded);
     bool touchedBoneRoot = false;
+    std::shared_ptr<SkinningGeometry> editedGeometry;
 
     for (int rootNode : rootNodes)
     {
@@ -1109,7 +1126,7 @@ void ApplyTransformToSelectedSubtree(ModelTab& tab,
             const bool skinnedMeshHandledByBones = rootIsBone && canCpuSkin && node.type == SceneNodeType::Mesh && node.meshHasSkin;
             if (node.type == SceneNodeType::Mesh && !skinnedMeshHandledByBones)
             {
-                TransformMeshNodeRange(tab, node, transformPoint, transformDirection, rootIsBone && canCpuSkin);
+                TransformMeshNodeRange(tab, node, transformPoint, transformDirection, rootIsBone && canCpuSkin, &editedGeometry);
             }
         }
 

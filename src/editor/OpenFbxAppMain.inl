@@ -331,7 +331,8 @@ int RunOpenFbxApp(int argc, char** argv)
             UnloadDroppedFiles(droppedFiles);
         }
 
-        UpdateHierarchyPanelInteraction(hierarchyPanel, active);
+        UpdateHierarchyPanelInteraction(hierarchyPanel, active,
+                                        menuBlocksPointer || modalOpen || hierarchyPanel.contextMenuOpen || logPanel.dragging);
         const float hierarchyBlockW = GetHierarchyPanelBlockWidth(hierarchyPanel);
         const float hierarchyContextMenuH = active && hierarchyPanel.contextMenuOpen
             ? GetNodeContextMenuHeight(*active, hierarchyPanel.contextNodeIndex, hierarchyPanel.contextNodeIndices)

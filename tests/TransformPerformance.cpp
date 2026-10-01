@@ -331,6 +331,41 @@ static void TestMergeSelectedGeometryPreservesSkinning()
     CloseWindow();
 }
 
+static void TestParallelBindStorage()
+{
+    ModelTab tab;
+    tab.loaded.hasMesh = true;
+    constexpr int vertices = 20000;
+    tab.loaded.skinnedVertices.resize(vertices);
+    tab.loaded.bindVertices.resize(vertices * 3);
+    tab.loaded.bindNormals.resize(vertices * 3);
+    MeshFrame frame;
+    frame.vertices.resize(vertices * 3);
+    frame.normals.resize(vertices * 3);
+    for (int vertex = 0; vertex < vertices; ++vertex)
+    {
+        tab.loaded.skinnedVertices[vertex].bindNormal = Vector3{0, 1, 0};
+        frame.vertices[vertex * 3] = static_cast<float>(vertex);
+        frame.normals[vertex * 3 + 2] = vertex % 2 ? 2.0f : 0.0f;
+    }
+    const auto frozen = GetSkinningGeometry(tab);
+    Require(StoreMeshFrameAsBindMesh(tab, frame), "Large bind frame could not be stored");
+    Require(tab.loaded.bindVertices == frame.vertices && tab.loaded.bindNormals == frame.normals,
+            "Parallel bind storage changed exported geometry");
+    for (int vertex = 0; vertex < vertices; ++vertex)
+    {
+        const auto& stored = tab.loaded.skinnedVertices[vertex];
+        const auto& cached = tab.skinningGeometry->vertices[vertex];
+        Require(stored.bindPosition.x == static_cast<float>(vertex) && cached.position.x == stored.bindPosition.x,
+                "Parallel bind storage lost a vertex");
+        Require(stored.bindNormal.y == (vertex % 2 ? 0.0f : 1.0f) && stored.bindNormal.z == (vertex % 2 ? 1.0f : 0.0f) &&
+                cached.normal.y == stored.bindNormal.y && cached.normal.z == stored.bindNormal.z,
+                "Parallel bind storage changed normal normalization or fallback");
+        Require(frozen->vertices[vertex].position.x == 0 && frozen->vertices[vertex].normal.y == 1,
+                "Bind storage mutated an existing snapshot");
+    }
+}
+
 static int BenchmarkFbx(const char* path)
 {
     SetTraceLogLevel(LOG_WARNING);
@@ -375,6 +410,9 @@ static int BenchmarkFbx(const char* path)
     UnloadRenderTexture(renderTarget);
     stage("Bind skinning", [&] { BuildSkinnedMeshFrame(tab.loaded, BuildBindBoneFrame(tab.loaded)); });
     stage("Geometry capture", [&] { CaptureSkinningGeometry(tab.loaded); });
+    stage("Cached bind skinning", [&] { BuildCurrentBindSkin(tab); });
+    const MeshFrame bindFrame = BuildCurrentBindSkin(tab);
+    stage("Store skinned bind geometry", [&] { StoreMeshFrameAsBindMesh(tab, bindFrame); });
     stage("Mesh upload with tangents", [&] { RefreshDisplayedMesh(tab); });
     stage("Bone-frame transform", [&] {
         TransformBoneData(tab, tab.selectedNode, [](Vector3 p) { return p; }, [](Vector3 n) { return n; },
@@ -640,15 +678,15 @@ static void TestAttachedMeshBoneTransforms()
     ModelTab tab;
     auto& model = tab.loaded;
     model.hasMesh = true;
-    model.nodes.resize(4);
+    model.nodes.resize(5);
     model.nodes[0].name = "Root";
     model.nodes[1].parent = 0;
     model.nodes[1].type = SceneNodeType::Bone;
     model.nodes[1].name = "Bone";
-    for (int index : {2, 3})
+    for (int index : {2, 3, 4})
     {
         auto& node = model.nodes[index];
-        node.parent = index == 2 ? 1 : 0;
+        node.parent = index == 3 ? 0 : 1;
         node.type = SceneNodeType::Mesh;
         node.meshVertexStart = (index - 2) * 3;
         node.meshVertexCount = 3;
@@ -656,13 +694,15 @@ static void TestAttachedMeshBoneTransforms()
     }
     model.bindVertices = {0,0,0, 1,0,0, 0,1,0, 2,0,0, 3,0,0, 2,1,0};
     model.bindNormals = {0,0,1, 0,0,1, 0,0,1, 0,0,1, 0,0,1, 0,0,1};
-    model.skinnedVertices.resize(6);
-    for (int vertex = 0; vertex < 6; ++vertex)
+    model.bindVertices.insert(model.bindVertices.end(), {0,0,0, 1,0,0, 0,1,0});
+    model.bindNormals.insert(model.bindNormals.end(), {0,0,1, 0,0,1, 0,0,1});
+    model.skinnedVertices.resize(9);
+    for (int vertex = 0; vertex < 9; ++vertex)
     {
         auto& skinned = model.skinnedVertices[vertex];
         skinned.bindPosition = Vector3{model.bindVertices[vertex * 3], model.bindVertices[vertex * 3 + 1], 0};
         skinned.bindNormal = Vector3{0,0,1};
-        if (vertex >= 3) skinned.influences.push_back({"Bone", 1, skinned.bindPosition, skinned.bindNormal});
+        if (vertex >= 3 && vertex < 6) skinned.influences.push_back({"Bone", 1, skinned.bindPosition, skinned.bindNormal});
     }
     BonePose bone;
     bone.node = 1;
@@ -684,9 +724,9 @@ static void TestAttachedMeshBoneTransforms()
         ResolveMeshFrame(frame);
         Equal(ReferenceSkin(model, model.animations[0].frames[index]), frame);
     }
-    for (int vertex : {0, 3})
+    for (int vertex : {0, 3, 6})
     {
-        const Vector3 original = vertex == 0 ? Vector3{} : Vector3{2,0,0};
+        const Vector3 original = vertex == 3 ? Vector3{2,0,0} : Vector3{};
         const Vector3 expected = Vector3RotateByAxisAngle(Vector3Add(original, Vector3{1,2,3}), Vector3{0,0,1}, 0.25f);
         const Vector3 actual{model.bindVertices[vertex * 3], model.bindVertices[vertex * 3 + 1], model.bindVertices[vertex * 3 + 2]};
         Require(Vector3Distance(expected, actual) < 0.0001f, "Bone move/rotate changed attached mesh deformation");
@@ -1292,6 +1332,7 @@ int main(int argc, char** argv)
         TestValidationFixes();
         TestBadSkinWeightRepair();
         TestSkinWeightDisplaySelection();
+        TestParallelBindStorage();
         TestAttachedMeshBoneTransforms();
         TestSkinWeightWireframeRendering();
         TestValidationCache();

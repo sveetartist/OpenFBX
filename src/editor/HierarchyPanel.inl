@@ -26,8 +26,15 @@ void DrawHierarchyPanel(Font font,
 
     DrawRectangle(static_cast<int>(panelX), static_cast<int>(panelY), static_cast<int>(panelW), static_cast<int>(panelH), Color{ 18, 20, 23, 235 });
     DrawLine(static_cast<int>(panelW), static_cast<int>(panelY), static_cast<int>(panelW), static_cast<int>(panelY + panelH), Color{ 64, 70, 78, 255 });
+    const bool resizeHighlighted = !inputBlocked && (panel.resizeHovered || panel.resizing);
+    if (resizeHighlighted)
+    {
+        DrawRectangle(static_cast<int>(panelW) - 2, static_cast<int>(panelY), 3, static_cast<int>(panelH),
+                      panel.resizing ? Color{ 120, 198, 255, 255 } : Color{ 80, 164, 230, 255 });
+    }
     DrawUiText(font, "SCENE", panelX + 12.0f, panelY + 10.0f, 16.0f, Color{ 165, 182, 196, 255 });
-    DrawUiText(font, "||", panelW - 16.0f, panelY + 8.0f, 16.0f, Color{ 120, 130, 140, 255 });
+    DrawUiText(font, "||", panelW - 16.0f, panelY + 8.0f, 16.0f,
+               resizeHighlighted ? Color{ 120, 198, 255, 255 } : Color{ 120, 130, 140, 255 });
 
     const float tabW = (panelW - 32.0f) / 5.0f;
     const Rectangle hierarchyTab{ panelX + 8.0f, panelY + 34.0f, tabW, 24.0f };

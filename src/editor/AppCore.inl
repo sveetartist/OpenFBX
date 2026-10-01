@@ -7,6 +7,8 @@
 #include <cstring>
 #include <fstream>
 #include <future>
+#include <execution>
+#include <numeric>
 #include <chrono>
 #include "platform/UpdateChecker.h"
 #include <iostream>
@@ -473,6 +475,7 @@ struct HierarchyPanelState
     bool contextMenuJustOpened = false;
     bool hidden = false;
     bool resizing = false;
+    bool resizeHovered = false;
     bool shiftDragSelecting = false;
     int shiftDragAnchorNode = -1;
     int shiftDragLastNode = -1;

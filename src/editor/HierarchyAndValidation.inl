@@ -260,7 +260,7 @@ Rectangle GetHierarchyScrollThumb(const ModelTab& tab, const HierarchyPanelState
     return Rectangle{ track.x, track.y + (track.height - height) * offset, track.width, height };
 }
 
-void UpdateHierarchyPanelInteraction(HierarchyPanelState& panel, const ModelTab* active)
+void UpdateHierarchyPanelInteraction(HierarchyPanelState& panel, const ModelTab* active, bool inputBlocked = false)
 {
     constexpr float panelX = 0.0f;
     constexpr float panelY = 61.0f;
@@ -268,8 +268,18 @@ void UpdateHierarchyPanelInteraction(HierarchyPanelState& panel, const ModelTab*
     const float panelH = GetHierarchyPanelHeight();
     const Vector2 mouse = GetMousePosition();
 
+    panel.resizeHovered = false;
+    if (inputBlocked)
+    {
+        SetMouseCursor(MOUSE_CURSOR_DEFAULT);
+        panel.resizing = false;
+        panel.scrollDragging = false;
+        return;
+    }
+
     if (panel.hidden)
     {
+        SetMouseCursor(MOUSE_CURSOR_DEFAULT);
         const Rectangle restoreRect{ panelX, panelY, collapsedW, panelH };
         if (openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, restoreRect))
         {
@@ -282,8 +292,10 @@ void UpdateHierarchyPanelInteraction(HierarchyPanelState& panel, const ModelTab*
 
     const Rectangle titleRect{ panelX, panelY, panel.width, 30.0f };
     const Rectangle resizeRect{ panel.width - 5.0f, panelY, 10.0f, panelH };
+    panel.resizeHovered = !panel.scrollDragging && !panel.reparentDragArmed && !panel.shiftDragSelecting &&
+                          CheckCollisionPointRec(mouse, resizeRect);
 
-    if (openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, resizeRect))
+    if (openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT) && panel.resizeHovered)
     {
         panel.resizing = true;
     }
@@ -298,8 +310,11 @@ void UpdateHierarchyPanelInteraction(HierarchyPanelState& panel, const ModelTab*
     else if (openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT) && CheckCollisionPointRec(mouse, titleRect))
     {
         panel.hidden = true;
+        SetMouseCursor(MOUSE_CURSOR_DEFAULT);
         return;
     }
+
+    SetMouseCursor(panel.resizeHovered || panel.resizing ? MOUSE_CURSOR_RESIZE_EW : MOUSE_CURSOR_DEFAULT);
 
     if (!active || panel.activeTab != LeftPanelTab::Hierarchy || panel.resizing)
     {
