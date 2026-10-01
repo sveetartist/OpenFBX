@@ -502,71 +502,81 @@ void DrawUvIslandColorOverlay(ModelTab& tab)
     rlEnd();
 }
 
-bool GetSelectedBoneName(const ModelTab& tab, std::string& boneName)
+std::unordered_set<std::string> GetSelectedBoneNames(const ModelTab& tab)
 {
-    if (tab.selectedNode < 0 || tab.selectedNode >= static_cast<int>(tab.loaded.nodes.size())) return false;
-    const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(tab.selectedNode)];
-    if (node.type != SceneNodeType::Bone || IsDeletedNode(tab, tab.selectedNode)) return false;
-    boneName = node.name;
-    return !boneName.empty();
+    std::unordered_set<std::string> names;
+    const auto addBone = [&](int index)
+    {
+        if (index < 0 || index >= static_cast<int>(tab.loaded.nodes.size()) || IsDeletedNode(tab, index)) return;
+        const auto& node = tab.loaded.nodes[index];
+        if (node.type == SceneNodeType::Bone && !node.name.empty()) names.insert(node.name);
+    };
+    for (int index : tab.selectedNodes) addBone(index);
+    addBone(tab.selectedNode);
+    return names;
 }
 
-void DrawSkinWeightHeatMap(const ModelTab& tab)
+float GetSelectedBonesInfluenceWeight(const SkinnedVertex& vertex, const std::unordered_set<std::string>& boneNames)
 {
-    std::string boneName;
-    if (!GetSelectedBoneName(tab, boneName)) return;
-    if (tab.loaded.skinnedVertices.empty()) return;
+    double weight = 0;
+    for (const auto& influence : vertex.influences)
+        if (boneNames.count(influence.boneName) && std::isfinite(influence.weight) && influence.weight > 0)
+            weight += influence.weight;
+    return static_cast<float>(std::min(1.0, weight));
+}
 
+const std::vector<Color>& GetSkinWeightDisplayColors(ModelTab& tab)
+{
+    const auto bones = GetSelectedBoneNames(tab);
+    const size_t vertexCount = tab.loaded.bindVertices.size() / 3;
+    if (tab.skinWeightColors.size() != vertexCount || tab.skinWeightColorBones != bones ||
+        tab.skinWeightColorVertexCount != tab.loaded.skinnedVertices.size())
+    {
+        tab.skinWeightColors.resize(vertexCount);
+        for (size_t vertex = 0; vertex < vertexCount; ++vertex)
+        {
+            const float weight = !bones.empty() && vertex < tab.loaded.skinnedVertices.size()
+                ? GetSelectedBonesInfluenceWeight(tab.loaded.skinnedVertices[vertex], bones) : 0;
+            Color color = GetSkinWeightHeatColor(weight);
+            color.a = 255;
+            tab.skinWeightColors[vertex] = color;
+        }
+        tab.skinWeightColorBones = bones;
+        tab.skinWeightColorVertexCount = tab.loaded.skinnedVertices.size();
+    }
+    return tab.skinWeightColors;
+}
+
+void DrawSkinWeightHeatMap(ModelTab& tab)
+{
+    const auto& colors = GetSkinWeightDisplayColors(tab);
     const float* vertices = GetCurrentMeshVertices(tab);
-    const float* normals = GetCurrentMeshNormals(tab);
     if (!vertices) return;
 
-    const float offset = ClampFloat(GetBoundsDiagonal(tab.loaded.bounds) * 0.0008f, 0.0002f, 0.01f);
-    rlDisableBackfaceCulling();
-    rlDisableDepthMask();
-    BeginBlendMode(BLEND_ALPHA);
+    // This is the model's opaque surface pass, using its current animated vertices.
+    rlDrawRenderBatchActive();
     rlBegin(RL_TRIANGLES);
     for (int nodeIndex = 0; nodeIndex < static_cast<int>(tab.loaded.nodes.size()); ++nodeIndex)
     {
-        const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(nodeIndex)];
+        const SceneNode& node = tab.loaded.nodes[nodeIndex];
         if (node.type != SceneNodeType::Mesh || node.meshVertexStart < 0 || node.meshVertexCount < 3) continue;
         if (!IsViewportNodeVisible(tab, nodeIndex)) continue;
-
-        const int start = std::max(0, node.meshVertexStart);
-        const int end = std::min(node.meshVertexStart + node.meshVertexCount, static_cast<int>(tab.loaded.skinnedVertices.size()));
-        for (int vertex = start; vertex + 2 < end; vertex += 3)
+        const int end = std::min(node.meshVertexStart + node.meshVertexCount, static_cast<int>(tab.loaded.bindVertices.size() / 3));
+        for (int vertex = node.meshVertexStart; vertex + 2 < end; vertex += 3)
         {
             if (IsRemovedTriangle(node, vertex)) continue;
-            const int vertexIndices[3] = { vertex, vertex + 1, vertex + 2 };
-            Vector3 points[3]{};
-            Vector3 fallbackNormal{};
             for (int corner = 0; corner < 3; ++corner)
             {
-                const int base = vertexIndices[corner] * 3;
-                points[corner] = Vector3{ vertices[base], vertices[base + 1], vertices[base + 2] };
-            }
-            fallbackNormal = NormalizeOrFallback(Vector3CrossProduct(Vector3Subtract(points[1], points[0]), Vector3Subtract(points[2], points[0])), Vector3{ 0.0f, 1.0f, 0.0f });
-
-            for (int corner = 0; corner < 3; ++corner)
-            {
-                const int globalVertex = vertexIndices[corner];
+                const int globalVertex = vertex + corner;
+                const Color color = colors[globalVertex];
                 const int base = globalVertex * 3;
-                Vector3 normal = fallbackNormal;
-                if (normals && base + 2 < static_cast<int>(tab.loaded.bindNormals.size()))
-                {
-                    normal = NormalizeOrFallback(Vector3{ normals[base], normals[base + 1], normals[base + 2] }, fallbackNormal);
-                }
-                const float weight = GetBoneInfluenceWeight(tab.loaded.skinnedVertices[static_cast<size_t>(globalVertex)], boneName);
-                const Color color = GetSkinWeightHeatColor(weight);
-                const Vector3 point = Vector3Add(points[corner], Vector3Scale(normal, offset));
-                rlColor4ub(color.r, color.g, color.b, color.a);
-                rlVertex3f(point.x, point.y, point.z);
+                rlColor4ub(color.r, color.g, color.b, 255);
+                rlVertex3f(vertices[base], vertices[base + 1], vertices[base + 2]);
             }
         }
     }
     rlEnd();
-    EndBlendMode();
-    rlEnableDepthMask();
+    rlDrawRenderBatchActive();
 }
 
 Vector3 GetTransformAxisVector(TransformAxis axis)

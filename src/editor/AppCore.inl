@@ -416,6 +416,9 @@ struct ModelTab
     int uvSelectionTextureSet = -1;
     size_t uvOccupancyHash = 0;
     std::shared_ptr<UvIslandCache> uvIslandCache;
+    std::vector<Color> skinWeightColors;
+    std::unordered_set<std::string> skinWeightColorBones;
+    size_t skinWeightColorVertexCount = 0;
     float uvTextureOccupancy = 0.0f;
     float uvMeshOccupancy = 0.0f;
     bool showUvSameMaterialMeshes = false;

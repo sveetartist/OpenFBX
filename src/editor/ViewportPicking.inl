@@ -49,36 +49,52 @@ void ForEachMeshNodeWireframeEdge(const LoadedFbxModel& loaded, const SceneNode&
     }
 }
 
-void DrawMeshNodeWireframe(const ModelTab& tab, const SceneNode& node, Color color, float normalOffset = 0.0f)
+void DrawMeshNodeWireframe(const ModelTab& tab, const SceneNode& node, Color color)
 {
     const float* vertices = GetCurrentMeshVertices(tab);
     if (!vertices) return;
-    const float* normals = normalOffset > 0 ? GetCurrentMeshNormals(tab) : nullptr;
-    const auto point = [&](int vertex)
-    {
-        const int base = vertex * 3;
-        Vector3 position{vertices[base], vertices[base + 1], vertices[base + 2]};
-        if (normals && base + 2 < static_cast<int>(tab.loaded.bindNormals.size()))
-        {
-            const Vector3 normal = NormalizeOrFallback(Vector3{normals[base], normals[base + 1], normals[base + 2]}, Vector3{0, 1, 0});
-            position = Vector3Add(position, Vector3Scale(normal, normalOffset));
-        }
-        return position;
-    };
+    rlBegin(RL_LINES);
+    rlColor4ub(color.r, color.g, color.b, color.a);
     ForEachMeshNodeWireframeEdge(tab.loaded, node, [&](int a, int b)
     {
-        DrawLine3D(point(a), point(b), color);
+        const int i0 = a * 3;
+        const int i1 = b * 3;
+        const Vector3 p0{vertices[i0], vertices[i0 + 1], vertices[i0 + 2]};
+        const Vector3 p1{vertices[i1], vertices[i1 + 1], vertices[i1 + 2]};
+        rlVertex3f(p0.x, p0.y, p0.z);
+        rlVertex3f(p1.x, p1.y, p1.z);
     });
+    rlEnd();
 }
 
-void DrawVisibleMeshWireframe(const ModelTab& tab, Color color, float normalOffset = 0.0f)
+void DrawVisibleMeshWireframe(const ModelTab& tab, Color color)
 {
     for (int nodeIndex = 0; nodeIndex < static_cast<int>(tab.loaded.nodes.size()); ++nodeIndex)
     {
-        const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(nodeIndex)];
+        const SceneNode& node = tab.loaded.nodes[nodeIndex];
         if (node.type != SceneNodeType::Mesh || !IsViewportNodeVisible(tab, nodeIndex)) continue;
-        DrawMeshNodeWireframe(tab, node, color, normalOffset);
+        DrawMeshNodeWireframe(tab, node, color);
     }
+}
+
+void DrawSkinWeightWireframe(const ModelTab& tab)
+{
+    rlDrawRenderBatchActive();
+    const Matrix projection = rlGetMatrixProjection();
+    Matrix biased = projection;
+    // Shift clip-space depth toward the camera, keeping world-space edges intact.
+    // Depth testing still rejects edges behind the visible model surface.
+    constexpr float depthBias = 0.00001f;
+    biased.m2 -= depthBias * projection.m3;
+    biased.m6 -= depthBias * projection.m7;
+    biased.m10 -= depthBias * projection.m11;
+    biased.m14 -= depthBias * projection.m15;
+    rlSetMatrixProjection(biased);
+    rlDisableDepthMask();
+    DrawVisibleMeshWireframe(tab, Color{20, 23, 27, 255});
+    rlDrawRenderBatchActive();
+    rlEnableDepthMask();
+    rlSetMatrixProjection(projection);
 }
 
 bool GetRayCollisionMeshNodeTriangles(const ModelTab& tab, const SceneNode& node, Ray ray, RayCollision& outHit)

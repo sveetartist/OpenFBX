@@ -43,6 +43,7 @@ void RestoreEditSnapshot(ModelTab& tab, const EditSnapshot& snapshot)
     tab.currentVertices = snapshot.currentVertices;
     tab.currentNormals = snapshot.currentNormals;
     tab.loaded.skinnedVertices = snapshot.skinnedVertices;
+    tab.skinWeightColors.clear();
     tab.visibleBones = snapshot.visibleBones;
     tab.visibleBonePoses = snapshot.visibleBonePoses;
     tab.originalBindBonePoses = snapshot.originalBindBonePoses;

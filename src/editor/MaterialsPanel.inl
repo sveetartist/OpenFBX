@@ -424,6 +424,7 @@ int FixDuplicateNames(ModelTab& tab, bool recordUndo = true)
     {
         if (recordUndo) PushUndoSnapshot(tab, std::move(before));
         tab.skinningGeometry.reset();
+        tab.skinWeightColors.clear();
         InvalidateDisplayedAnimationCaches(tab);
     }
     return changed;
@@ -511,6 +512,7 @@ int FixBadSkinWeights(ModelTab& tab, int nodeIndex, bool recordUndo = true)
     if (changed > 0)
     {
         node.skinWeightsEdited = true;
+        tab.skinWeightColors.clear();
         if (recordUndo) PushUndoSnapshot(tab, std::move(before));
         tab.skinningGeometry.reset();
         RebuildSkinnedAnimationMeshFrames(tab);

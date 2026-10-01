@@ -415,8 +415,9 @@ bool SetMeshPivotToBoundsBottom(ModelTab& tab, int nodeIndex)
 }
 
 template <typename PointTransform, typename DirectionTransform>
-void TransformMeshNodeRange(ModelTab& tab, SceneNode& node, PointTransform transformPoint, DirectionTransform transformDirection)
+void TransformMeshNodeRange(ModelTab& tab, SceneNode& node, PointTransform transformPoint, DirectionTransform transformDirection, bool deferAnimationRebuild = false)
 {
+    const auto previousGeometry = deferAnimationRebuild ? tab.skinningGeometry : nullptr;
     tab.skinningGeometry.reset();
     TransformPositionBuffer(tab.loaded.bindVertices, node.meshVertexStart, node.meshVertexCount, transformPoint);
     TransformDirectionBuffer(tab.loaded.bindNormals, node.meshVertexStart, node.meshVertexCount, transformDirection);
@@ -432,7 +433,19 @@ void TransformMeshNodeRange(ModelTab& tab, SceneNode& node, PointTransform trans
         skinned.bindNormal = transformDirection(skinned.bindNormal);
     }
 
-    for (AnimationClip& clip : tab.loaded.animations)
+    if (previousGeometry)
+    {
+        // Only fallback bind positions changed. Reuse the immutable influence topology.
+        auto geometry = std::make_shared<SkinningGeometry>(*previousGeometry);
+        for (int vertex = start; vertex < end && vertex < static_cast<int>(geometry->vertices.size()); ++vertex)
+        {
+            geometry->vertices[vertex].position = tab.loaded.skinnedVertices[vertex].bindPosition;
+            geometry->vertices[vertex].normal = tab.loaded.skinnedVertices[vertex].bindNormal;
+        }
+        tab.skinningGeometry = std::move(geometry);
+    }
+    // Bone edits rebuild deferred frames once after all attached parts and poses move.
+    if (!deferAnimationRebuild) for (AnimationClip& clip : tab.loaded.animations)
     {
         for (MeshFrame& frame : clip.meshFrames)
         {
@@ -1096,7 +1109,7 @@ void ApplyTransformToSelectedSubtree(ModelTab& tab,
             const bool skinnedMeshHandledByBones = rootIsBone && canCpuSkin && node.type == SceneNodeType::Mesh && node.meshHasSkin;
             if (node.type == SceneNodeType::Mesh && !skinnedMeshHandledByBones)
             {
-                TransformMeshNodeRange(tab, node, transformPoint, transformDirection);
+                TransformMeshNodeRange(tab, node, transformPoint, transformDirection, rootIsBone && canCpuSkin);
             }
         }
 

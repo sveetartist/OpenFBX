@@ -355,6 +355,24 @@ static int BenchmarkFbx(const char* path)
         for (int i = 0; i < 10; ++i) work();
         std::cout << name << ": " << std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count() / 10 << " ms\n";
     };
+    const Vector3 center = Vector3Scale(Vector3Add(tab.loaded.bounds.min, tab.loaded.bounds.max), 0.5f);
+    const float radius = std::max(1.0f, GetBoundsDiagonal(tab.loaded.bounds));
+    const Camera3D camera{Vector3Add(center, Vector3{radius, radius * 0.25f, radius}), center, Vector3{0,1,0}, 45, CAMERA_PERSPECTIVE};
+    const auto renderTarget = LoadRenderTexture(640, 480);
+    auto renderStage = [&](const char* name, auto draw)
+    {
+        stage(name, [&] {
+            BeginTextureMode(renderTarget);
+            ClearBackground(BLACK);
+            BeginMode3D(camera);
+            draw();
+            EndMode3D();
+            EndTextureMode();
+        });
+    };
+    renderStage("Skin weight surface", [&] { DrawSkinWeightHeatMap(tab); });
+    renderStage("Skin weight wireframe", [&] { DrawSkinWeightWireframe(tab); });
+    UnloadRenderTexture(renderTarget);
     stage("Bind skinning", [&] { BuildSkinnedMeshFrame(tab.loaded, BuildBindBoneFrame(tab.loaded)); });
     stage("Geometry capture", [&] { CaptureSkinningGeometry(tab.loaded); });
     stage("Mesh upload with tangents", [&] { RefreshDisplayedMesh(tab); });
@@ -362,6 +380,15 @@ static int BenchmarkFbx(const char* path)
         TransformBoneData(tab, tab.selectedNode, [](Vector3 p) { return p; }, [](Vector3 n) { return n; },
             TransformTool::Rotate, TransformAxis::Y, 0);
     });
+    stage("Bake bind skin", [&] { BakeSkinnedBindMeshFromBones(tab, true); });
+    stage("Rebuild deferred animation frames", [&] { RebuildSkinnedAnimationMeshFrames(tab); });
+    stage("Mesh bounds", [&] { RecomputeAllMeshNodeBounds(tab); });
+    for (int index = 0; index < static_cast<int>(tab.loaded.nodes.size()); ++index)
+    {
+        const auto& node = tab.loaded.nodes[index];
+        if (node.type == SceneNodeType::Mesh && IsNodeInTransformScope(tab.loaded, index, tab.selectedNode))
+            std::cout << "Scoped mesh " << node.name << ": " << node.meshVertexCount << " vertices, skin " << node.meshHasSkin << "\n";
+    }
     size_t frames = 0;
     for (const auto& clip : tab.loaded.animations) frames += clip.frames.size();
     for (int clipIndex : {-1, tab.loaded.animations.empty() ? -1 : 0})
@@ -578,6 +605,161 @@ static void TestValidationFixes()
     Require(UndoEdit(bones) && bones.loaded.skinnedVertices[0].influences[0].boneName == "Bone", "Bone rename undo failed");
 }
 
+static void TestSkinWeightDisplaySelection()
+{
+    ModelTab tab;
+    tab.loaded.nodes.resize(4);
+    tab.loaded.nodes[1].type = SceneNodeType::Bone;
+    tab.loaded.nodes[1].name = "A";
+    tab.loaded.nodes[2].type = SceneNodeType::Bone;
+    tab.loaded.nodes[2].name = "B";
+    tab.loaded.nodes[3].type = SceneNodeType::Mesh;
+    SkinnedVertex vertex;
+    vertex.influences = {{"A", 0.25f}, {"B", 0.5f}, {"Other", 0.25f}};
+    Require(GetSelectedBonesInfluenceWeight(vertex, GetSelectedBoneNames(tab)) == 0,
+            "No bone selection must use the zero-weight tint");
+    tab.selectedNode = 1;
+    Require(GetSelectedBonesInfluenceWeight(vertex, GetSelectedBoneNames(tab)) == 0.25f,
+            "Single-bone display weight changed");
+    tab.selectedNodes = {1, 2, 1, 3};
+    tab.selectedNode = 3;
+    Require(GetSelectedBonesInfluenceWeight(vertex, GetSelectedBoneNames(tab)) == 0.75f,
+            "Multi-bone display must sum selected weights once, ignoring mesh selection");
+    tab.deletedNodes = {false, false, true, false};
+    Require(GetSelectedBonesInfluenceWeight(vertex, GetSelectedBoneNames(tab)) == 0.25f,
+            "Deleted bones must not contribute to the heat map");
+    vertex.influences.push_back({"A", 2.0f});
+    Require(GetSelectedBonesInfluenceWeight(vertex, GetSelectedBoneNames(tab)) == 1,
+            "Combined display weight must clamp to the heat-map range");
+    Require(GetSelectedBonesInfluenceWeight(SkinnedVertex{}, GetSelectedBoneNames(tab)) == 0,
+            "Unweighted vertices must use the zero-weight tint");
+}
+
+static void TestAttachedMeshBoneTransforms()
+{
+    ModelTab tab;
+    auto& model = tab.loaded;
+    model.hasMesh = true;
+    model.nodes.resize(4);
+    model.nodes[0].name = "Root";
+    model.nodes[1].parent = 0;
+    model.nodes[1].type = SceneNodeType::Bone;
+    model.nodes[1].name = "Bone";
+    for (int index : {2, 3})
+    {
+        auto& node = model.nodes[index];
+        node.parent = index == 2 ? 1 : 0;
+        node.type = SceneNodeType::Mesh;
+        node.meshVertexStart = (index - 2) * 3;
+        node.meshVertexCount = 3;
+        node.meshHasSkin = index == 3;
+    }
+    model.bindVertices = {0,0,0, 1,0,0, 0,1,0, 2,0,0, 3,0,0, 2,1,0};
+    model.bindNormals = {0,0,1, 0,0,1, 0,0,1, 0,0,1, 0,0,1, 0,0,1};
+    model.skinnedVertices.resize(6);
+    for (int vertex = 0; vertex < 6; ++vertex)
+    {
+        auto& skinned = model.skinnedVertices[vertex];
+        skinned.bindPosition = Vector3{model.bindVertices[vertex * 3], model.bindVertices[vertex * 3 + 1], 0};
+        skinned.bindNormal = Vector3{0,0,1};
+        if (vertex >= 3) skinned.influences.push_back({"Bone", 1, skinned.bindPosition, skinned.bindNormal});
+    }
+    BonePose bone;
+    bone.node = 1;
+    model.bonePoses = {bone};
+    model.animations.resize(1);
+    model.animations[0].frames.resize(2);
+    for (auto& frame : model.animations[0].frames) frame.poses = model.bonePoses;
+    SetSingleSelectedNode(tab, 1);
+    RebuildSkinnedAnimationMeshFrames(tab);
+    MeshFrame frozen = model.animations[0].meshFrames[0];
+    const auto frozenExpected = ReferenceSkin(model, model.animations[0].frames[0]);
+    const auto originalTopology = GetSkinningGeometry(tab)->topology;
+    const auto originalColors = GetSkinWeightDisplayColors(tab);
+    MoveSelectedSubtree(tab, Vector3{1, 2, 3});
+    RotateSelectedSubtree(tab, Vector3{}, TransformAxis::Z, Vector3{0,0,1}, 0.25f);
+    for (size_t index = 0; index < model.animations[0].meshFrames.size(); ++index)
+    {
+        auto& frame = model.animations[0].meshFrames[index];
+        ResolveMeshFrame(frame);
+        Equal(ReferenceSkin(model, model.animations[0].frames[index]), frame);
+    }
+    for (int vertex : {0, 3})
+    {
+        const Vector3 original = vertex == 0 ? Vector3{} : Vector3{2,0,0};
+        const Vector3 expected = Vector3RotateByAxisAngle(Vector3Add(original, Vector3{1,2,3}), Vector3{0,0,1}, 0.25f);
+        const Vector3 actual{model.bindVertices[vertex * 3], model.bindVertices[vertex * 3 + 1], model.bindVertices[vertex * 3 + 2]};
+        Require(Vector3Distance(expected, actual) < 0.0001f, "Bone move/rotate changed attached mesh deformation");
+    }
+    Require(GetSkinningGeometry(tab)->topology == originalTopology, "Rigid attachments rebuilt unchanged influence topology");
+    const auto& cachedColors = GetSkinWeightDisplayColors(tab);
+    Require(cachedColors.size() == originalColors.size() && cachedColors[3].r == originalColors[3].r,
+            "Bone pose change invalidated weight colors");
+    ResolveMeshFrame(frozen);
+    Equal(frozenExpected, frozen);
+}
+
+static void TestSkinWeightWireframeRendering()
+{
+    SetConfigFlags(FLAG_WINDOW_HIDDEN);
+    InitWindow(256, 256, "Skin weight wireframe regression");
+    ModelTab tab;
+    tab.loaded.hasMesh = true;
+    tab.loaded.bindVertices = {-1,-1,0, 1,-1,0, 0,1,0, -0.4f,-0.4f,-1, 0.4f,-0.4f,-1, 0,0.4f,-1};
+    tab.loaded.bindNormals = {0,0,1, 0,0,1, 0,0,1, 0,0,1, 0,0,1, 0,0,1};
+    tab.loaded.bounds = BoundingBox{Vector3{-1,-1,-1}, Vector3{1,1,0}};
+    tab.loaded.nodes.resize(1);
+    auto& node = tab.loaded.nodes[0];
+    node.type = SceneNodeType::Mesh;
+    node.meshVertexStart = 0;
+    node.meshVertexCount = 6;
+    const Camera3D camera{Vector3{0,0,4}, Vector3{}, Vector3{0,1,0}, 45, CAMERA_PERSPECTIVE};
+    const auto target = LoadRenderTexture(256, 256);
+    auto render = [&](bool wireframe, bool weights = true)
+    {
+        BeginTextureMode(target);
+        ClearBackground(WHITE);
+        BeginMode3D(camera);
+        rlDisableBackfaceCulling();
+        if (weights) DrawSkinWeightHeatMap(tab);
+        else DrawTriangle3D(Vector3{-1,-1,0}, Vector3{1,-1,0}, Vector3{0,1,0}, BLACK);
+        if (wireframe) DrawSkinWeightWireframe(tab);
+        EndMode3D();
+        EndTextureMode();
+        Image capture = LoadImageFromTexture(target.texture);
+        ImageFlipVertical(&capture);
+        return capture;
+    };
+    Image surface = render(false, false);
+    Image heatmap = render(false);
+    Image wireframe = render(true);
+    int edgePixels = 0;
+    for (int y = 0; y < 256; ++y)
+    for (int x = 0; x < 256; ++x)
+    {
+        const Color before = GetImageColor(heatmap, x, y);
+        const Color after = GetImageColor(wireframe, x, y);
+        const Color originalSurface = GetImageColor(surface, x, y);
+        Require((before.r == 255 && before.g == 255 && before.b == 255) ==
+                (originalSurface.r == 255 && originalSurface.g == 255 && originalSurface.b == 255),
+                "Skin weight rendering changed the actual mesh silhouette");
+        if (after.r == 20 && after.g == 23 && after.b == 27 &&
+            (before.r != 20 || before.g != 23 || before.b != 27)) ++edgePixels;
+    }
+    Require(edgePixels > 100, "Model wireframe is hidden by the skin weight heat map");
+    const Vector2 rearEdge = GetWorldToScreen(Vector3{0, -0.4f, -1}, camera);
+    const Color hidden = GetImageColor(wireframe, static_cast<int>(rearEdge.x), static_cast<int>(rearEdge.y));
+    const Color zeroWeight = GetSkinWeightHeatColor(0);
+    Require(hidden.r == zeroWeight.r && hidden.g == zeroWeight.g && hidden.b == zeroWeight.b,
+            "Skin weight colors must be opaque and rear wireframe edges must stay hidden");
+    ExportImage(wireframe, (std::filesystem::temp_directory_path() / "openfbx-skin-weight-wireframe.png").string().c_str());
+    UnloadImage(surface);
+    UnloadImage(heatmap);
+    UnloadImage(wireframe);
+    UnloadRenderTexture(target);
+    CloseWindow();
+}
+
 static void TestBadSkinWeightRepair()
 {
     const auto folder = std::filesystem::temp_directory_path() / "openfbx-weight-repair";
@@ -635,7 +817,13 @@ static void TestBadSkinWeightRepair()
     Require(node.badSkinWeightCount == 2 && node.missingSkinWeightCount == 1, "Bad-weight fixture not detected");
     const int start = node.meshVertexStart;
     const auto original = tab.loaded.skinnedVertices;
+    for (int index = 0; index < static_cast<int>(tab.loaded.nodes.size()); ++index)
+        if (tab.loaded.nodes[index].name == "BoneA") SetSingleSelectedNode(tab, index);
+    const Color oldWeightColor = GetSkinWeightDisplayColors(tab)[start];
     Require(FixAllValidationErrors(tab) == 2, "Fix All Errors did not normalize skin weights");
+    const Color newWeightColor = GetSkinWeightDisplayColors(tab)[start];
+    Require(oldWeightColor.r != newWeightColor.r || oldWeightColor.g != newWeightColor.g || oldWeightColor.b != newWeightColor.b,
+            "Weight repair left stale heat-map colors");
     Require(node.badSkinWeightCount == 0 && node.missingSkinWeightCount == 1 && node.skinWeightsEdited,
             "Repair must retain the unweighted vertex error");
     const auto& first = tab.loaded.skinnedVertices[start].influences;
@@ -659,6 +847,9 @@ static void TestBadSkinWeightRepair()
             !tab.loaded.nodes[meshIndex].skinWeightsEdited &&
             tab.loaded.skinnedVertices[start].influences[0].weight == original[start].influences[0].weight,
             "Skin-weight undo did not restore original weights and diagnostics");
+    const Color undoColor = GetSkinWeightDisplayColors(tab)[start];
+    Require(undoColor.r == oldWeightColor.r && undoColor.g == oldWeightColor.g && undoColor.b == oldWeightColor.b,
+            "Undo left stale heat-map colors");
     Require(RedoEdit(tab) && tab.loaded.nodes[meshIndex].badSkinWeightCount == 0, "Skin-weight redo failed");
     const size_t history = tab.undoStack.size();
     Require(FixAllValidationErrors(tab) == 0 && tab.undoStack.size() == history, "Missing weights created a false repair");
@@ -1100,6 +1291,9 @@ int main(int argc, char** argv)
         TestUvOverlapSpatialSearch();
         TestValidationFixes();
         TestBadSkinWeightRepair();
+        TestSkinWeightDisplaySelection();
+        TestAttachedMeshBoneTransforms();
+        TestSkinWeightWireframeRendering();
         TestValidationCache();
         TestVisibility();
         TestMarqueeSelection();

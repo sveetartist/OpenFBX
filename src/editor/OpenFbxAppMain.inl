@@ -61,6 +61,7 @@ int RunOpenFbxApp(int argc, char** argv)
         tab.collapsedNodes.assign(tab.loaded.nodes.size(), false);
         tab.hiddenNodes.clear();
         tab.validationCache = ValidationCache{};
+        tab.skinWeightColors.clear();
         tab.deletedNodes.assign(tab.loaded.nodes.size(), false);
         tab.selectedNode = -1;
         for (int nodeIndex = 0; nodeIndex < static_cast<int>(tab.loaded.nodes.size()); ++nodeIndex)
@@ -600,7 +601,11 @@ int RunOpenFbxApp(int argc, char** argv)
                     rlDisableBackfaceCulling();
                 }
 
-                if (viewMode == ViewMode::Shaded || viewMode == ViewMode::ShadedWireframe)
+                if (visibility.skinWeights)
+                {
+                    DrawSkinWeightHeatMap(*active);
+                }
+                else if (viewMode == ViewMode::Shaded || viewMode == ViewMode::ShadedWireframe)
                 {
                     BeginBlendMode(BLEND_ALPHA);
                     DrawMaterialModel(*active, litShader, materialPreviewMode, visibility.textures);
@@ -624,17 +629,12 @@ int RunOpenFbxApp(int argc, char** argv)
 
                 if (visibility.skinWeights)
                 {
-                    DrawSkinWeightHeatMap(*active);
+                    DrawSkinWeightWireframe(*active);
                 }
-
-                if (visibility.skinWeights || viewMode == ViewMode::ShadedWireframe || viewMode == ViewMode::Wireframe)
+                else if (viewMode == ViewMode::ShadedWireframe || viewMode == ViewMode::Wireframe)
                 {
-                    // Place the edges above the heat map while retaining depth occlusion.
-                    const float wireOffset = visibility.skinWeights
-                        ? ClampFloat(GetBoundsDiagonal(active->loaded.bounds) * 0.0008f, 0.0002f, 0.01f) * 1.5f : 0.0f;
-                    const Color wireColor = visibility.skinWeights ? Color{20, 23, 27, 230} :
-                        viewMode == ViewMode::Wireframe ? Color{220, 225, 230, 255} : Color{25, 28, 31, 180};
-                    DrawVisibleMeshWireframe(*active, wireColor, wireOffset);
+                    DrawVisibleMeshWireframe(*active, viewMode == ViewMode::Wireframe
+                        ? Color{220, 225, 230, 255} : Color{25, 28, 31, 180});
                 }
 
                 rlDisableBackfaceCulling();
