@@ -2742,6 +2742,60 @@ bool ApplyRemovedDegenerateTriangles(const LoadedFbxModel& model,
     return true;
 }
 
+// Keep source topology and deformers while exporting normalized cluster weights.
+void ApplyRepairedSkinWeights(const LoadedFbxModel& model, const std::vector<bool>& deletedNodes,
+                              const std::vector<FbxNode*>& sceneNodes)
+{
+    for (size_t index = 0; index < model.nodes.size() && index < sceneNodes.size(); ++index)
+    {
+        if (!model.nodes[index].skinWeightsEdited || IsDeletedModelNode(deletedNodes, static_cast<int>(index)) ||
+            model.nodes[index].sourceName.empty() || !sceneNodes[index]) continue;
+        auto* node = sceneNodes[index];
+        for (int attribute = 0; attribute < node->GetNodeAttributeCount(); ++attribute)
+        {
+            auto* mesh = FbxCast<FbxMesh>(node->GetNodeAttributeByIndex(attribute));
+            if (!mesh) continue;
+            std::vector<double> sums(static_cast<size_t>(mesh->GetControlPointsCount()), 0);
+            std::vector<bool> invalid(sums.size(), false);
+            std::vector<FbxCluster*> clusters;
+            for (int skinIndex = 0; skinIndex < mesh->GetDeformerCount(FbxDeformer::eSkin); ++skinIndex)
+            {
+                auto* skin = static_cast<FbxSkin*>(mesh->GetDeformer(skinIndex, FbxDeformer::eSkin));
+                for (int clusterIndex = 0; clusterIndex < skin->GetClusterCount(); ++clusterIndex)
+                {
+                    auto* cluster = skin->GetCluster(clusterIndex);
+                    if (!cluster || !cluster->GetLink()) continue;
+                    clusters.push_back(cluster);
+                    for (int point = 0; point < cluster->GetControlPointIndicesCount(); ++point)
+                    {
+                        const int controlPoint = cluster->GetControlPointIndices()[point];
+                        const float weight = static_cast<float>(cluster->GetControlPointWeights()[point]);
+                        if (controlPoint >= 0 && controlPoint < static_cast<int>(sums.size()))
+                        {
+                            if (!std::isfinite(weight) || weight < 0 || weight > 1) invalid[controlPoint] = true;
+                            if (std::isfinite(weight) && weight > 0) sums[controlPoint] += weight;
+                        }
+                    }
+                }
+            }
+            for (auto* cluster : clusters)
+            {
+                cluster->SetLinkMode(FbxCluster::eNormalize);
+                for (int point = 0; point < cluster->GetControlPointIndicesCount(); ++point)
+                {
+                    const int controlPoint = cluster->GetControlPointIndices()[point];
+                    if (controlPoint < 0 || controlPoint >= static_cast<int>(sums.size()) ||
+                        (!invalid[controlPoint] && std::fabs(sums[controlPoint] - 1.0) <= 0.01)) continue;
+                    double& weight = cluster->GetControlPointWeights()[point];
+                    const float importedWeight = static_cast<float>(weight);
+                    weight = std::isfinite(importedWeight) && importedWeight > 0 && sums[controlPoint] > 0
+                        ? static_cast<float>(importedWeight / sums[controlPoint]) : 0;
+                }
+            }
+        }
+    }
+}
+
 bool ApplyEditedModelToScene(FbxScene* scene,
                              const LoadedFbxModel& model,
                              const std::vector<bool>& deletedNodes,
@@ -2764,6 +2818,7 @@ bool ApplyEditedModelToScene(FbxScene* scene,
     ApplyEditedSkinBindMatrices(model, deletedNodes, mappedSceneNodes);
     RebuildEditedBindPose(scene, model, deletedNodes, mappedSceneNodes);
     ApplyEditedMeshGeometry(model, deletedNodes, mappedSceneNodes);
+    ApplyRepairedSkinWeights(model, deletedNodes, mappedSceneNodes);
     if (!ApplyRemovedDegenerateTriangles(model, deletedNodes, mappedSceneNodes, error)) return false;
     ApplyEditedNodeNames(model, deletedNodes, mappedSceneNodes);
     ApplyDeletedNodes(scene, model, deletedNodes, mappedSceneNodes);

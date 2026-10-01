@@ -992,7 +992,7 @@ void ShowAllNodes(ModelTab& tab)
     RefreshDisplayedMesh(tab);
 }
 
-int FixDegenerateTriangles(ModelTab& tab, int nodeIndex)
+int FixDegenerateTriangles(ModelTab& tab, int nodeIndex, bool recordUndo = true)
 {
     if (!IsValidSelectableNode(tab, nodeIndex)) return 0;
     SceneNode& node = tab.loaded.nodes[static_cast<size_t>(nodeIndex)];
@@ -1026,7 +1026,7 @@ int FixDegenerateTriangles(ModelTab& tab, int nodeIndex)
         vertex += count * 3;
     }
     if (removed.empty()) return 0;
-    PushUndoSnapshot(tab);
+    if (recordUndo) PushUndoSnapshot(tab);
     node.removedTriangleStarts.insert(node.removedTriangleStarts.end(), removed.begin(), removed.end());
     std::sort(node.removedTriangleStarts.begin(), node.removedTriangleStarts.end());
     node.degenerateTriangleCount = std::max(0, node.degenerateTriangleCount - static_cast<int>(removed.size()));

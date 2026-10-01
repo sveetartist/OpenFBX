@@ -339,7 +339,7 @@ void DrawMenuBar(Font font,
         {
             visibility.empties = !visibility.empties;
         }
-        if (DrawMenuItem(font, Rectangle{ 124.0f, 397.0f, 230.0f, 30.0f }, visibility.skinWeights ? "[x] Skin Weights" : "[ ] Skin Weights"))
+        if (DrawMenuItem(font, Rectangle{ 124.0f, 397.0f, 230.0f, 30.0f }, HotkeyLabel(visibility.skinWeights ? "[x] Skin Weights" : "[ ] Skin Weights", HotkeyAction::SkinWeights).c_str()))
         {
             visibility.skinWeights = !visibility.skinWeights;
         }

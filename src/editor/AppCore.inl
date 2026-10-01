@@ -403,6 +403,10 @@ struct ModelTab
     std::vector<EditSnapshot> undoStack;
     std::vector<EditSnapshot> redoStack;
     int selectedMaterial = 0;
+    float statsScroll = 0.0f;
+    float materialsScroll = 0.0f;
+    bool materialsScrollDragging = false;
+    float materialsScrollDragOffset = 0.0f;
     int selectedUvSet = 0;
     int uvContextSet = -1;
     int uvSetScroll = 0;

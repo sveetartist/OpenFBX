@@ -45,7 +45,8 @@ void DrawTextureContextMenu(Font font, ModelTab& tab, TextureClipboard& clipboar
 {
     if (!clipboard.menuOpen) return;
 
-    const Rectangle menu{ clipboard.position.x, clipboard.position.y, 116.0f, 62.0f };
+    const Rectangle menu{ ClampFloat(clipboard.position.x, 0, std::max(0.0f, static_cast<float>(GetScreenWidth()) - 116)),
+                          ClampFloat(clipboard.position.y, 0, std::max(0.0f, static_cast<float>(GetScreenHeight()) - gBottomPanelReservedHeight - 62)), 116.0f, 62.0f };
     DrawRectangleRec(menu, Color{ 24, 27, 31, 248 });
     DrawRectangleLinesEx(menu, 1.0f, Color{ 80, 90, 100, 255 });
 
@@ -372,10 +373,10 @@ void ValidateSkinning(const LoadedFbxModel& loaded, std::vector<ValidatorIssue>&
 
 void ValidateTexelDensityConsistency(const ModelTab& tab, std::vector<ValidatorIssue>& issues);
 void ValidateUvIslandOverlaps(const ModelTab& tab, std::vector<ValidatorIssue>& issues);
-void CombineAllUvSets(ModelTab& tab, int preferred);
-bool PackValidationUvIslands(ModelTab& tab, int nodeIndex, int uvSet, bool averageDensity);
+void CombineAllUvSets(ModelTab& tab, int preferred, bool recordUndo = true);
+bool PackValidationUvIslands(ModelTab& tab, int nodeIndex, int uvSet, bool averageDensity, bool recordUndo = true);
 
-int FixDuplicateNames(ModelTab& tab)
+int FixDuplicateNames(ModelTab& tab, bool recordUndo = true)
 {
     EditSnapshot before = CaptureEditSnapshot(tab);
     int changed = 0;
@@ -421,7 +422,7 @@ int FixDuplicateNames(ModelTab& tab)
     suffixDuplicates(names);
     if (changed > 0)
     {
-        PushUndoSnapshot(tab, std::move(before));
+        if (recordUndo) PushUndoSnapshot(tab, std::move(before));
         tab.skinningGeometry.reset();
         InvalidateDisplayedAnimationCaches(tab);
     }
@@ -471,6 +472,74 @@ const ValidationCache& GetValidationCache(ModelTab& tab)
     return cache;
 }
 
+int FixBadSkinWeights(ModelTab& tab, int nodeIndex, bool recordUndo = true)
+{
+    if (!IsValidSelectableNode(tab, nodeIndex)) return 0;
+    auto& node = tab.loaded.nodes[nodeIndex];
+    if (node.type != SceneNodeType::Mesh || !node.meshHasSkin || node.meshVertexStart < 0 ||
+        node.meshVertexStart + node.meshVertexCount > static_cast<int>(tab.loaded.skinnedVertices.size())) return 0;
+    EditSnapshot before = CaptureEditSnapshot(tab);
+    int changed = 0;
+    node.badSkinWeightCount = 0;
+    node.missingSkinWeightCount = 0;
+    for (int index = node.meshVertexStart; index < node.meshVertexStart + node.meshVertexCount; ++index)
+    {
+        auto& influences = tab.loaded.skinnedVertices[index].influences;
+        double sum = 0;
+        bool invalid = false;
+        for (const auto& influence : influences)
+        {
+            if (!std::isfinite(influence.weight) || influence.weight < 0 || influence.weight > 1) invalid = true;
+            if (std::isfinite(influence.weight) && influence.weight > 0) sum += influence.weight;
+        }
+        if (!influences.empty() && (invalid || std::fabs(sum - 1.0) > 0.01))
+        {
+            influences.erase(std::remove_if(influences.begin(), influences.end(), [](const auto& influence)
+            { return !std::isfinite(influence.weight) || influence.weight <= 0; }), influences.end());
+            if (sum > 0)
+                for (auto& influence : influences) influence.weight = static_cast<float>(influence.weight / sum);
+            ++changed;
+        }
+        if (influences.empty()) ++node.missingSkinWeightCount;
+        else
+        {
+            double repairedSum = 0;
+            for (const auto& influence : influences) repairedSum += influence.weight;
+            if (std::fabs(repairedSum - 1.0) > 0.01) ++node.badSkinWeightCount;
+        }
+    }
+    if (changed > 0)
+    {
+        node.skinWeightsEdited = true;
+        if (recordUndo) PushUndoSnapshot(tab, std::move(before));
+        tab.skinningGeometry.reset();
+        RebuildSkinnedAnimationMeshFrames(tab);
+        InvalidateDisplayedAnimationCaches(tab);
+        RefreshDisplayedMesh(tab);
+    }
+    tab.validationCache.dirty = true;
+    return changed;
+}
+
+int FixAllValidationErrors(ModelTab& tab)
+{
+    EditSnapshot before = CaptureEditSnapshot(tab);
+    const auto issues = BuildValidationIssues(tab);
+    int repairs = 0;
+    for (const auto& issue : issues)
+    {
+        if (issue.severity != ValidatorSeverity::Error) continue;
+        if (issue.category == "Degenerate triangles")
+            repairs += FixDegenerateTriangles(tab, issue.node, false);
+        else if (issue.category == "Bad weights")
+            repairs += FixBadSkinWeights(tab, issue.node, false);
+    }
+    if (repairs > 0) PushUndoSnapshot(tab, std::move(before));
+    tab.validationCache.dirty = true;
+    tab.validationFixNode = -1;
+    return repairs;
+}
+
 void DrawValidatorPanel(Font font, ModelTab& tab, HierarchyPanelState& panel, float panelX, float panelY, float panelW, std::string& notice, std::string& error)
 {
     if (DrawPanelButton(font, Rectangle{ panelX + panelW - 88.0f, panelY - 3.0f, 76.0f, 24.0f }, "Refresh"))
@@ -497,6 +566,20 @@ void DrawValidatorPanel(Font font, ModelTab& tab, HierarchyPanelState& panel, fl
         panel.validatorScroll = 0.0f;
         return;
     }
+
+    if (DrawPanelButton(font, Rectangle{contentX, y, panelW - 24.0f, 24.0f}, "Fix All Errors"))
+    {
+        const int repairs = FixAllValidationErrors(tab);
+        const auto& remaining = GetValidationCache(tab);
+        notice = "Applied " + std::to_string(repairs) + " repair(s). " +
+                 std::to_string(remaining.errors) + " error(s), " + std::to_string(remaining.warnings) +
+                 " warning(s) remain.";
+        if (repairs == 0) notice = "No automatic error repairs available. " + notice;
+        error.clear();
+        panel.validatorScroll = 0;
+        return;
+    }
+    y += 32.0f;
 
     const float buttonW = (panelW - 30.0f) * 0.5f;
     if (DrawPanelButton(font, Rectangle{ contentX, y, buttonW, 24.0f }, "Expand All"))
@@ -564,7 +647,7 @@ void DrawValidatorPanel(Font font, ModelTab& tab, HierarchyPanelState& panel, fl
                 if (hovered &&
                     (issue.category == "Degenerate triangles" || issue.category == "Unapplied scale" ||
                      issue.category == "Multiple UV sets" || issue.category == "Overlapping UVs" ||
-                     issue.category == "Texel density" || issue.category == "Duplicate name") &&
+                     issue.category == "Texel density" || issue.category == "Duplicate name" || issue.category == "Bad weights") &&
                     openfbx::UiMouseButtonPressed(MOUSE_BUTTON_RIGHT))
                 {
                     tab.validationFixNode = issue.node >= 0 ? issue.node : -2;
@@ -630,6 +713,18 @@ void DrawValidatorPanel(Font font, ModelTab& tab, HierarchyPanelState& panel, fl
                 tab.validationFixNode = -1;
             }
         }
+        else if (tab.validationFixCategory == "Bad weights")
+        {
+            if (DrawPanelButton(font, menu, "Normalize Skin Weights"))
+            {
+                const int count = FixBadSkinWeights(tab, tab.validationFixNode);
+                notice = "Normalized " + std::to_string(count) + " vertex weight(s). " +
+                         std::to_string(tab.loaded.nodes[tab.validationFixNode].missingSkinWeightCount) +
+                         " vertex/vertices still need weights.";
+                error.clear();
+                tab.validationFixNode = -1;
+            }
+        }
         else if (tab.validationFixCategory == "Multiple UV sets")
         {
             if (DrawPanelButton(font, menu, "Merge UV Sets"))
@@ -678,47 +773,55 @@ void DrawValidatorPanel(Font font, ModelTab& tab, HierarchyPanelState& panel, fl
 
 }
 
-void DrawSceneStatsPanel(Font font, const ModelTab& tab, float panelX, float panelY, float panelW)
+void DrawSceneStatsPanel(Font font, ModelTab& tab, float panelX, float panelY, float panelW)
 {
     const SceneStats stats = CalculateSceneStats(tab.loaded);
     const BoundingBox& bounds = tab.loaded.bounds;
     const Vector3 size = Vector3Subtract(bounds.max, bounds.min);
     const float contentX = panelX + 12.0f;
-    float y = panelY;
+    constexpr float contentHeight = 402.0f;
+    const float height = std::max(0.0f, static_cast<float>(GetScreenHeight()) - gBottomPanelReservedHeight - panelY);
+    if (height <= 0) return;
+    const Rectangle viewport{panelX, panelY, panelW, height};
+    const float maxScroll = std::max(0.0f, contentHeight - height);
+    if (CheckCollisionPointRec(GetMousePosition(), viewport)) tab.statsScroll -= openfbx::UiMouseWheelMove() * 32;
+    tab.statsScroll = ClampFloat(tab.statsScroll, 0, maxScroll);
+    BeginScissorMode(static_cast<int>(panelX), static_cast<int>(panelY), static_cast<int>(panelW), static_cast<int>(height));
+    float y = panelY - tab.statsScroll;
     char line[256] = {};
 
     DrawUiText(font, "SCENE STATS", contentX, y, 16.0f, Color{ 165, 182, 196, 255 });
     y += 30.0f;
 
     std::snprintf(line, sizeof(line), "Nodes: %d", stats.nodes);
-    DrawUiText(font, line, contentX, y, 15.0f, Color{ 205, 213, 220, 255 });
+    DrawUiTextClipped(font, line, contentX, y, 15.0f, panelW - 24.0f, Color{ 205, 213, 220, 255 });
     y += 24.0f;
     std::snprintf(line, sizeof(line), "Models: %d", stats.meshes);
-    DrawUiText(font, line, contentX, y, 15.0f, Color{ 205, 213, 220, 255 });
+    DrawUiTextClipped(font, line, contentX, y, 15.0f, panelW - 24.0f, Color{ 205, 213, 220, 255 });
     y += 24.0f;
     std::snprintf(line, sizeof(line), "Bones: %d", stats.bones);
-    DrawUiText(font, line, contentX, y, 15.0f, Color{ 205, 213, 220, 255 });
+    DrawUiTextClipped(font, line, contentX, y, 15.0f, panelW - 24.0f, Color{ 205, 213, 220, 255 });
     y += 24.0f;
     std::snprintf(line, sizeof(line), "Empties: %d", stats.empties);
-    DrawUiText(font, line, contentX, y, 15.0f, Color{ 205, 213, 220, 255 });
+    DrawUiTextClipped(font, line, contentX, y, 15.0f, panelW - 24.0f, Color{ 205, 213, 220, 255 });
     y += 34.0f;
 
     DrawUiText(font, "GEOMETRY", contentX, y, 16.0f, Color{ 165, 182, 196, 255 });
     y += 30.0f;
     std::snprintf(line, sizeof(line), "Vertices: %d", stats.vertices);
-    DrawUiText(font, line, contentX, y, 15.0f, Color{ 205, 213, 220, 255 });
+    DrawUiTextClipped(font, line, contentX, y, 15.0f, panelW - 24.0f, Color{ 205, 213, 220, 255 });
     y += 24.0f;
     std::snprintf(line, sizeof(line), "Polygons: %d", stats.polygons);
-    DrawUiText(font, line, contentX, y, 15.0f, Color{ 205, 213, 220, 255 });
+    DrawUiTextClipped(font, line, contentX, y, 15.0f, panelW - 24.0f, Color{ 205, 213, 220, 255 });
     y += 24.0f;
     std::snprintf(line, sizeof(line), "Render triangles: %d", stats.triangles);
-    DrawUiText(font, line, contentX, y, 15.0f, Color{ 205, 213, 220, 255 });
+    DrawUiTextClipped(font, line, contentX, y, 15.0f, panelW - 24.0f, Color{ 205, 213, 220, 255 });
     y += 24.0f;
     std::snprintf(line, sizeof(line), "Materials: %d", stats.materials);
-    DrawUiText(font, line, contentX, y, 15.0f, Color{ 205, 213, 220, 255 });
+    DrawUiTextClipped(font, line, contentX, y, 15.0f, panelW - 24.0f, Color{ 205, 213, 220, 255 });
     y += 24.0f;
     std::snprintf(line, sizeof(line), "Animations: %zu", tab.loaded.animations.size());
-    DrawUiText(font, line, contentX, y, 15.0f, Color{ 205, 213, 220, 255 });
+    DrawUiTextClipped(font, line, contentX, y, 15.0f, panelW - 24.0f, Color{ 205, 213, 220, 255 });
     y += 34.0f;
 
     DrawUiText(font, "SIZE IN METERS", contentX, y, 16.0f, Color{ 165, 182, 196, 255 });
@@ -731,6 +834,14 @@ void DrawSceneStatsPanel(Font font, const ModelTab& tab, float panelX, float pan
     y += 24.0f;
     std::snprintf(line, sizeof(line), "Depth Z:  %.3f m", size.z);
     DrawUiTextClipped(font, line, contentX, y, 15.0f, panelW - 24.0f, Color{ 205, 213, 220, 255 });
+    EndScissorMode();
+    if (maxScroll > 0)
+    {
+        const float thumbHeight = std::min(height, std::max(24.0f, height * height / contentHeight));
+        const float thumbY = panelY + tab.statsScroll / maxScroll * (height - thumbHeight);
+        DrawRectangleRec(Rectangle{panelX + panelW - 10, panelY, 6, height}, Color{24, 28, 33, 255});
+        DrawRectangleRec(Rectangle{panelX + panelW - 10, thumbY, 6, thumbHeight}, Color{90, 112, 134, 255});
+    }
 }
 
 void DrawPbrTextureRow(Font font,
@@ -814,7 +925,9 @@ void DrawPbrTextureRow(Font font,
 
     char label[128] = {};
     std::snprintf(label, sizeof(label), "%s", GetPbrTextureSlotName(slot));
-    DrawUiText(font, label, contentX + 52.0f, y, 15.0f, Color{ 205, 213, 220, 255 });
+    DrawUiTextClipped(font, label, contentX + 52.0f, y, 15.0f, panelW - 80.0f, Color{ 205, 213, 220, 255 });
+    DrawUiTextClipped(font, texture.loaded ? GetFileName(texture.path.c_str()) : "No texture", contentX + 52.0f, y + 22.0f, 13.0f, panelW - 80.0f, texture.loaded ? Color{ 160, 205, 230, 255 } : Color{ 120, 130, 140, 255 });
+    y += 48.0f;
 
     float buttonRight = panelX + panelW - 14.0f;
     if (slot == PbrTextureSlot::Roughness || slot == PbrTextureSlot::Metallic || slot == PbrTextureSlot::AmbientOcclusion || slot == PbrTextureSlot::Glossiness)
@@ -823,7 +936,7 @@ void DrawPbrTextureRow(Font font,
                                  slot == PbrTextureSlot::Roughness ? &material.roughnessChannel :
                                  slot == PbrTextureSlot::Metallic ? &material.metallicChannel : &material.aoChannel;
         const Rectangle channelButton{ buttonRight - 38.0f, y - 2.0f, 34.0f, 22.0f };
-        if (!inputBlocked && DrawChannelButton(font, channelButton, *channel))
+        if (DrawChannelButton(font, channelButton, *channel) && !inputBlocked)
         {
             PushUndoSnapshot(tab);
             *channel = NextPackedChannel(*channel);
@@ -833,7 +946,7 @@ void DrawPbrTextureRow(Font font,
     else if (slot == PbrTextureSlot::Normal)
     {
         const Rectangle normalModeButton{ buttonRight - 38.0f, y - 2.0f, 34.0f, 22.0f };
-        if (!inputBlocked && DrawNormalModeButton(font, normalModeButton, material.normalDirectX))
+        if (DrawNormalModeButton(font, normalModeButton, material.normalDirectX) && !inputBlocked)
         {
             PushUndoSnapshot(tab);
             material.normalDirectX = !material.normalDirectX;
@@ -843,7 +956,7 @@ void DrawPbrTextureRow(Font font,
     else if (slot == PbrTextureSlot::Opacity)
     {
         const Rectangle channelButton{ buttonRight - 48.0f, y - 2.0f, 44.0f, 22.0f };
-        if (!inputBlocked && DrawPanelButton(font, channelButton, GetOpacityChannelName(material.opacityChannel)))
+        if (DrawPanelButton(font, channelButton, GetOpacityChannelName(material.opacityChannel)) && !inputBlocked)
         {
             PushUndoSnapshot(tab);
             material.opacityChannel = NextOpacityChannel(material.opacityChannel);
@@ -853,7 +966,7 @@ void DrawPbrTextureRow(Font font,
 
     const Rectangle clearButton{ buttonRight - 48.0f, y - 2.0f, 48.0f, 22.0f };
     const Rectangle loadButton{ buttonRight - 102.0f, y - 2.0f, 48.0f, 22.0f };
-    if (!inputBlocked && DrawPanelButton(font, loadButton, "Load"))
+    if (DrawPanelButton(font, loadButton, "Load") && !inputBlocked)
     {
         const std::string path = OpenTextureFileDialog();
         if (!path.empty())
@@ -877,7 +990,7 @@ void DrawPbrTextureRow(Font font,
             }
         }
     }
-    if (!inputBlocked && DrawPanelButton(font, clearButton, "Clear"))
+    if (DrawPanelButton(font, clearButton, "Clear") && !inputBlocked)
     {
         if (texture.loaded)
         {
@@ -888,9 +1001,7 @@ void DrawPbrTextureRow(Font font,
         }
     }
 
-    y += 22.0f;
-    DrawUiTextClipped(font, texture.loaded ? GetFileName(texture.path.c_str()) : "No texture", contentX + 52.0f, y, 13.0f, panelW - 80.0f, texture.loaded ? Color{ 160, 205, 230, 255 } : Color{ 120, 130, 140, 255 });
-    y += 34.0f;
+    y += 32.0f;
 }
 
 void DrawMaterialsPanel(Font font,
@@ -906,9 +1017,41 @@ void DrawMaterialsPanel(Font font,
                         bool inputBlocked)
 {
     EnsurePbrMaterialStates(tab);
-    const float contentX = panelX + 12.0f;
+    const float bottom = static_cast<float>(GetScreenHeight()) - gBottomPanelReservedHeight;
+    const Rectangle viewport{panelX, panelY, panelW, std::max(0.0f, bottom - panelY)};
+    if (viewport.height <= 0) return;
     const int materialCount = static_cast<int>(tab.pbrMaterials.size());
-    float y = panelY;
+    // Heading, material rows, workflow/folder controls, and seven texture rows.
+    const float contentHeight = 28.0f + materialCount * 24.0f + 64.0f + 7 * 80.0f;
+    const float maxScroll = std::max(0.0f, contentHeight - viewport.height);
+    const Vector2 mouse = GetMousePosition();
+    const bool panelInputBlocked = inputBlocked;
+    const Rectangle track{panelX + panelW - 12, panelY, 8, viewport.height};
+    const float thumbHeight = std::min(track.height, std::max(24.0f, track.height * viewport.height / contentHeight));
+    tab.materialsScroll = ClampFloat(tab.materialsScroll, 0, maxScroll);
+    float thumbY = track.y + (maxScroll > 0 ? tab.materialsScroll / maxScroll * (track.height - thumbHeight) : 0);
+    if (!openfbx::UiMouseButtonDown(MOUSE_BUTTON_LEFT) || inputBlocked || clipboard.menuOpen || maxScroll <= 0)
+        tab.materialsScrollDragging = false;
+    if (!inputBlocked && !clipboard.menuOpen && maxScroll > 0)
+    {
+        if (CheckCollisionPointRec(mouse, viewport))
+            tab.materialsScroll -= openfbx::UiMouseWheelMove() * 32.0f;
+        if (CheckCollisionPointRec(mouse, track) && openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT))
+        {
+            tab.materialsScrollDragging = true;
+            tab.materialsScrollDragOffset = mouse.y >= thumbY && mouse.y <= thumbY + thumbHeight ? mouse.y - thumbY : thumbHeight * 0.5f;
+        }
+        if (tab.materialsScrollDragging && track.height > thumbHeight)
+            tab.materialsScroll = maxScroll * (mouse.y - track.y - tab.materialsScrollDragOffset) / (track.height - thumbHeight);
+    }
+    tab.materialsScroll = ClampFloat(tab.materialsScroll, 0, maxScroll);
+    inputBlocked = inputBlocked || clipboard.menuOpen || tab.materialsScrollDragging ||
+                   !CheckCollisionPointRec(mouse, viewport) || CheckCollisionPointRec(mouse, track);
+    if (maxScroll > 0) panelW -= 14.0f;
+    const float contentX = panelX + 12.0f;
+    float y = panelY - tab.materialsScroll;
+    BeginScissorMode(static_cast<int>(viewport.x), static_cast<int>(viewport.y),
+                     static_cast<int>(viewport.width), static_cast<int>(viewport.height));
 
     DrawUiText(font, "MATERIALS", contentX, y, 16.0f, Color{ 165, 182, 196, 255 });
     y += 28.0f;
@@ -917,7 +1060,6 @@ void DrawMaterialsPanel(Font font,
     {
         const bool selected = i == tab.selectedMaterial;
         const Rectangle row{ contentX, y, panelW - 24.0f, 22.0f };
-        const Vector2 mouse = GetMousePosition();
         const bool hovered = CheckCollisionPointRec(mouse, row);
         DrawRectangleRec(row, selected ? Color{ 48, 70, 92, 255 } : hovered ? Color{ 34, 39, 45, 255 } : Color{ 24, 27, 31, 220 });
         const std::string name = i < static_cast<int>(tab.loaded.materialNames.size()) ? tab.loaded.materialNames[static_cast<size_t>(i)] : std::string("Material ") + std::to_string(i + 1);
@@ -943,7 +1085,7 @@ void DrawMaterialsPanel(Font font,
     const float clearAllW = 74.0f;
     const Rectangle loadFolderButton{ contentX, y, panelW - 30.0f - clearAllW, 24.0f };
     const Rectangle clearAllButton{ contentX + loadFolderButton.width + 6.0f, y, clearAllW, 24.0f };
-    if (!inputBlocked && DrawPanelButton(font, loadFolderButton, "Load Folder"))
+    if (DrawPanelButton(font, loadFolderButton, "Load Folder") && !inputBlocked)
     {
         const std::string pickedPath = openfbx::OpenTextureFolderDialog();
         std::string autoloadError;
@@ -966,7 +1108,7 @@ void DrawMaterialsPanel(Font font,
             error.clear();
         }
     }
-    if (!inputBlocked && DrawPanelButton(font, clearAllButton, "Clear All"))
+    if (DrawPanelButton(font, clearAllButton, "Clear All") && !inputBlocked)
     {
         bool hadAnyTexture = false;
         for (int i = 0; i < static_cast<int>(PbrTextureSlot::Count); ++i)
@@ -998,9 +1140,15 @@ void DrawMaterialsPanel(Font font,
     DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::AmbientOcclusion, panelX, panelW, y, droppedPaths, droppedTextureHandled, clipboard, notice, error, inputBlocked);
     DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Emissive, panelX, panelW, y, droppedPaths, droppedTextureHandled, clipboard, notice, error, inputBlocked);
     DrawPbrTextureRow(font, tab, tab.selectedMaterial, PbrTextureSlot::Opacity, panelX, panelW, y, droppedPaths, droppedTextureHandled, clipboard, notice, error, inputBlocked);
-    if (!inputBlocked)
+    EndScissorMode();
+    if (maxScroll > 0)
+    {
+        thumbY = track.y + tab.materialsScroll / maxScroll * (track.height - thumbHeight);
+        DrawRectangleRec(track, Color{24, 28, 33, 255});
+        DrawRectangleRec(Rectangle{track.x, thumbY, track.width, thumbHeight}, Color{90, 112, 134, 255});
+    }
+    if (!panelInputBlocked)
     {
         DrawTextureContextMenu(font, tab, clipboard, notice, error);
     }
 }
-

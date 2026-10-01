@@ -438,6 +438,10 @@ int RunOpenFbxApp(int argc, char** argv)
         {
             visibility.bones = !visibility.bones;
         }
+        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && HotkeyPressed(HotkeyAction::SkinWeights))
+        {
+            visibility.skinWeights = !visibility.skinWeights;
+        }
         if (!modalOpen && !renameEditor.active && !transformValueEditor.active && HotkeyPressed(HotkeyAction::BoneAxes))
         {
             visibility.boneRotations = !visibility.boneRotations;

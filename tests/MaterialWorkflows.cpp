@@ -198,6 +198,64 @@ int main()
         ImageFlipVertical(&image);
         ExportImage(image, (folder / "materials.png").string().c_str());
         UnloadImage(image);
+        // Many materials and narrow panels must not paint over the timeline or tabs.
+        ModelTab many;
+        many.loaded.model.materialCount = 40;
+        many.loaded.materialNames.assign(40, "Very long material name that must stay inside its row");
+        EnsurePbrMaterialStates(many);
+        const float savedReservedHeight = gBottomPanelReservedHeight;
+        for (float reserved : {180.0f, 340.0f})
+        for (float panelWidth : {220.0f, 360.0f})
+        for (float requestedScroll : {0.0f, 100000.0f})
+        {
+            gBottomPanelReservedHeight = reserved;
+            many.materialsScroll = requestedScroll;
+            BeginTextureMode(ui);
+            ClearBackground(MAGENTA);
+            DrawMaterialsPanel(font, many, 0, 135, panelWidth, {}, dropped, clipboard, notice, error, false);
+            EndTextureMode();
+            Image capture = LoadImageFromTexture(ui.texture);
+            ImageFlipVertical(&capture);
+            const int bottom = 800 - static_cast<int>(reserved);
+            for (int py = 0; py < capture.height; ++py)
+            for (int px = 0; px < capture.width; ++px)
+            {
+                if (py >= 135 && py < bottom && px < panelWidth) continue;
+                const Color pixel = GetImageColor(capture, px, py);
+                Check(pixel.r == 255 && pixel.g == 0 && pixel.b == 255,
+                      "Material panel painted outside its viewport");
+            }
+            if (requestedScroll > 0)
+            {
+                Check(many.materialsScroll > 0 && many.materialsScroll < requestedScroll,
+                      "Material scroll must clamp to the reachable last row");
+                ExportImage(capture, (folder / ("materials-bottom-" + std::to_string(static_cast<int>(panelWidth)) + ".png")).string().c_str());
+            }
+            UnloadImage(capture);
+            many.statsScroll = requestedScroll;
+            BeginTextureMode(ui);
+            ClearBackground(MAGENTA);
+            DrawSceneStatsPanel(font, many, 0, 135, panelWidth);
+            EndTextureMode();
+            capture = LoadImageFromTexture(ui.texture);
+            ImageFlipVertical(&capture);
+            for (int py = 0; py < capture.height; ++py)
+            for (int px = 0; px < capture.width; ++px)
+            {
+                if (py >= 135 && py < bottom && px < panelWidth) continue;
+                const Color pixel = GetImageColor(capture, px, py);
+                Check(pixel.r == 255 && pixel.g == 0 && pixel.b == 255,
+                      "Scene stats painted outside its viewport");
+            }
+            UnloadImage(capture);
+        }
+        many.loaded.model.materialCount = 1;
+        gBottomPanelReservedHeight = 0;
+        BeginTextureMode(ui);
+        DrawMaterialsPanel(font, many, 0, 40, 220, {}, dropped, clipboard, notice, error, false);
+        EndTextureMode();
+        Check(many.materialsScroll == 0, "Removing materials must reset an obsolete scroll offset");
+        gBottomPanelReservedHeight = savedReservedHeight;
         UnloadRenderTexture(ui);
         if (font.texture.id != GetFontDefault().texture.id) UnloadFont(font);
         UnloadRenderTexture(target);

@@ -29,9 +29,23 @@ int main()
         Check(HotkeyConflict(edited, move, KEY_S, 1) == static_cast<int>(HotkeyAction::Save), "Duplicate binding must be rejected");
         Check(HotkeyConflict(edited, move, KEY_F6, 3) == -1, "Binding must not conflict with itself");
         Check(!ValidHotkey(KEY_ESCAPE, 0) && !ValidHotkey(KEY_LEFT_SHIFT, 0), "Cancel and modifier keys are reserved");
+        const int weights = static_cast<int>(HotkeyAction::SkinWeights);
+        Check(HotkeyMatches(kDefaultHotkeys[weights], KEY_S, 0), "S must toggle skin weights");
+        Check(!HotkeyMatches(kDefaultHotkeys[weights], KEY_S, 1), "Ctrl+S must remain Save");
+        Check(HotkeySearchMatches(edited[weights], "SKIN WEIGHTS"), "Search must match action names ignoring case");
+        Check(HotkeySearchMatches(edited[weights], "s"), "Search must match the skin weight shortcut");
+        Check(HotkeySearchMatches(edited[move], "ctrl+shift+f6") &&
+              HotkeySearchMatches(edited[move], "Shift F6"), "Search must match modified shortcuts");
+        Check(!HotkeySearchMatches(edited[move], "Ctrl+S"), "Search returned a different shortcut");
+        Check(HotkeySearchMatches(edited[move], "") && !HotkeySearchMatches(edited[move], "no such action"),
+              "Empty and unmatched searches must behave correctly");
+        edited[weights].key = KEY_F8;
+        edited[weights].modifiers = 4;
         Check(SaveHotkeys(edited, path), "Settings must save");
         LoadHotkeys(path);
         Check(gHotkeys[move].key == KEY_F6 && gHotkeys[move].modifiers == 3, "Settings must survive reload");
+        Check(gHotkeys[weights].key == KEY_F8 && gHotkeys[weights].modifiers == 4,
+              "Skin weight shortcut must survive reload");
         edited[move].key = KEY_NULL;
         Check(SaveHotkeys(edited, path), "Unbound settings must save");
         LoadHotkeys(path);
@@ -86,6 +100,16 @@ int main()
         checkBounds();
         capture("preferences-small.png", false);
         capture("hotkeys-small.png", true);
+        gHotkeyDraft = kDefaultHotkeys;
+        gHotkeySearch = "skin weights";
+        gHotkeyScroll = 100;
+        capture("hotkeys-search-small.png", true);
+        Check(gHotkeyScroll == 0, "Filtered list must clamp its scroll offset");
+        gHotkeySearch = "Ctrl+S";
+        capture("hotkeys-search-shortcut.png", true);
+        gHotkeySearch = "no such action";
+        capture("hotkeys-search-empty.png", true);
+        gHotkeySearch.clear();
         SetWindowSize(800, 600);
         checkBounds();
         capture("preferences.png", false);

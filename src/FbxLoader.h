@@ -108,6 +108,7 @@ struct SceneNode
     int degenerateTriangleCount = 0;
     std::vector<int> removedTriangleStarts;
     std::vector<int> sourcePolygonTriangleCounts;
+    bool skinWeightsEdited = false;
     int badSkinWeightCount = 0;
     int missingSkinWeightCount = 0;
     std::string materialName;

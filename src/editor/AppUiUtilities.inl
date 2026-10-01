@@ -620,13 +620,13 @@ void DrawSelectedInfoPanel(Font font, const ModelTab* active, const TransformVal
         DrawUiText(font, line, panelX + 12.0f, panelY + 36.0f, 14.0f, Color{ 205, 213, 220, 255 });
 
         const std::string positionLine = std::string("Pos:  ") + FormatMixedVector3Value(firstMesh.position, samePositionX, samePositionY, samePositionZ, 3);
-        DrawUiText(font, positionLine.c_str(), panelX + 12.0f, panelY + 58.0f, 14.0f, Color{ 205, 213, 220, 255 });
+        DrawUiTextClipped(font, positionLine.c_str(), panelX + 12.0f, panelY + 58.0f, 14.0f, panelW - 24.0f, Color{ 205, 213, 220, 255 });
 
         const std::string rotationLine = std::string("Rot:  ") + FormatMixedVector3Value(firstMesh.rotation, sameRotationX, sameRotationY, sameRotationZ, 2);
-        DrawUiText(font, rotationLine.c_str(), panelX + 12.0f, panelY + 80.0f, 14.0f, Color{ 205, 213, 220, 255 });
+        DrawUiTextClipped(font, rotationLine.c_str(), panelX + 12.0f, panelY + 80.0f, 14.0f, panelW - 24.0f, Color{ 205, 213, 220, 255 });
 
         const std::string scaleLine = std::string("Scale: ") + FormatMixedVector3Value(firstMesh.scale, sameScaleX, sameScaleY, sameScaleZ, 3);
-        DrawUiText(font, scaleLine.c_str(), panelX + 12.0f, panelY + 102.0f, 14.0f, Color{ 205, 213, 220, 255 });
+        DrawUiTextClipped(font, scaleLine.c_str(), panelX + 12.0f, panelY + 102.0f, 14.0f, panelW - 24.0f, Color{ 205, 213, 220, 255 });
 
         std::snprintf(line, sizeof(line), "Total polys: %d", totalPolys);
         DrawUiText(font, line, panelX + 12.0f, panelY + 124.0f, 14.0f, Color{ 205, 213, 220, 255 });

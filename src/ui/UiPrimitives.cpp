@@ -1,6 +1,7 @@
 #include "UiPrimitives.h"
 
 #include <string>
+#include <algorithm>
 
 namespace openfbx
 {
@@ -84,8 +85,12 @@ bool DrawPanelButton(Font font, Rectangle bounds, const char* label)
     const bool hovered = CheckCollisionPointRec(mouse, bounds);
     DrawRectangleRec(bounds, hovered ? Color{ 54, 63, 72, 255 } : Color{ 35, 40, 46, 255 });
     DrawRectangleLinesEx(bounds, 1.0f, Color{ 70, 80, 90, 255 });
-    const Vector2 size = MeasureTextEx(font, label, 14.0f, 1.0f);
-    DrawUiText(font, label, bounds.x + (bounds.width - size.x) * 0.5f, bounds.y + 4.0f, 14.0f, Color{ 205, 213, 220, 255 });
+    const float preferredSize = MeasureTextEx(font, label, 14.0f, 1.0f).x <= bounds.width - 10.0f ? 14.0f : 12.0f;
+    const float fontSize = std::min(preferredSize, std::max(0.0f, bounds.height - 8.0f));
+    const float available = std::max(0.0f, bounds.width - 10.0f);
+    const float textWidth = std::min(available, MeasureTextEx(font, label, fontSize, 1.0f).x);
+    if (fontSize > 0) DrawUiTextClipped(font, label, bounds.x + (bounds.width - textWidth) * 0.5f,
+                                    bounds.y + (bounds.height - fontSize) * 0.5f, fontSize, available, Color{ 205, 213, 220, 255 });
     return hovered && openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT);
 }
 

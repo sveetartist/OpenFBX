@@ -918,11 +918,11 @@ void RefreshUvMeshBuffers(ModelTab& tab)
     }
 }
 
-void CombineAllUvSets(ModelTab& tab, int preferred)
+void CombineAllUvSets(ModelTab& tab, int preferred, bool recordUndo)
 {
     auto& loaded = tab.loaded;
     if (loaded.uvSets.size() < 2 || preferred < 0 || preferred >= static_cast<int>(loaded.uvSets.size())) return;
-    PushUndoSnapshot(tab);
+    if (recordUndo) PushUndoSnapshot(tab);
     const size_t count = loaded.bindVertices.size() / 3;
     std::vector<float> combined(count * 2, 0.0f);
     std::vector<unsigned char> presence(count, 0);
@@ -955,7 +955,7 @@ void CombineAllUvSets(ModelTab& tab, int preferred)
     RefreshDisplayedMesh(tab);
 }
 
-bool PackValidationUvIslands(ModelTab& tab, int nodeIndex, int uvSet, bool averageDensity)
+bool PackValidationUvIslands(ModelTab& tab, int nodeIndex, int uvSet, bool averageDensity, bool recordUndo)
 {
     if (nodeIndex < 0 || nodeIndex >= static_cast<int>(tab.loaded.nodes.size()) ||
         uvSet < 0 || uvSet >= static_cast<int>(tab.loaded.uvSets.size())) return false;
@@ -1009,7 +1009,7 @@ bool PackValidationUvIslands(ModelTab& tab, int nodeIndex, int uvSet, bool avera
         if (place(middle)) low = middle; else high = middle;
     }
     if (low <= 0.0f || !place(low)) return false;
-    PushUndoSnapshot(tab);
+    if (recordUndo) PushUndoSnapshot(tab);
     for (const auto& box : boxes)
     {
         const auto& island = islands[box.island];

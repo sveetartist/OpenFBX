@@ -543,6 +543,22 @@ static void TestValidationFixes()
     Require(UndoEdit(tab) && tab.loaded.nodes[2].name == "Mesh" && tab.loaded.materialNames[1] == "Material" &&
             tab.loaded.animations[1].name == "Take", "Duplicate names undo failed");
 
+    // Warning and info findings are outside the scope of Fix All Errors.
+    const auto beforeBatch = CaptureEditSnapshot(tab);
+    const size_t historySize = tab.undoStack.size();
+    const size_t redoSize = tab.redoStack.size();
+    tab.loaded.nodes[1].scale = Vector3{2, 2, 2};
+    Require(FixAllValidationErrors(tab) == 0, "Error batch must not repair warnings");
+    Require(tab.undoStack.size() == historySize && tab.redoStack.size() == redoSize,
+            "Warning-only batch must preserve edit history");
+    Require(tab.loaded.uvSets == beforeBatch.uvSets && tab.loaded.materialNames == beforeBatch.materialNames &&
+            tab.loaded.nodes[2].name == "Mesh" && tab.loaded.nodes[1].scale.x == 2,
+            "Error batch modified warning data");
+    for (const char* category : {"Multiple UV sets", "Duplicate name", "Overlapping UVs", "Texel density", "Unapplied scale"})
+        Require(hasIssue(category), (std::string("Error batch changed warning: ") + category).c_str());
+    Require(GetValidationCache(tab).issues.size() == BuildValidationIssues(tab).size(),
+            "Error batch left stale validation cache");
+
     ModelTab bones;
     bones.loaded.nodes.resize(3);
     bones.loaded.nodes[0].name = "RootNode";
@@ -560,6 +576,113 @@ static void TestValidationFixes()
     Require(FixDuplicateNames(bones) == 1 && bones.loaded.skinnedVertices[0].influences[0].boneName == "Bone_1",
             "Duplicate bone repair changed the name-based skin target");
     Require(UndoEdit(bones) && bones.loaded.skinnedVertices[0].influences[0].boneName == "Bone", "Bone rename undo failed");
+}
+
+static void TestBadSkinWeightRepair()
+{
+    const auto folder = std::filesystem::temp_directory_path() / "openfbx-weight-repair";
+    std::filesystem::create_directories(folder);
+    const auto source = (folder / "source.fbx").string();
+    const auto fixed = (folder / "fixed.fbx").string();
+    auto* manager = FbxManager::Create();
+    manager->SetIOSettings(FbxIOSettings::Create(manager, IOSROOT));
+    auto* scene = FbxScene::Create(manager, "weights");
+    auto* meshNode = FbxNode::Create(scene, "WeightedMesh");
+    auto* mesh = FbxMesh::Create(scene, "Triangle");
+    mesh->InitControlPoints(3);
+    mesh->SetControlPointAt(FbxVector4(0, 0, 0), 0);
+    mesh->SetControlPointAt(FbxVector4(100, 0, 0), 1);
+    mesh->SetControlPointAt(FbxVector4(0, 100, 0), 2);
+    mesh->BeginPolygon();
+    for (int point = 0; point < 3; ++point) mesh->AddPolygon(point);
+    mesh->EndPolygon();
+    meshNode->SetNodeAttribute(mesh);
+    scene->GetRootNode()->AddChild(meshNode);
+    auto* skin = FbxSkin::Create(scene, "Skin");
+    for (int index = 0; index < 2; ++index)
+    {
+        auto* bone = FbxNode::Create(scene, index == 0 ? "BoneA" : "BoneB");
+        auto* skeleton = FbxSkeleton::Create(scene, bone->GetName());
+        skeleton->SetSkeletonType(FbxSkeleton::eRoot);
+        bone->SetNodeAttribute(skeleton);
+        scene->GetRootNode()->AddChild(bone);
+        auto* cluster = FbxCluster::Create(scene, bone->GetName());
+        cluster->SetLink(bone);
+        cluster->SetLinkMode(FbxCluster::eNormalize);
+        FbxAMatrix identity;
+        identity.SetIdentity();
+        cluster->SetTransformMatrix(identity);
+        cluster->SetTransformLinkMatrix(identity);
+        cluster->AddControlPointIndex(0, index == 0 ? 0.2 : 0.3);
+        if (index == 0) cluster->AddControlPointIndex(1, 2.0);
+        skin->AddCluster(cluster);
+    }
+    mesh->AddDeformer(skin);
+    auto* exporter = FbxExporter::Create(manager, "export");
+    Require(exporter->Initialize(source.c_str(), -1, manager->GetIOSettings()) && exporter->Export(scene),
+            "Could not export bad-weight fixture");
+    manager->Destroy();
+    SetConfigFlags(FLAG_WINDOW_HIDDEN);
+    InitWindow(64, 64, "Weight repair regression");
+    ModelTab tab;
+    std::string error;
+    Require(LoadFbxModel(source, tab.loaded, error), error.c_str());
+    int meshIndex = -1;
+    for (int index = 0; index < static_cast<int>(tab.loaded.nodes.size()); ++index)
+        if (tab.loaded.nodes[index].type == SceneNodeType::Mesh) meshIndex = index;
+    Require(meshIndex >= 0, "Weight fixture mesh missing");
+    auto& node = tab.loaded.nodes[meshIndex];
+    Require(node.badSkinWeightCount == 2 && node.missingSkinWeightCount == 1, "Bad-weight fixture not detected");
+    const int start = node.meshVertexStart;
+    const auto original = tab.loaded.skinnedVertices;
+    Require(FixAllValidationErrors(tab) == 2, "Fix All Errors did not normalize skin weights");
+    Require(node.badSkinWeightCount == 0 && node.missingSkinWeightCount == 1 && node.skinWeightsEdited,
+            "Repair must retain the unweighted vertex error");
+    const auto& first = tab.loaded.skinnedVertices[start].influences;
+    Require(first.size() == 2 && std::fabs(first[0].weight - 0.4f) < 0.00001f &&
+            std::fabs(first[1].weight - 0.6f) < 0.00001f, "Normalization changed relative bone influence");
+    Require(tab.loaded.skinnedVertices[start + 1].influences[0].weight == 1,
+            "Weight greater than one was not normalized");
+    const auto& validation = GetValidationCache(tab);
+    Require(std::count_if(validation.issues.begin(), validation.issues.end(), [](const auto& issue)
+            { return issue.category == "Bad weights"; }) == 1, "Repair left stale bad-weight counts");
+    Require(tab.undoStack.size() == 1, "Skin repair must create one batch undo step");
+    Require(SaveFbxModelAnimations(source, fixed, tab.loaded, tab.deletedNodes, error), error.c_str());
+    LoadedFbxModel reopened;
+    Require(LoadFbxModel(fixed, reopened, error), error.c_str());
+    for (const auto& reopenedNode : reopened.nodes)
+        if (reopenedNode.type == SceneNodeType::Mesh)
+            Require(reopenedNode.badSkinWeightCount == 0 && reopenedNode.missingSkinWeightCount == 1,
+                    "Normalized weights did not survive FBX export/reopen");
+    UnloadFbxModel(reopened);
+    Require(UndoEdit(tab) && tab.loaded.nodes[meshIndex].badSkinWeightCount == 2 &&
+            !tab.loaded.nodes[meshIndex].skinWeightsEdited &&
+            tab.loaded.skinnedVertices[start].influences[0].weight == original[start].influences[0].weight,
+            "Skin-weight undo did not restore original weights and diagnostics");
+    Require(RedoEdit(tab) && tab.loaded.nodes[meshIndex].badSkinWeightCount == 0, "Skin-weight redo failed");
+    const size_t history = tab.undoStack.size();
+    Require(FixAllValidationErrors(tab) == 0 && tab.undoStack.size() == history, "Missing weights created a false repair");
+    tab.loaded.animations.resize(1);
+    tab.loaded.animations[0].frames.resize(1);
+    tab.loaded.animations[0].frames[0].poses = tab.loaded.bonePoses;
+    Require(RebuildSkinnedAnimationMeshFrames(tab), "Weight fixture must support deferred animation");
+    const auto frozenGeometry = tab.loaded.animations[0].meshFrames[0].deferred->geometry;
+    const size_t originalInfluenceCount = frozenGeometry->topology->influences.size();
+    // Invalid influences are removed; no bone assignments are fabricated.
+    auto& corrupt = tab.loaded.skinnedVertices[start].influences;
+    corrupt[0].weight = std::numeric_limits<float>::quiet_NaN();
+    corrupt[1].weight = -1;
+    tab.loaded.nodes[meshIndex].badSkinWeightCount = 1;
+    Require(FixBadSkinWeights(tab, meshIndex) == 1 && corrupt.empty() &&
+            tab.loaded.nodes[meshIndex].missingSkinWeightCount == 2,
+            "Invalid weights were not converted to an honest missing-weight finding");
+    const auto repairedFrame = tab.loaded.animations[0].meshFrames[0];
+    Require(repairedFrame.deferred && repairedFrame.deferred->geometry != frozenGeometry &&
+            repairedFrame.deferred->geometry->topology->influences.size() == originalInfluenceCount - 2 &&
+            frozenGeometry->topology->influences.size() == originalInfluenceCount,
+            "Weight repair reused stale animation skinning or changed the frozen cache");
+    UnloadFbxModel(tab.loaded);
+    CloseWindow();
 }
 
 static void TestUvOverlapSpatialSearch()
@@ -659,7 +782,9 @@ static void TestDegenerateTriangleRepair()
     for (int i = 0; i < static_cast<int>(tab.loaded.nodes.size()); ++i)
         if (tab.loaded.nodes[static_cast<size_t>(i)].type == SceneNodeType::Mesh) meshIndex = i;
     Require(meshIndex >= 0 && tab.loaded.nodes[static_cast<size_t>(meshIndex)].degenerateTriangleCount == 9, "Fixture must include degenerate faces and valid polygons with collinear fan corners");
-    Require(FixDegenerateTriangles(tab, meshIndex) == 9, "Repair did not remove every degenerate triangle");
+    const size_t historyBeforeRepair = tab.undoStack.size();
+    Require(FixAllValidationErrors(tab) == 9, "Error batch did not remove every degenerate triangle");
+    Require(tab.undoStack.size() == historyBeforeRepair + 1, "Error batch must create one undo step");
     Require(tab.loaded.nodes[static_cast<size_t>(meshIndex)].meshTriangleCount == 6, "Repair removed valid geometry");
     Require(tab.loaded.nodes[static_cast<size_t>(meshIndex)].degenerateTriangleCount == 0, "Repair left validation errors");
     Require(tab.loaded.nodes[static_cast<size_t>(meshIndex)].meshPolygonCount == 5, "Repair reported the wrong polygon count");
@@ -676,7 +801,9 @@ static void TestDegenerateTriangleRepair()
         Require(edges == expectedEdges, "Wireframe has missing or removed polygon edges");
     };
     checkWireframe(16);
-    Require(FixDegenerateTriangles(tab, meshIndex) == 0, "Repair is not idempotent");
+    const size_t historyAfterRepair = tab.undoStack.size();
+    Require(FixAllValidationErrors(tab) == 0 && tab.undoStack.size() == historyAfterRepair,
+            "Repeated error batch must not create empty undo steps");
     Require(UndoEdit(tab) && tab.loaded.nodes[static_cast<size_t>(meshIndex)].degenerateTriangleCount == 9, "Undo did not restore bad faces");
     checkWireframe(31);
     Require(RedoEdit(tab) && tab.loaded.nodes[static_cast<size_t>(meshIndex)].degenerateTriangleCount == 0, "Redo did not restore repair");
@@ -972,6 +1099,7 @@ int main(int argc, char** argv)
         TestDegenerateTriangleRepair();
         TestUvOverlapSpatialSearch();
         TestValidationFixes();
+        TestBadSkinWeightRepair();
         TestValidationCache();
         TestVisibility();
         TestMarqueeSelection();
