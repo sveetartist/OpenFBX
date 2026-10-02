@@ -13,7 +13,7 @@ float UiMouseWheelMove();
 Font LoadTechnicalFont();
 void DrawUiText(Font font, const char* text, float x, float y, float size, Color color);
 void DrawUiTextClipped(Font font, const char* text, float x, float y, float size, float maxWidth, Color color);
-bool DrawPanelTab(Font font, Rectangle bounds, const char* label, bool selected, Color statusColor = Color{0, 0, 0, 0});
+bool DrawPanelTab(Font font, Rectangle bounds, const char* label, bool selected, Color statusColor = Color{0, 0, 0, 0}, const char* statusSymbol = nullptr);
 bool DrawPanelButton(Font font, Rectangle bounds, const char* label);
 bool DrawMenuItem(Font font, Rectangle bounds, const char* text, bool selected = false);
 }

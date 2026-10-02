@@ -37,12 +37,12 @@ void DrawHierarchyPanel(Font font,
     DrawUiText(font, "||", panelW - 16.0f, panelY + 8.0f, 16.0f,
                resizeHighlighted ? Color{ 120, 198, 255, 255 } : Color{ 120, 130, 140, 255 });
 
-    const float tabW = (panelW - 32.0f) / 5.0f;
+    const float tabW = (panelW - 44.0f) / 5.0f;
     const Rectangle hierarchyTab{ panelX + 8.0f, panelY + 34.0f, tabW, 24.0f };
     const Rectangle statsTab{ hierarchyTab.x + hierarchyTab.width + 4.0f, panelY + 34.0f, tabW, 24.0f };
     const Rectangle materialsTab{ statsTab.x + statsTab.width + 4.0f, panelY + 34.0f, tabW, 24.0f };
     const Rectangle uvTab{ materialsTab.x + materialsTab.width + 4.0f, panelY + 34.0f, tabW, 24.0f };
-    const Rectangle validatorTab{ uvTab.x + uvTab.width + 4.0f, panelY + 34.0f, tabW, 24.0f };
+    const Rectangle validatorTab{ uvTab.x + uvTab.width + 4.0f, panelY + 34.0f, tabW + 12.0f, 24.0f };
     if (!inputBlocked && DrawPanelTab(font, hierarchyTab, "Tree", panel.activeTab == LeftPanelTab::Hierarchy))
     {
         panel.activeTab = LeftPanelTab::Hierarchy;
@@ -61,14 +61,28 @@ void DrawHierarchyPanel(Font font,
     }
 
     Color validationStatusColor{};
+    const char* validationStatusSymbol = nullptr;
     if (active && active->loaded.valid)
     {
         const ValidationCache& validation = GetValidationCache(*active, deferDiagnostics);
-        if (validation.errors > 0) validationStatusColor = GetValidatorSeverityColor(ValidatorSeverity::Error);
-        else if (validation.warnings > 0) validationStatusColor = GetValidatorSeverityColor(ValidatorSeverity::Warning);
+        if (validation.errors > 0)
+        {
+            validationStatusColor = GetValidatorSeverityColor(ValidatorSeverity::Error);
+            validationStatusSymbol = "!";
+        }
+        else if (validation.warnings > 0)
+        {
+            validationStatusColor = GetValidatorSeverityColor(ValidatorSeverity::Warning);
+            validationStatusSymbol = "?";
+        }
+        else if (validation.infos > 0)
+        {
+            validationStatusColor = GetValidatorSeverityColor(ValidatorSeverity::Info);
+            validationStatusSymbol = "i";
+        }
     }
-    if (!inputBlocked && DrawPanelTab(font, validatorTab, validationStatusColor.a > 0 ? "!Valid" : "Valid",
-                                     panel.activeTab == LeftPanelTab::Validator, validationStatusColor))
+    if (!inputBlocked && DrawPanelTab(font, validatorTab, "Valid", panel.activeTab == LeftPanelTab::Validator,
+                                     validationStatusColor, validationStatusSymbol))
     {
         panel.activeTab = LeftPanelTab::Validator;
     }

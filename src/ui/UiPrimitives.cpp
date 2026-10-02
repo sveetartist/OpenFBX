@@ -69,17 +69,33 @@ void DrawUiTextClipped(Font font, const char* text, float x, float y, float size
     }
 }
 
-bool DrawPanelTab(Font font, Rectangle bounds, const char* label, bool selected, Color statusColor)
+bool DrawPanelTab(Font font, Rectangle bounds, const char* label, bool selected, Color statusColor, const char* statusSymbol)
 {
     const Vector2 mouse = GetMousePosition();
     const bool hovered = CheckCollisionPointRec(mouse, bounds);
     DrawRectangleRec(bounds, selected ? Color{ 48, 70, 92, 255 } : hovered ? Color{ 34, 39, 45, 255 } : Color{ 24, 27, 31, 245 });
-    if (statusColor.a > 0) DrawRectangleLinesEx(bounds, 1.0f, statusColor);
-    float fontSize = MeasureTextEx(font, label, 14.0f, 1.0f).x > bounds.width - 10.0f ? 12.0f : 14.0f;
-    if (statusColor.a > 0)
-        while (fontSize > 10.0f && MeasureTextEx(font, label, fontSize, 1.0f).x > bounds.width - 10.0f) fontSize -= 1.0f;
-    const Color textColor = statusColor.a > 0 ? statusColor : selected ? RAYWHITE : Color{ 180, 190, 200, 255 };
-    DrawUiTextClipped(font, label, bounds.x + 5.0f, bounds.y + 5.0f, fontSize, bounds.width - 10.0f, textColor);
+    const bool hasStatus = statusColor.a > 0 && statusSymbol && statusSymbol[0];
+    const float badgeSize = std::min(16.0f, bounds.height - 6.0f);
+    const bool showLabel = !hasStatus || bounds.width >= 52.0f;
+    const float labelX = bounds.x + (hasStatus ? 3.0f : 5.0f);
+    const float labelWidth = hasStatus ? bounds.width - badgeSize - 9.0f : bounds.width - 10.0f;
+    float fontSize = MeasureTextEx(font, label, 14.0f, 1.0f).x > labelWidth ? 12.0f : 14.0f;
+    if (hasStatus)
+        while (fontSize > 10.0f && MeasureTextEx(font, label, fontSize, 1.0f).x > labelWidth) fontSize -= 1.0f;
+    if (showLabel)
+        DrawUiTextClipped(font, label, labelX, bounds.y + (bounds.height - fontSize) * 0.5f, fontSize, labelWidth,
+                          selected ? RAYWHITE : Color{ 180, 190, 200, 255 });
+    if (hasStatus)
+    {
+        const Rectangle badge{showLabel ? bounds.x + bounds.width - badgeSize - 3.0f : bounds.x + (bounds.width - badgeSize) * 0.5f,
+                              bounds.y + (bounds.height - badgeSize) * 0.5f, badgeSize, badgeSize};
+        DrawRectangleRec(badge, Color{statusColor.r, statusColor.g, statusColor.b, 40});
+        DrawRectangleLinesEx(badge, 1.0f, statusColor);
+        const float symbolSize = badgeSize - 2.0f;
+        const Vector2 textSize = MeasureTextEx(font, statusSymbol, symbolSize, 1.0f);
+        DrawUiText(font, statusSymbol, badge.x + (badge.width - textSize.x) * 0.5f,
+                   badge.y + (badge.height - textSize.y) * 0.5f, symbolSize, statusColor);
+    }
     return hovered && openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT);
 }
 
