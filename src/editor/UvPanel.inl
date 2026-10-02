@@ -894,7 +894,7 @@ void ValidateTexelDensityConsistency(const ModelTab& tab, std::vector<ValidatorI
                       uvSetName.c_str(),
                       minMax.first->second,
                       minMax.second->second);
-        AddValidationIssue(issues, ValidatorSeverity::Warning, "Texel density", message, minMax.second->first);
+        AddValidationIssue(issues, ValidatorSeverity::Warning, "Non-uniform texel density", message, minMax.second->first);
         issues.back().uvSet = uvSetIndex;
     }
 }

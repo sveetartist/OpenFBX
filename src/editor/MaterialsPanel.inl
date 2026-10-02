@@ -653,7 +653,7 @@ void DrawValidatorPanel(Font font, ModelTab& tab, HierarchyPanelState& panel, fl
                 if (hovered &&
                     (issue.category == "Degenerate triangles" || issue.category == "Unapplied scale" ||
                      issue.category == "Multiple UV sets" || issue.category == "Overlapping UVs" ||
-                     issue.category == "Texel density" || issue.category == "Duplicate name" || issue.category == "Bad weights") &&
+                     issue.category == "Non-uniform texel density" || issue.category == "Duplicate name" || issue.category == "Bad weights") &&
                     openfbx::UiMouseButtonPressed(MOUSE_BUTTON_RIGHT))
                 {
                     tab.validationFixNode = issue.node >= 0 ? issue.node : -2;
@@ -741,9 +741,9 @@ void DrawValidatorPanel(Font font, ModelTab& tab, HierarchyPanelState& panel, fl
                 tab.validationFixNode = -1;
             }
         }
-        else if (tab.validationFixCategory == "Overlapping UVs" || tab.validationFixCategory == "Texel density")
+        else if (tab.validationFixCategory == "Overlapping UVs" || tab.validationFixCategory == "Non-uniform texel density")
         {
-            const bool average = tab.validationFixCategory == "Texel density";
+            const bool average = tab.validationFixCategory == "Non-uniform texel density";
             if (DrawPanelButton(font, menu, average ? "Average Islands and Pack" : "Pack UV Islands"))
             {
                 if (PackValidationUvIslands(tab, tab.validationFixNode, tab.validationFixUvSet, average))

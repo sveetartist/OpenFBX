@@ -598,7 +598,7 @@ static void TestValidationFixes()
     };
     Require(hasIssue("Multiple UV sets"), "Missing multiple UV sets warning");
     Require(hasIssue("Overlapping UVs"), "Stacked disconnected islands were not detected");
-    Require(hasIssue("Texel density"), "Unequal island density was not detected");
+    Require(hasIssue("Non-uniform texel density"), "Unequal island density was not detected");
     Require(!hasIssue("Low texel density"), "Density at the environment baseline must not warn");
     tab.uvDensityTileSize = 512;
     Require(hasIssue("Low texel density"), "Missing low density warning below environment baseline");
@@ -623,7 +623,7 @@ static void TestValidationFixes()
     islands = CalculateUvIslandStats(triangles, 1, 1);
     Require(!UvIslandsOverlap(islands[0], islands[1], triangles), "Averaged islands overlap");
     Require(std::fabs(islands[0].density / islands[1].density - 1.0f) < 0.001f, "Island density was not equalized");
-    Require(!hasIssue("Texel density"), "Density warning persisted after fix");
+    Require(!hasIssue("Non-uniform texel density"), "Density warning persisted after fix");
     for (float uv : tab.loaded.uvSets[0]) Require(uv > 0.0f && uv < 1.0f, "Packed UV outside tile or padding");
     Require(UndoEdit(tab), "Average islands undo failed");
     CombineAllUvSets(tab, 1);
@@ -656,7 +656,7 @@ static void TestValidationFixes()
     Require(tab.loaded.uvSets == beforeBatch.uvSets && tab.loaded.materialNames == beforeBatch.materialNames &&
             tab.loaded.nodes[2].name == "Mesh" && tab.loaded.nodes[1].scale.x == 2,
             "Error batch modified warning data");
-    for (const char* category : {"Multiple UV sets", "Duplicate name", "Overlapping UVs", "Texel density", "Unapplied scale"})
+    for (const char* category : {"Multiple UV sets", "Duplicate name", "Overlapping UVs", "Non-uniform texel density", "Unapplied scale"})
         Require(hasIssue(category), (std::string("Error batch changed warning: ") + category).c_str());
     Require(GetValidationCache(tab).issues.size() == BuildValidationIssues(tab).size(),
             "Error batch left stale validation cache");
