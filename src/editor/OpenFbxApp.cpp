@@ -7,6 +7,7 @@
 #include "TransformSkinningOps.inl"
 #include "ViewportPicking.inl"
 #include "TransformGizmoUi.inl"
+#include "SelectionMaskUi.inl"
 #include "AppUiUtilities.inl"
 #include "HierarchyAndValidation.inl"
 #include "MaterialsPanel.inl"

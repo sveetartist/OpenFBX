@@ -165,7 +165,14 @@ float ClosestAlphaOnScreenSegment(Vector2 point, Vector2 a, Vector2 b)
     return ClampFloat(Vector2DotProduct(Vector2Subtract(point, a), ab) / lengthSq, 0.0f, 1.0f);
 }
 
-int PickNodeFromViewport(const ModelTab& tab, Vector2 mouse, const VisibilityState& visibility)
+bool IsNodeAllowedBySelectionMask(const SceneNode& node, const SelectionMask& mask)
+{
+    if (node.type == SceneNodeType::Mesh) return mask.geometry;
+    if (node.type == SceneNodeType::Bone) return mask.bones;
+    return mask.empties;
+}
+
+int PickNodeFromViewport(const ModelTab& tab, Vector2 mouse, const VisibilityState& visibility, const SelectionMask& mask = {})
 {
     if (!tab.loaded.valid || tab.loaded.nodes.empty()) return -1;
 
@@ -177,7 +184,7 @@ int PickNodeFromViewport(const ModelTab& tab, Vector2 mouse, const VisibilitySta
     float bestBoneDepth = std::numeric_limits<float>::max();
     constexpr float bonePickRadiusPixels = 18.0f;
 
-    if (visibility.bones)
+    if (visibility.bones && mask.bones)
     {
         for (const BoneSegment& bone : GetVisibleBones(tab))
         {
@@ -202,8 +209,10 @@ int PickNodeFromViewport(const ModelTab& tab, Vector2 mouse, const VisibilitySta
                     const float segmentAlpha = ClosestAlphaOnScreenSegment(mouse, startScreen, endScreen);
                     const bool nearEndJoint = endDistance <= bonePickRadiusPixels && endDistance <= startDistance;
                     const bool nearStartJoint = startDistance <= bonePickRadiusPixels && startDistance < endDistance;
-                    const bool canPickStart = IsValidSelectableNode(tab, bone.startNode);
-                    const bool canPickEnd = IsValidSelectableNode(tab, bone.endNode);
+                    const bool canPickStart = IsValidSelectableNode(tab, bone.startNode) &&
+                        IsViewportNodeVisible(tab, bone.startNode) && IsNodeAllowedBySelectionMask(tab.loaded.nodes[bone.startNode], mask);
+                    const bool canPickEnd = IsValidSelectableNode(tab, bone.endNode) &&
+                        IsViewportNodeVisible(tab, bone.endNode) && IsNodeAllowedBySelectionMask(tab.loaded.nodes[bone.endNode], mask);
                     if (!canPickStart && !canPickEnd) continue;
 
                     bestBoneScreenDistance = pickDistance;
@@ -231,6 +240,7 @@ int PickNodeFromViewport(const ModelTab& tab, Vector2 mouse, const VisibilitySta
         const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(i)];
         if (!IsValidSelectableNode(tab, i)) continue;
         if (!IsViewportNodeVisible(tab, i)) continue;
+        if (!IsNodeAllowedBySelectionMask(node, mask)) continue;
 
         if (node.type == SceneNodeType::Mesh)
         {
@@ -338,12 +348,13 @@ bool IntersectsMarquee(const Vector3* points, int count, const Camera3D& camera,
 }
 
 void SelectNodesInMarquee(ModelTab& tab, Rectangle rectangle, const VisibilityState& visibility,
-                          bool additive, int screenWidth, int screenHeight, bool subtractive = false)
+                          bool additive, int screenWidth, int screenHeight, bool subtractive = false, const SelectionMask& mask = {})
 {
     if (!additive && !subtractive) ClearNodeSelection(tab);
     const auto applyNode = [&](int nodeIndex)
     {
         if (!IsValidSelectableNode(tab, nodeIndex) || !IsViewportNodeVisible(tab, nodeIndex)) return;
+        if (!IsNodeAllowedBySelectionMask(tab.loaded.nodes[nodeIndex], mask)) return;
         if (subtractive)
         {
             tab.selectedNodes.erase(std::remove(tab.selectedNodes.begin(), tab.selectedNodes.end(), nodeIndex), tab.selectedNodes.end());
@@ -364,6 +375,7 @@ void SelectNodesInMarquee(ModelTab& tab, Rectangle rectangle, const VisibilitySt
     {
         if (!IsValidSelectableNode(tab, index) || !IsViewportNodeVisible(tab, index)) continue;
         const auto& node = tab.loaded.nodes[static_cast<size_t>(index)];
+        if (!IsNodeAllowedBySelectionMask(node, mask)) continue;
         if (node.type == SceneNodeType::Mesh && visibility.geometry && vertices && node.meshVertexStart >= 0)
         {
             const int end = std::min(vertexCount, node.meshVertexStart + node.meshVertexCount);
@@ -382,7 +394,7 @@ void SelectNodesInMarquee(ModelTab& tab, Rectangle rectangle, const VisibilitySt
         else if (node.type == SceneNodeType::Empty && visibility.empties && intersects(&node.position, 1))
             applyNode(index);
     }
-    if (visibility.bones)
+    if (visibility.bones && mask.bones)
     {
         for (const auto& pose : GetVisibleBonePoses(tab))
             if (intersects(&pose.position, 1)) applyNode(pose.node);
@@ -394,9 +406,9 @@ void SelectNodesInMarquee(ModelTab& tab, Rectangle rectangle, const VisibilitySt
     }
 }
 
-bool SelectNodeFromViewport(ModelTab& tab, Vector2 mouse, const VisibilityState& visibility, bool additive = false)
+bool SelectNodeFromViewport(ModelTab& tab, Vector2 mouse, const VisibilityState& visibility, bool additive = false, const SelectionMask& mask = {})
 {
-    const int pickedNode = PickNodeFromViewport(tab, mouse, visibility);
+    const int pickedNode = PickNodeFromViewport(tab, mouse, visibility, mask);
     if (pickedNode < 0) return false;
 
     SelectNode(tab, pickedNode, additive);

@@ -508,6 +508,13 @@ struct VisibilityState
     bool skinWeights = false;
 };
 
+struct SelectionMask
+{
+    bool geometry = true;
+    bool bones = true;
+    bool empties = true;
+};
+
 struct LitShader
 {
     Shader shader{};

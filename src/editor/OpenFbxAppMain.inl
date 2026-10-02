@@ -26,6 +26,8 @@ int RunOpenFbxApp(int argc, char** argv)
     bool menuPointerCaptured = false;
     HierarchyPanelState hierarchyPanel;
     VisibilityState visibility;
+    SelectionMask selectionMask;
+    bool selectionMaskOpen = false;
     std::string error;
     std::string notice;
     LogPanelState logPanel;
@@ -272,7 +274,7 @@ int RunOpenFbxApp(int argc, char** argv)
         }
         const bool validationMenuOpen = activeTab >= 0 && activeTab < static_cast<int>(tabs.size()) &&
             tabs[static_cast<size_t>(activeTab)]->validationFixNode != -1;
-        const bool menuBlocksPointer = openMenu != OpenMenu::None || menuPointerCaptured || validationMenuOpen || gHotkeyEditorOpen;
+        const bool menuBlocksPointer = openMenu != OpenMenu::None || menuPointerCaptured || validationMenuOpen || gHotkeyEditorOpen || selectionMaskOpen;
         openfbx::SetUiPointerBlocked(menuBlocksPointer);
 
         const bool controlDown = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
@@ -333,6 +335,14 @@ int RunOpenFbxApp(int argc, char** argv)
         UpdateHierarchyPanelInteraction(hierarchyPanel, active,
                                         menuBlocksPointer || modalOpen || hierarchyPanel.contextMenuOpen || logPanel.dragging);
         const float hierarchyBlockW = GetHierarchyPanelBlockWidth(hierarchyPanel);
+        const bool selectionMaskConsumedMouse = UpdateSelectionMaskInput(selectionMask, selectionMaskOpen, hierarchyBlockW,
+            openMenu != OpenMenu::None || modalOpen || renameEditor.active || transformValueEditor.active ||
+            transformGizmo.dragging || marquee.tab != nullptr || hierarchyPanel.contextMenuOpen ||
+            textureClipboard.menuOpen || validationMenuOpen || hierarchyPanel.resizing ||
+            hierarchyPanel.scrollDragging || logPanel.dragging);
+        if (selectionMaskConsumedMouse && pointerGestureActive) menuPointerCaptured = true;
+        const bool selectionMaskBlocksPointer = selectionMaskConsumedMouse || selectionMaskOpen;
+        openfbx::SetUiPointerBlocked(menuBlocksPointer || selectionMaskBlocksPointer);
         const float hierarchyContextMenuH = active && hierarchyPanel.contextMenuOpen
             ? GetNodeContextMenuHeight(*active, hierarchyPanel.contextNodeIndex, hierarchyPanel.contextNodeIndices)
             : kNodeContextMenuBaseH;
@@ -342,6 +352,7 @@ int RunOpenFbxApp(int argc, char** argv)
                                      mouse.y >= 61.0f &&
                                      mouse.y < static_cast<float>(GetScreenHeight()) - gBottomPanelReservedHeight &&
                                      !menuBlocksPointer &&
+                                     !selectionMaskBlocksPointer &&
                                      !modalOpen &&
                                      !hierarchyPanel.resizing &&
                                      !hierarchyPanel.scrollDragging &&
@@ -386,7 +397,7 @@ int RunOpenFbxApp(int argc, char** argv)
             quitRequested = true;
             continue;
         }
-        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && IsKeyPressed(KEY_ESCAPE))
+        if (!modalOpen && !renameEditor.active && !transformValueEditor.active && !selectionMaskConsumedMouse && IsKeyPressed(KEY_ESCAPE))
         {
             openMenu = OpenMenu::None;
             if (marquee.tab) marquee = MarqueeSelectionState{};
@@ -464,7 +475,7 @@ int RunOpenFbxApp(int argc, char** argv)
         {
             if (transformTool == TransformTool::Select)
                 marquee = MarqueeSelectionState{ active, mouse, mouse, false, shiftDown, controlDown };
-            else if (SelectNodeFromViewport(*active, mouse, visibility, shiftDown))
+            else if (SelectNodeFromViewport(*active, mouse, visibility, shiftDown, selectionMask))
                 RevealNodeInHierarchy(*active, hierarchyPanel, active->selectedNode);
             else if (!shiftDown) ClearNodeSelection(*active);
         }
@@ -480,8 +491,8 @@ int RunOpenFbxApp(int argc, char** argv)
             {
                 if (marquee.dragging)
                     SelectNodesInMarquee(*active, GetMarqueeRectangle(marquee.start, marquee.end), visibility,
-                                         marquee.additive || shiftDown, GetScreenWidth(), GetScreenHeight(), marquee.subtractive || controlDown);
-                else if (!SelectNodeFromViewport(*active, marquee.start, visibility, marquee.additive || shiftDown) &&
+                                         marquee.additive || shiftDown, GetScreenWidth(), GetScreenHeight(), marquee.subtractive || controlDown, selectionMask);
+                else if (!SelectNodeFromViewport(*active, marquee.start, visibility, marquee.additive || shiftDown, selectionMask) &&
                          !(marquee.additive || shiftDown))
                     ClearNodeSelection(*active);
                 if (active->selectedNode >= 0) RevealNodeInHierarchy(*active, hierarchyPanel, active->selectedNode);
@@ -515,7 +526,7 @@ int RunOpenFbxApp(int argc, char** argv)
             }
             else
             {
-                const int contextNode = PickNodeFromViewport(*active, mouse, visibility);
+                const int contextNode = PickNodeFromViewport(*active, mouse, visibility, selectionMask);
                 if (contextNode >= 0)
                 {
                     if (IsNodeSelected(*active, contextNode))
@@ -758,10 +769,11 @@ int RunOpenFbxApp(int argc, char** argv)
         DrawTransformToolbar(uiFont, transformTool, gizmoOrientation, editPivotMode, hierarchyBlockW);
         DrawOrientationGizmo(uiFont, active ? active->orbit.camera : emptyOrbit.camera);
         DrawViewportFps(uiFont);
+        DrawSelectionMask(uiFont, selectionMask, selectionMaskOpen, hierarchyBlockW);
 
         CollectLogMessages(logPanel, notice, error);
         DrawLogPanel(uiFont, logPanel,
-                     menuBlocksPointer || modalOpen || hierarchyPanel.contextMenuOpen);
+                     menuBlocksPointer || selectionMaskBlocksPointer || modalOpen || hierarchyPanel.contextMenuOpen);
 
         DrawTabs(uiFont, tabs, activeTab);
         active = activeTab >= 0 && activeTab < static_cast<int>(tabs.size()) ? tabs[static_cast<size_t>(activeTab)].get() : nullptr;
@@ -807,7 +819,7 @@ int RunOpenFbxApp(int argc, char** argv)
                         active && !active->redoStack.empty(),
                         active);
         }
-        openfbx::SetUiPointerBlocked(menuBlocksPointer);
+        openfbx::SetUiPointerBlocked(menuBlocksPointer || selectionMaskBlocksPointer);
         undoRequested = undoRequested || menuUndoRequested;
         redoRequested = redoRequested || menuRedoRequested;
         reloadFbxRequested = reloadFbxRequested || menuReloadTabRequested;

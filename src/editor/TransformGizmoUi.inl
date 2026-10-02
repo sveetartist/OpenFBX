@@ -493,17 +493,17 @@ void DrawTransformGizmo(const ModelTab& tab, TransformTool tool, const Transform
 
 Rectangle GetTransformToolbarButtonRect(float hierarchyBlockW, int index)
 {
-    return Rectangle{ hierarchyBlockW + 10.0f, 104.0f + static_cast<float>(index) * 38.0f, 112.0f, 32.0f };
+    return Rectangle{ hierarchyBlockW + 10.0f, 142.0f + static_cast<float>(index) * 38.0f, 112.0f, 32.0f };
 }
 
 Rectangle GetGizmoOrientationButtonRect(float hierarchyBlockW, int index)
 {
-    return Rectangle{ hierarchyBlockW + 10.0f + static_cast<float>(index) * 57.0f, 266.0f, 55.0f, 28.0f };
+    return Rectangle{ hierarchyBlockW + 10.0f + static_cast<float>(index) * 57.0f, 304.0f, 55.0f, 28.0f };
 }
 
 Rectangle GetPivotModeButtonRect(float hierarchyBlockW)
 {
-    return Rectangle{ hierarchyBlockW + 10.0f, 300.0f, 112.0f, 28.0f };
+    return Rectangle{ hierarchyBlockW + 10.0f, 338.0f, 112.0f, 28.0f };
 }
 
 bool UpdateTransformToolbarInput(TransformTool& tool, GizmoOrientation& orientation, bool& editPivotMode, float hierarchyBlockW)
@@ -568,7 +568,7 @@ void DrawTransformToolbar(Font font, TransformTool tool, GizmoOrientation orient
         DrawUiTextClipped(font, GetTransformToolHotkey(tools[i]).c_str(), bounds.x + 8.0f, bounds.y + 17.0f, 11.0f, bounds.width - 16.0f, Color{ 154, 166, 178, 255 });
     }
 
-    DrawUiText(font, "Space", hierarchyBlockW + 12.0f, 280.0f, 13.0f, Color{ 154, 166, 178, 255 });
+    DrawUiText(font, "Space", hierarchyBlockW + 12.0f, 318.0f, 13.0f, Color{ 154, 166, 178, 255 });
     const GizmoOrientation orientations[] = { GizmoOrientation::Global, GizmoOrientation::Local };
     for (int i = 0; i < 2; ++i)
     {

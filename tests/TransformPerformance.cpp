@@ -178,6 +178,62 @@ static void TestMarqueeSelection()
     tab.currentVertices.clear();
     SelectNodesInMarquee(tab, center, visibility, false, 800, 600);
     Require(tab.selectedNodes == std::vector<int>{1}, "Orthographic marquee failed");
+
+    visibility = VisibilityState{};
+    const Rectangle all{0, 0, 800, 600};
+    SelectNodesInMarquee(tab, all, visibility, false, 800, 600, false, SelectionMask{true, false, false});
+    Require(tab.selectedNodes == std::vector<int>{1}, "Geometry mask must exclude visible bones and empties");
+    SelectNodesInMarquee(tab, all, visibility, false, 800, 600, false, SelectionMask{false, true, false});
+    Require(tab.selectedNodes == std::vector<int>{3}, "Bone mask must exclude visible geometry and empties");
+    SelectNodesInMarquee(tab, all, visibility, false, 800, 600, false, SelectionMask{false, false, true});
+    Require(tab.selectedNodes == std::vector<int>{2}, "Empty mask must exclude visible geometry and bones");
+    SelectNodesInMarquee(tab, all, visibility, true, 800, 600, false, SelectionMask{false, false, false});
+    Require(tab.selectedNodes == std::vector<int>{2}, "Disabled mask must preserve existing additive selection");
+    SelectNodesInMarquee(tab, all, visibility, false, 800, 600, true, SelectionMask{true, true, false});
+    Require(tab.selectedNodes == std::vector<int>{2}, "Subtraction must preserve nodes excluded by the mask");
+    SelectNodesInMarquee(tab, all, visibility, false, 800, 600, false, SelectionMask{false, false, false});
+    Require(tab.selectedNodes.empty(), "Disabled mask must reject all replacement selection");
+    Require(visibility.geometry && visibility.bones && visibility.empties, "Selection mask must not change visibility");
+}
+
+static void TestSelectionMaskPicking()
+{
+    SetConfigFlags(FLAG_WINDOW_HIDDEN);
+    InitWindow(800, 600, "Selection mask regression");
+    ModelTab tab;
+    tab.loaded.valid = true;
+    tab.loaded.hasMesh = true;
+    tab.orbit.camera = Camera3D{Vector3{0, 0, 10}, Vector3{}, Vector3{0, 1, 0}, 90, CAMERA_PERSPECTIVE};
+    tab.loaded.nodes.resize(4);
+    for (int index = 1; index < 4; ++index) tab.loaded.nodes[index].parent = 0;
+    tab.loaded.nodes[1].type = SceneNodeType::Mesh;
+    tab.loaded.nodes[1].meshVertexStart = 0;
+    tab.loaded.nodes[1].meshVertexCount = 3;
+    tab.loaded.bindVertices = {-2,-2,0, 2,-2,0, 0,2,0};
+    tab.loaded.nodes[2].type = SceneNodeType::Empty;
+    tab.loaded.nodes[2].position = Vector3{0, 0, 1};
+    tab.loaded.nodes[3].type = SceneNodeType::Bone;
+    tab.loaded.nodes[3].position = Vector3{0, 0, 2};
+    tab.loaded.bones.push_back(BoneSegment{Vector3{0, 1, 2}, Vector3{0, 0, 2}, 3, 3});
+    const VisibilityState visibility;
+    const Vector2 mouse{400, 300};
+    Require(PickNodeFromViewport(tab, mouse, visibility) == 3, "Default selection must still prioritize bone handles");
+    Require(PickNodeFromViewport(tab, mouse, visibility, SelectionMask{true, false, true}) == 2,
+        "Disabled bones must allow selection of an overlapping empty");
+    Require(PickNodeFromViewport(tab, mouse, visibility, SelectionMask{true, false, false}) == 1,
+        "Disabled handles must allow selection of underlying geometry");
+    Require(PickNodeFromViewport(tab, mouse, visibility, SelectionMask{false, true, false}) == 3,
+        "Bone-only selection must hit bone segments");
+    Require(PickNodeFromViewport(tab, mouse, visibility, SelectionMask{false, false, false}) == -1,
+        "Disabled mask must reject all click selection");
+    SetSingleSelectedNode(tab, 2);
+    Require(!SelectNodeFromViewport(tab, mouse, visibility, true, SelectionMask{false, false, false}) && tab.selectedNode == 2,
+        "Blocked additive click must preserve current selection");
+    // A segment can connect a bone to an empty parent; that endpoint must honor its actual type.
+    tab.loaded.bones[0] = BoneSegment{Vector3{0, 0, 1}, Vector3{0, 1, 2}, 2, 3};
+    const int endpoint = PickNodeFromViewport(tab, mouse, visibility, SelectionMask{false, true, false});
+    Require(endpoint == -1 || endpoint == 3, "Bone picking must not bypass the empty selection mask at a parent joint");
+    CloseWindow();
 }
 
 static void TestTangents()
@@ -1446,6 +1502,7 @@ int main(int argc, char** argv)
         TestValidationCache();
         TestVisibility();
         TestMarqueeSelection();
+        TestSelectionMaskPicking();
         TestTangents();
         TestMergeSelectedGeometryPreservesSkinning();
         ModelTab tab;
