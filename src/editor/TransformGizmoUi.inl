@@ -428,7 +428,7 @@ void DrawMoveGizmoArrow(const ModelTab& tab, Vector3 start, Vector3 end, Vector3
     DrawGizmoStroke(tab, end, Vector3Subtract(base, Vector3Scale(upWing, headWidth)), color);
 }
 
-void DrawTransformGizmo(const ModelTab& tab, TransformTool tool, const TransformGizmoState& state, GizmoOrientation orientation, bool editPivotMode)
+void DrawTransformGizmo(const ModelTab& tab, TransformTool tool, const TransformGizmoState& state, GizmoOrientation orientation, bool editPivotMode, bool skinWeightView = false)
 {
     const bool pivotDragInProgress = state.dragging && state.pivotMode;
     const TransformTool requestedTool = editPivotMode && tool != TransformTool::Move && tool != TransformTool::Rotate ? TransformTool::Select : tool;
@@ -460,7 +460,7 @@ void DrawTransformGizmo(const ModelTab& tab, TransformTool tool, const Transform
     {
         if (axis == TransformAxis::View && (activeTool != TransformTool::Rotate || !gShowViewRotationRing)) continue;
         const bool active = state.dragging && state.axis == axis;
-        const Color color = GetTransformAxisColor(axis, active);
+        const Color color = GetTransformAxisColor(axis, active, skinWeightView);
         const Vector3 axisVector = GetTransformAxisVector(tab, axis, orientation);
         if (activeTool == TransformTool::Rotate)
         {

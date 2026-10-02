@@ -655,7 +655,7 @@ int RunOpenFbxApp(int argc, char** argv)
                 }
             }
             DrawSelectedNodeOverlay(*active, visibility, transformTool);
-            DrawTransformGizmo(*active, transformTool, transformGizmo, gizmoOrientation, editPivotMode);
+            DrawTransformGizmo(*active, transformTool, transformGizmo, gizmoOrientation, editPivotMode, visibility.skinWeights);
             rlDrawRenderBatchActive();
             rlEnableDepthTest();
         }

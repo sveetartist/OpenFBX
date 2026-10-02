@@ -89,7 +89,7 @@ bool GetTransformPlaneBasis(const ModelTab& tab,
     return false;
 }
 
-Color GetTransformAxisColor(TransformAxis axis, bool active = false)
+Color GetTransformAxisColor(TransformAxis axis, bool active = false, bool skinWeightView = false)
 {
     const unsigned char alpha = active ? 255 : 220;
     auto activeColor = [active, alpha](Color color)
@@ -105,7 +105,9 @@ Color GetTransformAxisColor(TransformAxis axis, bool active = false)
     };
     switch (axis)
     {
-    case TransformAxis::X: return activeColor(Color{ 235, 74, 74, 255 });
+    case TransformAxis::X:
+        if (skinWeightView) return active ? Color{ 160, 32, 32, 255 } : Color{ 128, 24, 24, 255 };
+        return activeColor(Color{ 235, 74, 74, 255 });
     case TransformAxis::Y: return activeColor(Color{ 92, 210, 94, 255 });
     case TransformAxis::Z: return activeColor(Color{ 86, 142, 255, 255 });
     case TransformAxis::View: return active ? Color{ 255, 235, 128, 255 } : Color{ 225, 232, 238, 220 };
