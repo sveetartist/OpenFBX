@@ -1182,6 +1182,8 @@ std::string FindAutoTexturePath(const std::string& modelPath, const std::filesys
 // Scan once on open; fill only confidently identified, unoccupied slots.
 int AutoLoadModelTextures(ModelTab& tab)
 {
+    // Packaged models use their authored maps, without adding nearby disk textures.
+    if (tab.loaded.sourceHasEmbeddedMedia) return 0;
     EnsurePbrMaterialStates(tab);
     auto directory = std::filesystem::path(tab.path).parent_path();
     if (directory.empty()) directory = ".";

@@ -153,6 +153,73 @@ int main()
         Check(ScoreTextureCandidate("surface_specgloss", "", "", PbrTextureSlot::Specular) >= 10 &&
               ScoreTextureCandidate("surface_specgloss", "", "", PbrTextureSlot::Glossiness) >= 10,
               "Folder discovery must recognize combined maps");
+
+        // A package owns its textures even while conflicting source files exist.
+        const auto packageFolder = folder / "packaged";
+        std::filesystem::create_directories(packageFolder);
+        ModelTab packageSource;
+        packageSource.path = (packageFolder / "asset.fbx").string();
+        CreateFixture(packageSource.path);
+        Check(LoadFbxModel(packageSource.path, packageSource.loaded, error), error);
+        const auto packageDiffuse = packageFolder / "surface_diffuse.png";
+        auto writePackageTexture = [&](const std::filesystem::path& path, Color color)
+        {
+            Image fixture = GenImageColor(4, 4, color);
+            Check(ExportImage(fixture, path.string().c_str()), "Package texture export failed");
+            UnloadImage(fixture);
+        };
+        writePackageTexture(packageDiffuse, WHITE);
+        Check(LoadPbrTexture(packageSource, 0, PbrTextureSlot::Diffuse, packageDiffuse.string(), error), error);
+        std::filesystem::create_directories(packageFolder / "other");
+        const auto packageEmissive = packageFolder / "other/surface_diffuse.png";
+        writePackageTexture(packageEmissive, RED);
+        Check(LoadPbrTexture(packageSource, 0, PbrTextureSlot::Emissive, packageEmissive.string(), error), error);
+        const auto packagedPath = MakePackagedFbxPath(packageSource.path);
+        std::string packageNotice;
+        Check(PackageFbxWithTextures(packageSource, packageNotice, error), error);
+        UnloadPbrTextures(packageSource);
+        UnloadFbxModel(packageSource.loaded);
+        writePackageTexture(packageDiffuse, BLACK);
+        writePackageTexture(packageEmissive, BLACK);
+        writePackageTexture(packageFolder / "surface_normal.png", WHITE);
+        const auto resavedPackage = packageFolder / "resaved.fbx";
+        auto checkPackage = [&](const std::filesystem::path& path, bool saveCopy = false)
+        {
+            ModelTab packaged;
+            packaged.path = path.string();
+            Check(LoadFbxModel(packaged.path, packaged.loaded, error), error);
+            Check(packaged.loaded.sourceHasEmbeddedMedia, "Package must report embedded media");
+            Check(LoadImportedPbrTextures(packaged, error) == 2, "Package textures missing: " + error);
+            const auto& diffuse = GetPbrTexture(packaged.pbrMaterials[0], PbrTextureSlot::Diffuse);
+            Check(AbsoluteNormalizedPath(diffuse.path).parent_path() ==
+                  AbsoluteNormalizedPath(packaged.loaded.embeddedMediaExtractionDirectory),
+                  "Package must use its extracted texture instead of the source file: " + diffuse.path +
+                  " (extraction: " + packaged.loaded.embeddedMediaExtractionDirectory + ")");
+            Image image = LoadImageFromTexture(diffuse.texture);
+            const Color pixel = GetImageColor(image, 0, 0);
+            UnloadImage(image);
+            Check(pixel.r == 255 && pixel.g == 255 && pixel.b == 255,
+                  "Changed directory texture replaced packaged pixels");
+            const auto& emissive = GetPbrTexture(packaged.pbrMaterials[0], PbrTextureSlot::Emissive);
+            image = LoadImageFromTexture(emissive.texture);
+            const Color emissivePixel = GetImageColor(image, 0, 0);
+            UnloadImage(image);
+            Check(emissive.path != diffuse.path && emissivePixel.r == RED.r && emissivePixel.g == RED.g,
+                  "Same-name embedded textures must remain distinct");
+            Check(AutoLoadModelTextures(packaged) == 0, "Package must skip automatic directory discovery");
+            Check(!GetPbrTexture(packaged.pbrMaterials[0], PbrTextureSlot::Normal).loaded,
+                  "Unassigned package maps must stay empty despite nearby textures");
+            if (saveCopy)
+                Check(SaveFbxModelAnimations(packaged.path, resavedPackage.string(), packaged.loaded,
+                                            packaged.deletedNodes, error), error);
+            UnloadPbrTextures(packaged);
+            UnloadFbxModel(packaged.loaded);
+        };
+        checkPackage(packagedPath, true);
+        checkPackage(resavedPackage);
+        std::filesystem::remove(packageDiffuse);
+        std::filesystem::remove(packageEmissive);
+        checkPackage(packagedPath);
         Font font = LoadTechnicalFont();
         // Opening discovers named maps, preserves existing maps, and skips ties.
         const auto discoveryFolder = folder / "discovery";

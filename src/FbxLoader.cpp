@@ -6,6 +6,7 @@
 #include <cmath>
 #include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <limits>
 #include <memory>
@@ -2227,18 +2228,65 @@ void RemoveEmbeddedTextureExtractionDirectory(const std::filesystem::path& direc
     std::filesystem::remove_all(directory, removeError);
 }
 
-FbxCallback::State MarkEmbeddedFileRead(void* userData,
-                                        FbxClassId,
-                                        const char*,
-                                        const void*,
-                                        size_t)
+struct EmbeddedMediaReadContext
 {
-    bool* hasEmbeddedMedia = static_cast<bool*>(userData);
-    if (hasEmbeddedMedia)
+    bool hasEmbeddedMedia = false;
+    std::filesystem::path directory;
+    std::unordered_map<std::string, std::string> extractedBySource;
+    std::string error;
+};
+
+std::string EmbeddedMediaSourceKey(const char* name)
+{
+    return ToLowerAsciiForFbxLoader(std::filesystem::path(name ? name : "").lexically_normal().generic_string());
+}
+
+FbxCallback::State ReadEmbeddedFile(void* userData,
+                                   FbxClassId hint,
+                                   const char* fileName,
+                                   const void* buffer,
+                                   size_t size)
+{
+    auto& context = *static_cast<EmbeddedMediaReadContext*>(userData);
+    context.hasEmbeddedMedia = true;
+    if (hint != FbxVideo::ClassId) return FbxCallback::eNotHandled;
+
+    const auto key = EmbeddedMediaSourceKey(fileName);
+    if (context.extractedBySource.find(key) != context.extractedBySource.end()) return FbxCallback::eHandled;
+    const auto name = std::filesystem::path(fileName ? fileName : "").filename();
+    if (!buffer || size == 0 || name.empty())
     {
-        *hasEmbeddedMedia = true;
+        context.error = "Invalid embedded texture data.";
+        return FbxCallback::eFailure;
     }
-    return FbxCallback::eNotHandled;
+    // Unique names keep textures with identical basenames from different sources separate.
+    const auto target = context.directory / (std::to_string(context.extractedBySource.size()) + "_" + name.string());
+    std::ofstream output(target, std::ios::binary);
+    output.write(static_cast<const char*>(buffer), static_cast<std::streamsize>(size));
+    output.close();
+    if (!output)
+    {
+        context.error = "Failed to extract embedded texture: " + target.string();
+        return FbxCallback::eFailure;
+    }
+    context.extractedBySource[key] = AbsoluteNormalizedPathForFbxLoader(target).string();
+    return FbxCallback::eHandled;
+}
+
+void ApplyExtractedTexturePaths(FbxScene* scene, const EmbeddedMediaReadContext& context)
+{
+    for (int i = 0; i < scene->GetSrcObjectCount<FbxVideo>(); ++i)
+    {
+        auto* video = scene->GetSrcObject<FbxVideo>(i);
+        const auto found = context.extractedBySource.find(EmbeddedMediaSourceKey(video->GetFileName()));
+        if (found != context.extractedBySource.end()) video->SetFileName(found->second.c_str());
+    }
+    for (int i = 0; i < scene->GetSrcObjectCount<FbxFileTexture>(); ++i)
+    {
+        auto* texture = scene->GetSrcObject<FbxFileTexture>(i);
+        const auto found = context.extractedBySource.find(EmbeddedMediaSourceKey(texture->GetFileName()));
+        if (found != context.extractedBySource.end()) texture->SetFileName(found->second.c_str());
+    }
 }
 
 bool ExistingFile(const std::filesystem::path& path)
@@ -2298,21 +2346,48 @@ std::string ResolveFbxTexturePath(const FbxFileTexture* texture,
     const std::filesystem::path fileName = texture->GetFileName() ? texture->GetFileName() : "";
     const std::filesystem::path relativeName = texture->GetRelativeFileName() ? texture->GetRelativeFileName() : "";
 
+    // Embedded media is authoritative even when the original disk files still exist.
+    if (!extractionDirectory.empty())
+    {
+        std::vector<std::filesystem::path> extractedCandidates;
+        const auto extractedRelative = fileName.lexically_normal().lexically_relative(extractionDirectory.lexically_normal());
+        if (!extractedRelative.empty() && extractedRelative.is_relative() && *extractedRelative.begin() != "..")
+        {
+            extractedCandidates.push_back(fileName);
+        }
+        const auto normalizedRelative = relativeName.lexically_normal();
+        if (!normalizedRelative.empty() && normalizedRelative.is_relative() &&
+            *normalizedRelative.begin() != "..")
+        {
+            extractedCandidates.push_back(extractionDirectory / normalizedRelative);
+        }
+        for (const auto& name : { relativeName.filename(), fileName.filename() })
+        {
+            if (!name.empty()) extractedCandidates.push_back(extractionDirectory / name);
+        }
+        for (const auto& candidate : extractedCandidates)
+        {
+            if (ExistingFile(candidate)) return AbsoluteExistingFile(candidate).string();
+        }
+        for (const auto& name : { relativeName.filename(), fileName.filename() })
+        {
+            const auto found = FindFileBelowDirectory(extractionDirectory, name);
+            if (!found.empty()) return AbsoluteExistingFile(found).string();
+        }
+    }
+
     std::vector<std::filesystem::path> candidates;
     if (!fileName.empty())
     {
         candidates.push_back(fileName);
         candidates.push_back(modelDirectory / fileName);
         candidates.push_back(modelDirectory / fileName.filename());
-        candidates.push_back(extractionDirectory / fileName.filename());
     }
     if (!relativeName.empty())
     {
         candidates.push_back(relativeName);
         candidates.push_back(modelDirectory / relativeName);
         candidates.push_back(modelDirectory / relativeName.filename());
-        candidates.push_back(extractionDirectory / relativeName);
-        candidates.push_back(extractionDirectory / relativeName.filename());
     }
 
     for (const std::filesystem::path& candidate : candidates)
@@ -2321,13 +2396,6 @@ std::string ResolveFbxTexturePath(const FbxFileTexture* texture,
         {
             return AbsoluteExistingFile(candidate).string();
         }
-    }
-
-    const std::filesystem::path searchName = !relativeName.filename().empty() ? relativeName.filename() : fileName.filename();
-    const std::filesystem::path foundExtractedFile = FindFileBelowDirectory(extractionDirectory, searchName);
-    if (!foundExtractedFile.empty())
-    {
-        return AbsoluteExistingFile(foundExtractedFile).string();
     }
 
     for (const auto& name : { relativeName.filename(), fileName.filename() })
@@ -3313,15 +3381,16 @@ bool LoadFbxModel(const std::string& path, LoadedFbxModel& outModel, std::string
         importer->Destroy();
         return false;
     }
-    bool hasEmbeddedMedia = false;
+    EmbeddedMediaReadContext embeddedMedia;
     FbxEmbeddedFileCallback* embeddedFileCallback = FbxEmbeddedFileCallback::Create(manager.get(), "embedded-file-read");
     if (embeddedFileCallback)
     {
-        embeddedFileCallback->RegisterReadFunction(MarkEmbeddedFileRead, &hasEmbeddedMedia);
+        embeddedFileCallback->RegisterReadFunction(ReadEmbeddedFile, &embeddedMedia);
         importer->SetEmbeddedFileReadCallback(embeddedFileCallback);
     }
 
     const std::filesystem::path embeddedExtractionDirectory = MakeUniqueEmbeddedTextureExtractionDirectory(path);
+    embeddedMedia.directory = embeddedExtractionDirectory;
     std::error_code extractionDirectoryError;
     std::filesystem::create_directories(embeddedExtractionDirectory, extractionDirectoryError);
     if (!extractionDirectoryError)
@@ -3331,14 +3400,17 @@ bool LoadFbxModel(const std::string& path, LoadedFbxModel& outModel, std::string
     }
 
     FbxScene* scene = FbxScene::Create(manager.get(), "scene");
-    if (!importer->Import(scene))
+    if (!importer->Import(scene) || !embeddedMedia.error.empty())
     {
-        error = std::string("Failed to import FBX scene: ") + importer->GetStatus().GetErrorString();
+        error = embeddedMedia.error.empty()
+            ? std::string("Failed to import FBX scene: ") + importer->GetStatus().GetErrorString()
+            : embeddedMedia.error;
         importer->Destroy();
         RemoveEmbeddedTextureExtractionDirectory(embeddedExtractionDirectory);
         return false;
     }
     importer->Destroy();
+    ApplyExtractedTexturePaths(scene, embeddedMedia);
 
     FbxAxisSystem::OpenGL.ConvertScene(scene);
     FbxSystemUnit::m.ConvertScene(scene);
@@ -3363,8 +3435,8 @@ bool LoadFbxModel(const std::string& path, LoadedFbxModel& outModel, std::string
         return false;
     }
 
-    outModel.sourceHasEmbeddedMedia = hasEmbeddedMedia;
-    if (hasEmbeddedMedia && !extractionDirectoryError)
+    outModel.sourceHasEmbeddedMedia = embeddedMedia.hasEmbeddedMedia;
+    if (embeddedMedia.hasEmbeddedMedia && !extractionDirectoryError)
     {
         outModel.embeddedMediaExtractionDirectory = embeddedExtractionDirectory.string();
     }
@@ -3464,8 +3536,16 @@ bool SaveFbxModelAnimations(const std::string& sourcePath,
     const std::filesystem::path saveExtractionDirectory = importEmbeddedMedia
         ? MakeSaveEmbeddedTextureExtractionDirectory(sourcePath)
         : std::filesystem::path{};
+    EmbeddedMediaReadContext embeddedMedia;
+    embeddedMedia.directory = saveExtractionDirectory;
     if (!saveExtractionDirectory.empty())
     {
+        auto* callback = FbxEmbeddedFileCallback::Create(manager.get(), "embedded-file-read");
+        if (callback)
+        {
+            callback->RegisterReadFunction(ReadEmbeddedFile, &embeddedMedia);
+            importer->SetEmbeddedFileReadCallback(callback);
+        }
         std::error_code extractionDirectoryError;
         std::filesystem::create_directories(saveExtractionDirectory, extractionDirectoryError);
         if (!extractionDirectoryError)
@@ -3476,14 +3556,17 @@ bool SaveFbxModelAnimations(const std::string& sourcePath,
     }
 
     FbxScene* scene = FbxScene::Create(manager.get(), "scene");
-    if (!importer->Import(scene))
+    if (!importer->Import(scene) || !embeddedMedia.error.empty())
     {
-        error = std::string("Failed to import source FBX: ") + importer->GetStatus().GetErrorString();
+        error = embeddedMedia.error.empty()
+            ? std::string("Failed to import source FBX: ") + importer->GetStatus().GetErrorString()
+            : embeddedMedia.error;
         importer->Destroy();
         RemoveEmbeddedTextureExtractionDirectory(saveExtractionDirectory);
         return false;
     }
     importer->Destroy();
+    ApplyExtractedTexturePaths(scene, embeddedMedia);
 
     FbxAxisSystem::OpenGL.ConvertScene(scene);
     FbxSystemUnit::m.ConvertScene(scene);
