@@ -753,7 +753,8 @@ int RunOpenFbxApp(int argc, char** argv)
                            textureClipboard,
                            notice,
                            error,
-                           openMenu != OpenMenu::None || modalOpen);
+                           openMenu != OpenMenu::None || modalOpen,
+                           transformGizmo.dragging);
         DrawTransformToolbar(uiFont, transformTool, gizmoOrientation, editPivotMode, hierarchyBlockW);
         DrawOrientationGizmo(uiFont, active ? active->orbit.camera : emptyOrbit.camera);
         DrawViewportFps(uiFont);

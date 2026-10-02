@@ -7,7 +7,8 @@ void DrawHierarchyPanel(Font font,
                         TextureClipboard& textureClipboard,
                         std::string& notice,
                         std::string& error,
-                        bool inputBlocked)
+                        bool inputBlocked,
+                        bool deferDiagnostics = false)
 {
     constexpr float panelX = 0.0f;
     constexpr float panelY = 61.0f;
@@ -83,13 +84,13 @@ void DrawHierarchyPanel(Font font,
     }
     if (panel.activeTab == LeftPanelTab::UV)
     {
-        DrawUvPanel(font, *active, renameEditor, panelX, GetHierarchyContentStartY() + 10.0f, panelW);
+        DrawUvPanel(font, *active, renameEditor, panelX, GetHierarchyContentStartY() + 10.0f, panelW, deferDiagnostics);
         return;
     }
 
     if (panel.activeTab == LeftPanelTab::Validator)
     {
-        DrawValidatorPanel(font, *active, panel, panelX, GetHierarchyContentStartY() + 10.0f, panelW, notice, error);
+        DrawValidatorPanel(font, *active, panel, panelX, GetHierarchyContentStartY() + 10.0f, panelW, notice, error, deferDiagnostics);
         return;
     }
 

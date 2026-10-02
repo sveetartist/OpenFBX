@@ -366,7 +366,7 @@ static void TestParallelBindStorage()
     }
 }
 
-static int BenchmarkFbx(const char* path)
+static int BenchmarkFbx(const char* path, const std::string& selection = "bone", const std::string& diagnostics = "")
 {
     SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_HIDDEN);
@@ -379,12 +379,17 @@ static int BenchmarkFbx(const char* path)
     tab.currentNormals = tab.loaded.bindNormals;
     tab.deletedNodes.resize(tab.loaded.nodes.size(), false);
     for (int i = 0; i < static_cast<int>(tab.loaded.nodes.size()); ++i)
-        if (tab.loaded.nodes[static_cast<size_t>(i)].type == SceneNodeType::Bone && IsValidSelectableNode(tab, i))
+        if (tab.loaded.nodes[static_cast<size_t>(i)].type ==
+            (selection == "empty" ? SceneNodeType::Empty : selection == "mesh" ? SceneNodeType::Mesh : SceneNodeType::Bone) &&
+            IsValidSelectableNode(tab, i) &&
+            (selection != "head" || ToLower(tab.loaded.nodes[i].name).find("head") != std::string::npos))
         {
             SetSingleSelectedNode(tab, i);
             break;
         }
-    Require(tab.selectedNode >= 0, "Fixture has no selectable bone");
+    Require(tab.selectedNode >= 0, "Fixture has no selectable node of the requested type");
+    if (selection == "children") SelectContextNodeChildren(tab, {tab.selectedNode});
+    std::cout << "Selection: " << selection << " (" << tab.selectedNodes.size() << " nodes), diagnostics: " << diagnostics << "\n";
     auto stage = [](const char* name, auto work) {
         const auto start = std::chrono::steady_clock::now();
         for (int i = 0; i < 10; ++i) work();
@@ -407,6 +412,19 @@ static int BenchmarkFbx(const char* path)
     };
     renderStage("Skin weight surface", [&] { DrawSkinWeightHeatMap(tab); });
     renderStage("Skin weight wireframe", [&] { DrawSkinWeightWireframe(tab); });
+    tab.visibleBones = tab.loaded.bones;
+    tab.visibleBonePoses = tab.loaded.bonePoses;
+    tab.orbit.camera = camera;
+    const auto lit = LoadBasicLitShader();
+    ApplyLitShader(tab.loaded, lit);
+    std::string textureError;
+    LoadImportedPbrTextures(tab, textureError);
+    AutoLoadModelTextures(tab);
+    renderStage("Shaded viewport and rotation gizmo", [&] {
+        DrawMaterialModel(tab, lit, MaterialPreviewMode::Shaded, true);
+        DrawBones(GetVisibleBones(tab), GetVisibleBonePoses(tab), tab.selectedNode, tab.selectedNodes);
+        DrawTransformGizmo(tab, TransformTool::Rotate, {}, GizmoOrientation::Global, false);
+    });
     UnloadRenderTexture(renderTarget);
     stage("Bind skinning", [&] { BuildSkinnedMeshFrame(tab.loaded, BuildBindBoneFrame(tab.loaded)); });
     stage("Geometry capture", [&] { CaptureSkinningGeometry(tab.loaded); });
@@ -421,6 +439,7 @@ static int BenchmarkFbx(const char* path)
     stage("Bake bind skin", [&] { BakeSkinnedBindMeshFromBones(tab, true); });
     stage("Rebuild deferred animation frames", [&] { RebuildSkinnedAnimationMeshFrames(tab); });
     stage("Mesh bounds", [&] { RecomputeAllMeshNodeBounds(tab); });
+    stage("Validation refresh", [&] { tab.validationCache.dirty = true; GetValidationCache(tab); });
     for (int index = 0; index < static_cast<int>(tab.loaded.nodes.size()); ++index)
     {
         const auto& node = tab.loaded.nodes[index];
@@ -440,6 +459,7 @@ static int BenchmarkFbx(const char* path)
                 TransformAxis::Y, Vector3{0, 1, 0}, 0.005f);
             ApplyAnimatedMeshFrame(tab);
             ApplyAnimatedBoneFrame(tab);
+            if (!diagnostics.empty()) GetValidationCache(tab, diagnostics == "drag");
             const double elapsed = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - start).count();
             if (step > 0) timings.push_back(elapsed);
         }
@@ -448,8 +468,14 @@ static int BenchmarkFbx(const char* path)
                   << " animation frames, " << (clipIndex < 0 ? "bind pose" : "animation pose")
                   << "; transform + mesh upload median " << timings[timings.size() / 2]
                   << " ms, max " << timings.back() << " ms\n";
+        GetValidationCache(tab);
+        Require(!tab.validationCache.dirty, "Validation did not refresh after the drag");
     }
+    UnloadPbrTextures(tab);
+    for (int index = 0; index < tab.loaded.model.materialCount; ++index)
+        tab.loaded.model.materials[index].shader = Shader{rlGetShaderIdDefault(), rlGetShaderLocsDefault()};
     UnloadFbxModel(tab.loaded);
+    UnloadShader(lit.shader);
     CloseWindow();
     return 0;
 }
@@ -486,6 +512,14 @@ static void TestValidationCache()
     const double cachedMs = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - reuseStart).count() / 1000;
     std::cout << "Validation: " << expected.size() << " issues, full scan " << uncachedMs
               << " ms, cached lookup " << cachedMs << " ms\n";
+    tab.validationCache.dirty = true;
+    tab.selectedUvSet = 1;
+    for (int step = 0; step < 100; ++step)
+        Require(GetValidationCache(tab, true).issues.data() == storage && tab.validationCache.dirty,
+                "Dragging rebuilt validation or lost its pending refresh");
+    Require(GetValidationCache(tab).uvSet == 1 && !tab.validationCache.dirty,
+            "Ending the drag did not refresh validation for the final UV set");
+    tab.selectedUvSet = 0;
     RenameSceneNode(tab, 1, "Unique name");
     Require(tab.validationCache.dirty, "Rename did not invalidate validation");
     const auto& renamed = GetValidationCache(tab).issues;
@@ -519,6 +553,9 @@ static void TestValidationFixes()
     GetCachedUvIslands(cacheTab, cacheTriangles, 1024, 1024);
     Require(cacheTab.uvIslandCache == firstCache, "Unchanged UV islands rebuilt");
     cacheTriangles[0].position[1].x = 4;
+    for (int step = 0; step < 100; ++step)
+        Require(GetCachedUvIslands(cacheTab, cacheTriangles, 1024, 1024, true)[0].density == 1024 &&
+                cacheTab.uvIslandCache == firstCache, "Dragging rebuilt UV statistics");
     Require(GetCachedUvIslands(cacheTab, cacheTriangles, 1024, 1024)[0].density == 512,
             "Geometry edit left stale density");
     cacheTriangles[0].uv[1].x = 0.25f;
@@ -1394,6 +1431,7 @@ int main(int argc, char** argv)
         if (argc > 2 && std::string(argv[1]) == "--log-preview") return TestLogPanel(argv[2]);
         if (argc > 2 && std::string(argv[1]) == "--repair") return TestModelRepair(argv[2]);
         if (argc > 2 && std::string(argv[1]) == "--validation") return BenchmarkValidation(argv[2]);
+        if (argc > 3 && std::string(argv[1]) == "--transform") return BenchmarkFbx(argv[2], argv[3], argc > 4 ? argv[4] : "");
         if (argc > 1) return BenchmarkFbx(argv[1]);
         TestLogPanel();
         TestDegenerateTriangleRepair();

@@ -663,8 +663,9 @@ struct UvSelectionSummary
 };
 
 const std::vector<UvIslandStats>& GetCachedUvIslands(ModelTab& tab,
-    const std::vector<UvTriangleSample>& triangles, int width, int height)
+    const std::vector<UvTriangleSample>& triangles, int width, int height, bool deferRefresh = false)
 {
+    if (deferRefresh && tab.uvIslandCache) return tab.uvIslandCache->islands;
     // Compare inputs rather than relying on edit notifications: transforms, undo,
     // deleted faces, UV edits, and material selection can all change this scope.
     const auto sameTriangle = [](const UvTriangleSample& a, const UvTriangleSample& b)
@@ -1127,7 +1128,7 @@ void DrawUvDensityHelp(Font font)
                           i == 0 ? Color{ 150, 225, 170, 255 } : Color{ 205, 213, 220, 255 });
 }
 
-void DrawUvPanel(Font font, ModelTab& tab, RenameEditor& renameEditor, float panelX, float panelY, float panelW)
+void DrawUvPanel(Font font, ModelTab& tab, RenameEditor& renameEditor, float panelX, float panelY, float panelW, bool deferRefresh = false)
 {
     const float contentX = panelX + 12.0f;
     float y = panelY;
@@ -1354,7 +1355,7 @@ void DrawUvPanel(Font font, ModelTab& tab, RenameEditor& renameEditor, float pan
             usingDensityTexture = true;
         }
     }
-    const auto& islands = GetCachedUvIslands(tab, scopeTriangles, densityTextureWidth, densityTextureHeight);
+    const auto& islands = GetCachedUvIslands(tab, scopeTriangles, densityTextureWidth, densityTextureHeight, deferRefresh);
     if (tab.uvSelectionNodeIndex != selectedNodeIndex ||
         tab.uvSelectionUvSet != tab.selectedUvSet ||
         tab.uvSelectionTextureSet != tab.uvTextureSet)
@@ -1392,7 +1393,9 @@ void DrawUvPanel(Font font, ModelTab& tab, RenameEditor& renameEditor, float pan
 
     const UvSelectionSummary selectionSummary = CalculateUvSelectionSummary(islands, tab.selectedUvIslands);
     char densityLine[128] = {};
-    if (selectionSummary.count == 0)
+    if (deferRefresh)
+        std::snprintf(densityLine, sizeof(densityLine), "Density updates after transform.");
+    else if (selectionSummary.count == 0)
         std::snprintf(densityLine, sizeof(densityLine), "Select an island to inspect density");
     else if (selectionSummary.mixedDensity)
         std::snprintf(densityLine, sizeof(densityLine), "Multiple densities");

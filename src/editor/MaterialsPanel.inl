@@ -451,9 +451,12 @@ std::vector<ValidatorIssue> BuildValidationIssues(const ModelTab& tab)
     return issues;
 }
 
-const ValidationCache& GetValidationCache(ModelTab& tab)
+const ValidationCache& GetValidationCache(ModelTab& tab, bool deferRefresh = false)
 {
     ValidationCache& cache = tab.validationCache;
+    // Keep the last results while the gizmo is moving; leave them dirty so the
+    // final pose is validated as soon as the drag finishes.
+    if (deferRefresh) return cache;
     if (!cache.dirty && cache.uvSet == tab.selectedUvSet) return cache;
     cache = ValidationCache{};
     cache.issues = BuildValidationIssues(tab);
@@ -542,11 +545,11 @@ int FixAllValidationErrors(ModelTab& tab)
     return repairs;
 }
 
-void DrawValidatorPanel(Font font, ModelTab& tab, HierarchyPanelState& panel, float panelX, float panelY, float panelW, std::string& notice, std::string& error)
+void DrawValidatorPanel(Font font, ModelTab& tab, HierarchyPanelState& panel, float panelX, float panelY, float panelW, std::string& notice, std::string& error, bool deferRefresh = false)
 {
     if (DrawPanelButton(font, Rectangle{ panelX + panelW - 88.0f, panelY - 3.0f, 76.0f, 24.0f }, "Refresh"))
         tab.validationCache.dirty = true;
-    const ValidationCache& cache = GetValidationCache(tab);
+    const ValidationCache& cache = GetValidationCache(tab, deferRefresh);
     const auto& issues = cache.issues;
     const auto& groups = cache.groups;
     const float contentX = panelX + 12.0f;
@@ -558,13 +561,14 @@ void DrawValidatorPanel(Font font, ModelTab& tab, HierarchyPanelState& panel, fl
 
     char summary[192] = {};
     std::snprintf(summary, sizeof(summary), "%d errors    %d warnings    %d info", cache.errors, cache.warnings, cache.infos);
-    DrawUiTextClipped(font, summary, contentX, y, 14.0f, panelW - 24.0f, Color{ 205, 213, 220, 255 });
+    const bool pendingRefresh = deferRefresh && (cache.dirty || cache.uvSet != tab.selectedUvSet);
+    DrawUiTextClipped(font, pendingRefresh ? "Results update after transform." : summary, contentX, y, 14.0f, panelW - 24.0f, Color{ 205, 213, 220, 255 });
     y += 28.0f;
 
     if (issues.empty())
     {
         tab.validationFixNode = -1;
-        DrawUiTextClipped(font, "No validation issues found.", contentX, y, 14.0f, panelW - 24.0f, Color{ 128, 140, 152, 255 });
+        if (!pendingRefresh) DrawUiTextClipped(font, "No validation issues found.", contentX, y, 14.0f, panelW - 24.0f, Color{ 128, 140, 152, 255 });
         panel.validatorScroll = 0.0f;
         return;
     }
