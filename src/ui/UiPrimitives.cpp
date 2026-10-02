@@ -69,13 +69,17 @@ void DrawUiTextClipped(Font font, const char* text, float x, float y, float size
     }
 }
 
-bool DrawPanelTab(Font font, Rectangle bounds, const char* label, bool selected)
+bool DrawPanelTab(Font font, Rectangle bounds, const char* label, bool selected, Color statusColor)
 {
     const Vector2 mouse = GetMousePosition();
     const bool hovered = CheckCollisionPointRec(mouse, bounds);
     DrawRectangleRec(bounds, selected ? Color{ 48, 70, 92, 255 } : hovered ? Color{ 34, 39, 45, 255 } : Color{ 24, 27, 31, 245 });
-    const float fontSize = MeasureTextEx(font, label, 14.0f, 1.0f).x > bounds.width - 10.0f ? 12.0f : 14.0f;
-    DrawUiTextClipped(font, label, bounds.x + 5.0f, bounds.y + 5.0f, fontSize, bounds.width - 10.0f, selected ? RAYWHITE : Color{ 180, 190, 200, 255 });
+    if (statusColor.a > 0) DrawRectangleLinesEx(bounds, 1.0f, statusColor);
+    float fontSize = MeasureTextEx(font, label, 14.0f, 1.0f).x > bounds.width - 10.0f ? 12.0f : 14.0f;
+    if (statusColor.a > 0)
+        while (fontSize > 10.0f && MeasureTextEx(font, label, fontSize, 1.0f).x > bounds.width - 10.0f) fontSize -= 1.0f;
+    const Color textColor = statusColor.a > 0 ? statusColor : selected ? RAYWHITE : Color{ 180, 190, 200, 255 };
+    DrawUiTextClipped(font, label, bounds.x + 5.0f, bounds.y + 5.0f, fontSize, bounds.width - 10.0f, textColor);
     return hovered && openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT);
 }
 

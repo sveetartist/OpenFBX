@@ -60,7 +60,15 @@ void DrawHierarchyPanel(Font font,
         panel.activeTab = LeftPanelTab::UV;
     }
 
-    if (!inputBlocked && DrawPanelTab(font, validatorTab, "Valid", panel.activeTab == LeftPanelTab::Validator))
+    Color validationStatusColor{};
+    if (active && active->loaded.valid)
+    {
+        const ValidationCache& validation = GetValidationCache(*active, deferDiagnostics);
+        if (validation.errors > 0) validationStatusColor = GetValidatorSeverityColor(ValidatorSeverity::Error);
+        else if (validation.warnings > 0) validationStatusColor = GetValidatorSeverityColor(ValidatorSeverity::Warning);
+    }
+    if (!inputBlocked && DrawPanelTab(font, validatorTab, validationStatusColor.a > 0 ? "!Valid" : "Valid",
+                                     panel.activeTab == LeftPanelTab::Validator, validationStatusColor))
     {
         panel.activeTab = LeftPanelTab::Validator;
     }
