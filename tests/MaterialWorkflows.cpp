@@ -52,6 +52,64 @@ static void CreateFixture(const std::string& path, const std::string& texturePat
     manager->Destroy();
 }
 
+static void TestValidationTextureRepair(const std::filesystem::path& folder)
+{
+    ModelTab tab;
+    const auto modelPath = folder / "texture_repair.fbx";
+    CreateFixture(modelPath.string());
+    std::string error;
+    Check(LoadFbxModel(modelPath.string(), tab.loaded, error), error);
+    // Two materials expose incorrect repairs to the selected/first material.
+    Material* materials = static_cast<Material*>(MemAlloc(sizeof(Material) * 2));
+    materials[0] = tab.loaded.model.materials[0];
+    materials[1] = LoadMaterialDefault();
+    MemFree(tab.loaded.model.materials);
+    tab.loaded.model.materials = materials;
+    tab.loaded.model.materialCount = 2;
+    tab.loaded.materialNames.push_back("Second Surface");
+    EnsurePbrMaterialStates(tab);
+    auto findIssue = [&](const char* category, PbrTextureSlot slot)
+    {
+        std::vector<ValidatorIssue> issues;
+        ValidateTextures(tab, issues);
+        for (const auto& issue : issues)
+            if (issue.category == category && issue.materialIndex == 1 && issue.textureSlot == slot) return issue;
+        throw std::runtime_error("Texture validator did not identify the affected material and slot");
+    };
+    const auto missing = findIssue("Missing texture", PbrTextureSlot::Normal);
+    const auto texturePath = folder / "texture_repair.png";
+    Image image = GenImageColor(4, 4, BLUE);
+    Check(ExportImage(image, texturePath.string().c_str()), "Repair texture export failed");
+    UnloadImage(image);
+    Check(LoadValidationTextureFile(tab, missing.materialIndex, missing.textureSlot, texturePath.string(), error), error);
+    Check(GetPbrTexture(tab.pbrMaterials[1], PbrTextureSlot::Normal).loaded &&
+          !GetPbrTexture(tab.pbrMaterials[0], PbrTextureSlot::Normal).loaded &&
+          !GetPbrTexture(tab.pbrMaterials[1], PbrTextureSlot::Diffuse).loaded,
+          "Missing texture repair must affect only the warning's material and slot");
+    Check(UndoEdit(tab) && !GetPbrTexture(tab.pbrMaterials[1], PbrTextureSlot::Normal).loaded,
+          "Texture repair must be undoable");
+    Check(RedoEdit(tab) && GetPbrTexture(tab.pbrMaterials[1], PbrTextureSlot::Normal).loaded,
+          "Texture repair must support redo");
+    const auto originalId = GetPbrTexture(tab.pbrMaterials[1], PbrTextureSlot::Normal).texture.id;
+    const auto historySize = tab.undoStack.size();
+    Check(!LoadValidationTextureFile(tab, 1, PbrTextureSlot::Normal, (folder / "unreadable_repair.png").string(), error) &&
+          tab.undoStack.size() == historySize && GetPbrTexture(tab.pbrMaterials[1], PbrTextureSlot::Normal).texture.id == originalId,
+          "Failed texture repairs must preserve the existing texture and history");
+    std::filesystem::remove(texturePath);
+    const auto broken = findIssue("Broken texture", PbrTextureSlot::Normal);
+    image = GenImageColor(4, 4, RED);
+    Check(ExportImage(image, texturePath.string().c_str()), "Replacement texture export failed");
+    UnloadImage(image);
+    Check(LoadValidationTextureFile(tab, broken.materialIndex, broken.textureSlot, texturePath.string(), error), error);
+    Check(GetPbrTexture(tab.pbrMaterials[1], PbrTextureSlot::Normal).texture.id != originalId &&
+          !GetPbrTexture(tab.pbrMaterials[0], PbrTextureSlot::Normal).loaded,
+          "Broken texture repair must replace only the affected slot");
+    tab.undoStack.clear();
+    tab.redoStack.clear();
+    UnloadPbrTextures(tab);
+    UnloadFbxModel(tab.loaded);
+}
+
 static void TestTextureUndo(const std::filesystem::path& folder)
 {
     const auto modelPath = folder / "texture_undo.fbx";
@@ -121,6 +179,7 @@ int main()
         InitWindow(640, 800, "Material workflow regression");
         const auto folder = std::filesystem::temp_directory_path() / "openfbx-material-regression";
         std::filesystem::create_directories(folder);
+        TestValidationTextureRepair(folder);
         TestTextureUndo(folder);
         const auto source = folder / "source.fbx";
         CreateFixture(source.string());

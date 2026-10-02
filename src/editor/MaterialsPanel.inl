@@ -167,19 +167,24 @@ std::string GetMaterialDisplayName(const LoadedFbxModel& loaded, int materialInd
 void ValidateTextures(const ModelTab& tab, std::vector<ValidatorIssue>& issues)
 {
     const int materialCount = tab.loaded.hasMesh ? std::max(1, tab.loaded.model.materialCount) : 0;
-    int missingDiffuse = 0;
-    int missingNormal = 0;
-
     for (int materialIndex = 0; materialIndex < materialCount; ++materialIndex)
     {
+        auto addTextureIssue = [&](ValidatorSeverity severity, const char* category, PbrTextureSlot slot, const std::string& message)
+        {
+            AddValidationIssue(issues, severity, category, message);
+            issues.back().materialIndex = materialIndex;
+            issues.back().textureSlot = slot;
+        };
         const PbrMaterialState* material = materialIndex < static_cast<int>(tab.pbrMaterials.size()) ? &tab.pbrMaterials[static_cast<size_t>(materialIndex)] : nullptr;
         if (!material || !GetPbrTexture(*material, PbrTextureSlot::Diffuse).loaded)
         {
-            ++missingDiffuse;
+            addTextureIssue(ValidatorSeverity::Warning, "Missing texture", PbrTextureSlot::Diffuse,
+                            GetMaterialDisplayName(tab.loaded, materialIndex) + " has no diffuse texture assigned.");
         }
         if (!material || !GetPbrTexture(*material, PbrTextureSlot::Normal).loaded)
         {
-            ++missingNormal;
+            addTextureIssue(ValidatorSeverity::Info, "Missing texture", PbrTextureSlot::Normal,
+                            GetMaterialDisplayName(tab.loaded, materialIndex) + " has no normal texture assigned.");
         }
 
         if (!material) continue;
@@ -194,21 +199,10 @@ void ValidateTextures(const ModelTab& tab, std::vector<ValidatorIssue>& issues)
             const bool sourceExists = std::filesystem::exists(texture.path, existsError);
             if (!texture.loaded || texture.texture.id == 0 || texture.texture.width <= 0 || texture.texture.height <= 0 || !sourceExists)
             {
-                AddValidationIssue(issues,
-                                   ValidatorSeverity::Error,
-                                   "Broken texture",
-                                   GetMaterialDisplayName(tab.loaded, materialIndex) + " " + GetPbrTextureSlotName(slot) + ": " + texture.path);
+                addTextureIssue(ValidatorSeverity::Error, "Broken texture", slot,
+                                GetMaterialDisplayName(tab.loaded, materialIndex) + " " + GetPbrTextureSlotName(slot) + ": " + texture.path);
             }
         }
-    }
-
-    if (missingDiffuse > 0)
-    {
-        AddValidationIssue(issues, ValidatorSeverity::Warning, "Missing texture", std::to_string(missingDiffuse) + " material(s) have no diffuse texture assigned.");
-    }
-    if (missingNormal > 0)
-    {
-        AddValidationIssue(issues, ValidatorSeverity::Info, "Missing texture", std::to_string(missingNormal) + " material(s) have no normal texture assigned.");
     }
 }
 
@@ -545,6 +539,24 @@ int FixAllValidationErrors(ModelTab& tab)
     return repairs;
 }
 
+bool LoadValidationTextureFile(ModelTab& tab, int materialIndex, PbrTextureSlot slot, const std::string& path, std::string& error)
+{
+    error.clear();
+    if (path.empty()) return false;
+    EnsurePbrMaterialStates(tab);
+    if (materialIndex < 0 || materialIndex >= static_cast<int>(tab.pbrMaterials.size()) ||
+        static_cast<int>(slot) < 0 || slot >= PbrTextureSlot::Count)
+    {
+        error = "Invalid texture repair target.";
+        return false;
+    }
+    EditSnapshot before = CaptureEditSnapshot(tab);
+    if (!LoadPbrTexture(tab, materialIndex, slot, path, error)) return false;
+    PushUndoSnapshot(tab, std::move(before));
+    tab.selectedMaterial = materialIndex;
+    return true;
+}
+
 void DrawValidatorPanel(Font font, ModelTab& tab, HierarchyPanelState& panel, float panelX, float panelY, float panelW, std::string& notice, std::string& error, bool deferRefresh = false)
 {
     if (DrawPanelButton(font, Rectangle{ panelX + panelW - 88.0f, panelY - 3.0f, 76.0f, 24.0f }, "Refresh"))
@@ -653,12 +665,15 @@ void DrawValidatorPanel(Font font, ModelTab& tab, HierarchyPanelState& panel, fl
                 if (hovered &&
                     (issue.category == "Degenerate triangles" || issue.category == "Unapplied scale" ||
                      issue.category == "Multiple UV sets" || issue.category == "Overlapping UVs" ||
-                     issue.category == "Non-uniform texel density" || issue.category == "Duplicate name" || issue.category == "Bad weights") &&
+                     issue.category == "Non-uniform texel density" || issue.category == "Duplicate name" || issue.category == "Bad weights" ||
+                     issue.category == "Missing texture" || issue.category == "Broken texture") &&
                     openfbx::UiMouseButtonPressed(MOUSE_BUTTON_RIGHT))
                 {
                     tab.validationFixNode = issue.node >= 0 ? issue.node : -2;
                     tab.validationFixCategory = issue.category;
                     tab.validationFixUvSet = issue.uvSet;
+                    tab.validationFixMaterialIndex = issue.materialIndex;
+                    tab.validationFixTextureSlot = issue.textureSlot;
                     tab.validationFixScale = issue.category == "Unapplied scale";
                     const float menuHeight = tab.validationFixScale ? 56.0f : 28.0f;
                     tab.validationFixPosition = Vector2{ listBounds.x, ClampFloat(mouse.y, listBounds.y,
@@ -716,6 +731,23 @@ void DrawValidatorPanel(Font font, ModelTab& tab, HierarchyPanelState& panel, fl
                 }
                 notice = count > 0 ? "Applied scale to " + std::to_string(count) + " object(s)." : "Scale already applied.";
                 error.clear();
+                tab.validationFixNode = -1;
+            }
+        }
+        else if (tab.validationFixCategory == "Missing texture" || tab.validationFixCategory == "Broken texture")
+        {
+            if (DrawPanelButton(font, menu, "Load Texture File..."))
+            {
+                const std::string path = OpenTextureFileDialog();
+                if (!path.empty())
+                {
+                    if (LoadValidationTextureFile(tab, tab.validationFixMaterialIndex, tab.validationFixTextureSlot, path, error))
+                    {
+                        notice = "Loaded " + GetMaterialDisplayName(tab.loaded, tab.validationFixMaterialIndex) + " " +
+                                 GetPbrTextureSlotName(tab.validationFixTextureSlot) + ": " + path;
+                    }
+                    else notice.clear();
+                }
                 tab.validationFixNode = -1;
             }
         }

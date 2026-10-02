@@ -354,6 +354,8 @@ struct ValidatorIssue
     std::string message;
     int node = -1;
     int uvSet = -1;
+    int materialIndex = -1;
+    PbrTextureSlot textureSlot = PbrTextureSlot::Count;
 };
 
 struct ValidationGroup
@@ -456,6 +458,8 @@ struct ModelTab
     bool validationFixScale = false;
     std::string validationFixCategory;
     int validationFixUvSet = -1;
+    int validationFixMaterialIndex = -1;
+    PbrTextureSlot validationFixTextureSlot = PbrTextureSlot::Count;
     Vector2 validationFixPosition{};
     ValidationCache validationCache;
     std::unordered_map<std::string, bool> expandedValidationGroups;
