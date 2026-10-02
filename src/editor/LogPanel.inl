@@ -22,6 +22,32 @@ struct LogPanelState
     float wrapWidth = -1.0f;
 };
 
+std::string GetModelTextureLoadNotice(const ModelTab& tab)
+{
+    int packagedCount = 0;
+    int directoryCount = 0;
+    std::string extractionRoot;
+    if (!tab.loaded.embeddedMediaExtractionDirectory.empty())
+    {
+        extractionRoot = ToLowerAscii(AbsoluteNormalizedPath(tab.loaded.embeddedMediaExtractionDirectory).generic_string());
+        if (extractionRoot.back() != '/') extractionRoot += '/';
+    }
+    for (const auto& material : tab.pbrMaterials)
+    for (const auto& texture : material.textures)
+    {
+        if (!texture.loaded) continue;
+        const auto path = ToLowerAscii(AbsoluteNormalizedPath(texture.path).generic_string());
+        if (!extractionRoot.empty() && path.rfind(extractionRoot, 0) == 0) ++packagedCount;
+        else ++directoryCount;
+    }
+    std::string notice = "Loaded FBX: " + tab.path;
+    if (packagedCount > 0)
+        notice += "\nLoaded " + std::to_string(packagedCount) + " packaged texture" + (packagedCount == 1 ? "." : "s.");
+    if (directoryCount > 0)
+        notice += "\nLoaded " + std::to_string(directoryCount) + " texture" + (directoryCount == 1 ? "" : "s") + " from directory.";
+    return notice;
+}
+
 float GetLogPanelHeight(const LogPanelState& panel)
 {
     return panel.collapsed ? 28.0f : 132.0f;

@@ -109,15 +109,14 @@ int RunOpenFbxApp(int argc, char** argv)
         tab->loaded = std::move(loaded);
         initializeLoadedTab(*tab, path);
         std::string textureLoadError;
-        int importedTextureCount = LoadImportedPbrTextures(*tab, textureLoadError);
-        importedTextureCount += AutoLoadModelTextures(*tab);
+        LoadImportedPbrTextures(*tab, textureLoadError);
+        AutoLoadModelTextures(*tab);
+        const std::string textureLoadNotice = GetModelTextureLoadNotice(*tab);
 
         tabs.push_back(std::move(tab));
         activeTab = static_cast<int>(tabs.size()) - 1;
         error = textureLoadError;
-        notice = importedTextureCount > 0
-            ? "Loaded " + std::to_string(importedTextureCount) + " FBX texture" + (importedTextureCount == 1 ? "." : "s.")
-            : "Loaded FBX: " + path;
+        notice = textureLoadNotice;
         if (converted) notice = "Converted to FBX: " + path + (notice.empty() ? "" : ". " + notice);
         CollectLogMessages(logPanel, notice, error);
     };
