@@ -673,6 +673,75 @@ static void TestSkinWeightDisplaySelection()
             "Unweighted vertices must use the zero-weight tint");
 }
 
+static void TestAppliedBoneScaleSurvivesBindReset()
+{
+    for (bool applyChildren : {false, true})
+    for (bool activeAnimation : {false, true})
+    {
+        ModelTab tab;
+        auto& model = tab.loaded;
+        model.hasMesh = true;
+        model.nodes.resize(4);
+        for (int index : {1, 2, 3})
+        {
+            auto& node = model.nodes[index];
+            node.name = "Bone" + std::to_string(index);
+            node.type = SceneNodeType::Bone;
+            node.parent = index == 2 ? 1 : 0;
+            node.position = Vector3{float(index), float(index), 0};
+            node.scale = Vector3{2, 3, 4};
+            model.bonePoses.push_back(MakeBonePoseFromSceneNode(node, index));
+        }
+        tab.originalBindBonePoses = model.bonePoses;
+        tab.visibleBonePoses = model.bonePoses;
+        model.bindVertices.resize(9);
+        model.bindNormals = {0,0,1, 0,0,1, 0,0,1};
+        model.skinnedVertices.resize(3);
+        for (int vertex = 0; vertex < 3; ++vertex)
+        {
+            auto& skinned = model.skinnedVertices[vertex];
+            skinned.bindNormal = Vector3{0,0,1};
+            skinned.influences.push_back({"Bone" + std::to_string(vertex + 1), 1, Vector3{1,1,0}, Vector3{0,0,1}});
+        }
+        model.animations.resize(1);
+        auto& frame = model.animations[0].frames.emplace_back();
+        frame.poses = model.bonePoses;
+        frame.poses[1].position.y += 1;
+        SetSelectedNodeScale(tab, 1, Vector3{4, 6, 8});
+        BoneFrame bindFrame;
+        bindFrame.poses = model.bonePoses;
+        const auto scaledMesh = ReferenceSkin(model, bindFrame);
+        const auto scaledAnimation = ReferenceSkin(model, model.animations[0].frames[0]);
+        const auto scaledChildPosition = model.nodes[2].position;
+        tab.animation.clipIndex = activeAnimation ? 0 : -1;
+        if (activeAnimation) tab.visibleBonePoses = model.animations[0].frames[0].poses;
+        PushUndoSnapshot(tab);
+        Require(ApplyScaleToContextNodes(tab, applyChildren ? std::vector<int>{1, 2} : std::vector<int>{1}) > 0,
+                "Bone scale was not applied");
+        auto checkReset = [&]()
+        {
+            MoveSelectedSubtree(tab, Vector3{10, 5, 0});
+            Require(ResetBoneSubtreeToOriginalBindPose(tab, 1), "Moved bones did not reset");
+            Require(IsScaleApproximatelyApplied(model.nodes[1].scale), "Bind reset restored unapplied bone scale");
+            Require(Vector3Distance(model.nodes[2].position, scaledChildPosition) < 0.000001f,
+                    "Bind reset lost the applied scale in child bone positions");
+            bindFrame.poses = model.bonePoses;
+            Equal(scaledMesh, ReferenceSkin(model, bindFrame));
+            Require(!ResetBoneSubtreeToOriginalBindPose(tab, 1), "Repeated bind reset changed the applied pose");
+            Require(!ApplyScaleToNode(tab, 1), "Already applied bone scale was baked twice");
+        };
+        Equal(scaledAnimation, ReferenceSkin(model, model.animations[0].frames[0]));
+        Require(UndoEdit(tab), "Apply bone scale undo failed");
+        Require(tab.originalBindBonePoses[0].scale.x == 2 && model.nodes[1].scale.x == 4,
+                "Undo did not restore the original reset target and unapplied scale");
+        Require(RedoEdit(tab), "Apply bone scale redo failed");
+        SetSingleSelectedNode(tab, 1);
+        checkReset();
+        Require(tab.originalBindBonePoses[2].scale.x == 2 && model.nodes[3].position.x == 3,
+                "Applying a branch's scale changed an unrelated bone's bind pose");
+    }
+}
+
 static void TestAttachedMeshBoneTransforms()
 {
     ModelTab tab;
@@ -1333,6 +1402,7 @@ int main(int argc, char** argv)
         TestBadSkinWeightRepair();
         TestSkinWeightDisplaySelection();
         TestParallelBindStorage();
+        TestAppliedBoneScaleSurvivesBindReset();
         TestAttachedMeshBoneTransforms();
         TestSkinWeightWireframeRendering();
         TestValidationCache();

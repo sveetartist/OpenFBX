@@ -844,6 +844,20 @@ void BakeBoneScaleIntoSkinBindData(ModelTab& tab, const SceneNode& node, Vector3
     }
 }
 
+void StoreAppliedBoneScaleBindPose(ModelTab& tab, int rootNodeIndex)
+{
+    // Scaling a bone also changes its descendants' world positions. Keep the
+    // whole scaled branch as the reset target, using bind poses rather than animation poses.
+    for (const BonePose& pose : tab.loaded.bonePoses)
+    {
+        if (IsDeletedNode(tab, pose.node) || !IsNodeInTransformScope(tab.loaded, pose.node, rootNodeIndex)) continue;
+        auto original = std::find_if(tab.originalBindBonePoses.begin(), tab.originalBindBonePoses.end(),
+                                    [&](const BonePose& candidate) { return candidate.node == pose.node; });
+        if (original == tab.originalBindBonePoses.end()) tab.originalBindBonePoses.push_back(pose);
+        else *original = pose;
+    }
+}
+
 bool ApplyScaleToNode(ModelTab& tab, int nodeIndex)
 {
     if (nodeIndex < 0 ||
@@ -904,6 +918,7 @@ bool ApplyScaleToNode(ModelTab& tab, int nodeIndex)
 
     if (node.type == SceneNodeType::Bone)
     {
+        StoreAppliedBoneScaleBindPose(tab, nodeIndex);
         const bool bakedBindMesh = BakeSkinnedBindMeshFromBones(tab, tab.animation.clipIndex < 0);
         RebuildSkinnedAnimationMeshFrames(tab);
         if (bakedBindMesh && tab.animation.clipIndex < 0)
