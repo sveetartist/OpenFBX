@@ -80,10 +80,10 @@ void RestoreEditSnapshot(ModelTab& tab, const EditSnapshot& snapshot)
         for (int slotIndex = 0; slotIndex < static_cast<int>(PbrTextureSlot::Count); ++slotIndex)
         {
             const PbrTextureSnapshot& textureSnapshot = materialSnapshot.textures[static_cast<size_t>(slotIndex)];
-            if (!textureSnapshot.loaded || textureSnapshot.path.empty()) continue;
+            if (!textureSnapshot.loaded) continue;
 
             std::string loadError;
-            LoadPbrTexture(tab, materialIndex, static_cast<PbrTextureSlot>(slotIndex), textureSnapshot.path, loadError);
+            RestorePbrTexture(tab, materialIndex, static_cast<PbrTextureSlot>(slotIndex), textureSnapshot, loadError);
         }
     }
 

@@ -52,6 +52,66 @@ static void CreateFixture(const std::string& path, const std::string& texturePat
     manager->Destroy();
 }
 
+static void TestTextureUndo(const std::filesystem::path& folder)
+{
+    const auto modelPath = folder / "texture_undo.fbx";
+    const auto texturePath = folder / "texture_undo.png";
+    CreateFixture(modelPath.string());
+    ModelTab tab;
+    std::string error;
+    Check(LoadFbxModel(modelPath.string(), tab.loaded, error), error);
+    tab.currentVertices = tab.loaded.bindVertices;
+    tab.currentNormals = tab.loaded.bindNormals;
+    for (int i = 0; i < static_cast<int>(tab.loaded.nodes.size()); ++i)
+        if (tab.loaded.nodes[i].type == SceneNodeType::Mesh) SetSingleSelectedNode(tab, i);
+    auto loadColor = [&](Color color)
+    {
+        Image image = GenImageColor(4, 4, color);
+        Check(ExportImage(image, texturePath.string().c_str()), "Undo texture export failed");
+        UnloadImage(image);
+        Check(LoadPbrTexture(tab, 0, PbrTextureSlot::Diffuse, texturePath.string(), error), error);
+    };
+    auto checkColor = [&](Color expected)
+    {
+        const auto& texture = GetPbrTexture(tab.pbrMaterials[0], PbrTextureSlot::Diffuse);
+        Check(texture.loaded, "Undo/redo lost a loaded texture when its source file was missing");
+        Check(tab.loaded.model.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture.id == texture.texture.id,
+              "Undo/redo did not bind the restored texture to the model");
+        Image image = LoadImageFromTexture(texture.texture);
+        Color actual = GetImageColor(image, 0, 0);
+        UnloadImage(image);
+        Check(actual.r == expected.r && actual.g == expected.g && actual.b == expected.b,
+              "Undo/redo changed the saved texture pixels");
+    };
+    loadColor(RED);
+    PushUndoSnapshot(tab);
+    MoveSelectedSubtree(tab, Vector3{1, 0, 0});
+    std::filesystem::remove(texturePath);
+    Check(UndoEdit(tab), "Transform undo failed");
+    checkColor(RED);
+    Check(RedoEdit(tab), "Transform redo failed");
+    checkColor(RED);
+
+    // Replacing the contents of the same file must preserve both texture versions.
+    PushUndoSnapshot(tab);
+    loadColor(BLUE);
+    std::filesystem::remove(texturePath);
+    Check(UndoEdit(tab), "Texture replacement undo failed");
+    checkColor(RED);
+    Check(RedoEdit(tab), "Texture replacement redo failed");
+    checkColor(BLUE);
+    PushUndoSnapshot(tab);
+    UnloadPbrTexture(tab, 0, PbrTextureSlot::Diffuse);
+    Check(UndoEdit(tab), "Texture removal undo failed");
+    checkColor(BLUE);
+    Check(RedoEdit(tab) && !GetPbrTexture(tab.pbrMaterials[0], PbrTextureSlot::Diffuse).loaded,
+          "Texture removal redo must leave the slot empty");
+    tab.undoStack.clear();
+    tab.redoStack.clear();
+    UnloadPbrTextures(tab);
+    UnloadFbxModel(tab.loaded);
+}
+
 int main()
 {
     try
@@ -61,6 +121,7 @@ int main()
         InitWindow(640, 800, "Material workflow regression");
         const auto folder = std::filesystem::temp_directory_path() / "openfbx-material-regression";
         std::filesystem::create_directories(folder);
+        TestTextureUndo(folder);
         const auto source = folder / "source.fbx";
         CreateFixture(source.string());
         ModelTab tab;

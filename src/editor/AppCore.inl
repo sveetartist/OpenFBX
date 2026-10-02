@@ -247,6 +247,7 @@ enum class GizmoOrientation
 struct PbrTexture
 {
     Texture2D texture{};
+    std::shared_ptr<Texture2D> resource;
     std::string path;
     bool loaded = false;
 };
@@ -267,6 +268,7 @@ struct PbrTextureSnapshot
 {
     std::string path;
     bool loaded = false;
+    std::shared_ptr<Texture2D> resource;
 };
 
 struct PbrMaterialSnapshot
@@ -991,10 +993,6 @@ void UnloadPbrTexture(ModelTab& tab, int materialIndex, PbrTextureSlot slot)
     if (materialIndex < 0 || materialIndex >= static_cast<int>(tab.pbrMaterials.size())) return;
 
     PbrTexture& texture = GetPbrTexture(tab.pbrMaterials[static_cast<size_t>(materialIndex)], slot);
-    if (texture.loaded)
-    {
-        UnloadTexture(texture.texture);
-    }
     texture = PbrTexture{};
     ApplyPbrTextureToModel(tab, materialIndex, slot);
 }
@@ -1022,8 +1020,30 @@ bool LoadPbrTexture(ModelTab& tab, int materialIndex, PbrTextureSlot slot, const
     UnloadPbrTexture(tab, materialIndex, slot);
     PbrTexture& pbrTexture = GetPbrTexture(tab.pbrMaterials[static_cast<size_t>(materialIndex)], slot);
     pbrTexture.texture = texture;
+    // History shares the GPU resource instead of relying on a file that can change
+    // or disappear. The last live material/history entry releases the texture.
+    pbrTexture.resource = std::shared_ptr<Texture2D>(new Texture2D(texture), [](Texture2D* resource)
+    {
+        if (IsWindowReady()) UnloadTexture(*resource);
+        delete resource;
+    });
     pbrTexture.path = path;
     pbrTexture.loaded = true;
+    ApplyPbrTextureToModel(tab, materialIndex, slot);
+    return true;
+}
+
+bool RestorePbrTexture(ModelTab& tab, int materialIndex, PbrTextureSlot slot,
+                       const PbrTextureSnapshot& snapshot, std::string& error)
+{
+    if (!snapshot.resource) return LoadPbrTexture(tab, materialIndex, slot, snapshot.path, error);
+    error.clear();
+    UnloadPbrTexture(tab, materialIndex, slot);
+    PbrTexture& texture = GetPbrTexture(tab.pbrMaterials[static_cast<size_t>(materialIndex)], slot);
+    texture.resource = snapshot.resource;
+    texture.texture = *snapshot.resource;
+    texture.path = snapshot.path;
+    texture.loaded = snapshot.loaded;
     ApplyPbrTextureToModel(tab, materialIndex, slot);
     return true;
 }
@@ -1644,6 +1664,7 @@ EditSnapshot CaptureEditSnapshot(ModelTab& tab)
             const PbrTexture& texture = material.textures[static_cast<size_t>(slotIndex)];
             materialSnapshot.textures[static_cast<size_t>(slotIndex)].path = texture.path;
             materialSnapshot.textures[static_cast<size_t>(slotIndex)].loaded = texture.loaded;
+            materialSnapshot.textures[static_cast<size_t>(slotIndex)].resource = texture.resource;
         }
 
         snapshot.pbrMaterials.push_back(std::move(materialSnapshot));

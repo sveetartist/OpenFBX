@@ -1085,6 +1085,8 @@ int RunOpenFbxApp(int argc, char** argv)
         UnloadPbrTextures(*tab);
         UnloadFbxModel(tab->loaded);
     }
+    // Release textures retained by edit history while the graphics context exists.
+    tabs.clear();
     if (litShader.valid)
     {
         UnloadShader(litShader.shader);
