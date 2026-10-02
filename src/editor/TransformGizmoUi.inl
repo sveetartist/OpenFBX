@@ -165,7 +165,8 @@ TransformAxis PickTransformGizmoAxis(ModelTab& tab, TransformTool tool, GizmoOri
     }
 
     TransformAxis bestAxis = TransformAxis::None;
-    float bestDistance = 12.0f;
+    const float rotationLineWidth = ClampFloat(gTransformGizmoLineWidth, kMinTransformGizmoLineWidth, kMaxTransformGizmoLineWidth);
+    float bestDistance = tool == TransformTool::Rotate ? rotationLineWidth * 0.5f + 1.0f : 12.0f;
     const float length = GetTransformGizmoLength(tab);
     for (TransformAxis axis : { TransformAxis::X, TransformAxis::Y, TransformAxis::Z })
     {
@@ -186,6 +187,15 @@ TransformAxis PickTransformGizmoAxis(ModelTab& tab, TransformTool tool, GizmoOri
         {
             bestDistance = distance;
             bestAxis = axis;
+        }
+    }
+    // Precise ring hits take priority over free rotation within the sphere.
+    if (bestAxis == TransformAxis::None && tool == TransformTool::Rotate)
+    {
+        const Ray ray = GetScreenToWorldRay(mouse, tab.orbit.camera);
+        if (GetRayCollisionSphere(ray, pivot, length * 0.82f).hit)
+        {
+            return TransformAxis::Center;
         }
     }
     return bestAxis;
@@ -430,6 +440,11 @@ void DrawTransformGizmo(const ModelTab& tab, TransformTool tool, const Transform
 
     const bool centerActive = state.dragging && state.axis == TransformAxis::Center;
     const Color centerColor = (editPivotMode || pivotDragInProgress) ? Color{ 255, 214, 84, 245 } : Color{ 225, 232, 238, 235 };
+    if (activeTool == TransformTool::Rotate)
+    {
+        DrawSphereEx(pivot, length * 0.82f, 16, 24,
+                     centerActive ? Color{ 255, 235, 128, 24 } : Color{ 225, 232, 238, 10 });
+    }
     DrawSphere(pivot, handleRadius * 0.65f, centerActive ? Color{ 255, 235, 128, 255 } : centerColor);
 
     for (TransformAxis axis : { TransformAxis::X, TransformAxis::Y, TransformAxis::Z })
