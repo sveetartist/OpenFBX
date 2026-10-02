@@ -87,6 +87,7 @@ constexpr float kMaxBoneOrientationLineWidth = 10.0f;
 int gCheckerSquares = 16;
 bool gUseColoredChecker = false;
 bool gShowViewportFps = true;
+bool gShowViewRotationRing = true;
 struct UvIslandCache;
 int gCheckerColor = 1;
 int gCheckerTextureSize = 1024;

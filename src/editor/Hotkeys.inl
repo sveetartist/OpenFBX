@@ -162,11 +162,15 @@ std::filesystem::path ViewportSettingsPath()
 void LoadViewportSettings(const std::filesystem::path& path = ViewportSettingsPath())
 {
     gShowViewportFps = true;
+    gShowViewRotationRing = true;
     std::ifstream input(path);
     std::string key;
     int value;
     while (input >> key >> value)
+    {
         if (key == "show_fps" && (value == 0 || value == 1)) gShowViewportFps = value != 0;
+        if (key == "show_view_rotation_ring" && (value == 0 || value == 1)) gShowViewRotationRing = value != 0;
+    }
 }
 
 bool SaveViewportSettings(const std::filesystem::path& path = ViewportSettingsPath())
@@ -176,6 +180,7 @@ bool SaveViewportSettings(const std::filesystem::path& path = ViewportSettingsPa
     if (error) return false;
     std::ofstream output(path);
     output << "show_fps " << (gShowViewportFps ? 1 : 0) << '\n';
+    output << "show_view_rotation_ring " << (gShowViewRotationRing ? 1 : 0) << '\n';
     output.close();
     return static_cast<bool>(output);
 }

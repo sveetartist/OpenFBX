@@ -62,8 +62,7 @@ void RestoreEditSnapshot(ModelTab& tab, const EditSnapshot& snapshot)
     tab.animation.contextMenuOpen = false;
     tab.animation.contextClipIndex = -1;
 
-    UnloadPbrTextures(tab);
-    tab.pbrMaterials.clear();
+    // Geometry/transform undo must leave unchanged live textures intact.
     tab.pbrMaterials.resize(snapshot.pbrMaterials.size());
     for (int materialIndex = 0; materialIndex < static_cast<int>(snapshot.pbrMaterials.size()); ++materialIndex)
     {
@@ -80,10 +79,23 @@ void RestoreEditSnapshot(ModelTab& tab, const EditSnapshot& snapshot)
         for (int slotIndex = 0; slotIndex < static_cast<int>(PbrTextureSlot::Count); ++slotIndex)
         {
             const PbrTextureSnapshot& textureSnapshot = materialSnapshot.textures[static_cast<size_t>(slotIndex)];
-            if (!textureSnapshot.loaded) continue;
+            const PbrTextureSlot slot = static_cast<PbrTextureSlot>(slotIndex);
+            const PbrTexture& current = GetPbrTexture(material, slot);
+            if (!textureSnapshot.loaded)
+            {
+                if (current.loaded) UnloadPbrTexture(tab, materialIndex, slot);
+                else ApplyPbrTextureToModel(tab, materialIndex, slot);
+                continue;
+            }
+            if (current.loaded && textureSnapshot.resource && current.resource == textureSnapshot.resource)
+            {
+                // Rebind for a workflow change without clearing or reloading the texture.
+                ApplyPbrTextureToModel(tab, materialIndex, slot);
+                continue;
+            }
 
             std::string loadError;
-            RestorePbrTexture(tab, materialIndex, static_cast<PbrTextureSlot>(slotIndex), textureSnapshot, loadError);
+            RestorePbrTexture(tab, materialIndex, slot, textureSnapshot, loadError);
         }
     }
 

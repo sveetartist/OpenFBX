@@ -273,7 +273,58 @@ int main()
             if (saveCopy)
                 Check(SaveFbxModelAnimations(packaged.path, resavedPackage.string(), packaged.loaded,
                                             packaged.deletedNodes, error), error);
+            packaged.currentVertices = packaged.loaded.bindVertices;
+            packaged.currentNormals = packaged.loaded.bindNormals;
+            for (int i = 0; i < static_cast<int>(packaged.loaded.nodes.size()); ++i)
+                if (packaged.loaded.nodes[i].type == SceneNodeType::Mesh) SetSingleSelectedNode(packaged, i);
+            const auto diffuseId = diffuse.texture.id;
+            const auto emissiveId = emissive.texture.id;
+            if (!saveCopy)
+            {
+                std::filesystem::remove(diffuse.path);
+                std::filesystem::remove(emissive.path);
+            }
+            ApplyLitShader(packaged.loaded, lit);
+            auto checkUndoTextures = [&]
+            {
+                const auto& restoredDiffuse = GetPbrTexture(packaged.pbrMaterials[0], PbrTextureSlot::Diffuse);
+                const auto& restoredEmissive = GetPbrTexture(packaged.pbrMaterials[0], PbrTextureSlot::Emissive);
+                Check(restoredDiffuse.loaded && restoredDiffuse.texture.id == diffuseId &&
+                      restoredEmissive.loaded && restoredEmissive.texture.id == emissiveId,
+                      "Repeated package undo/redo must retain the original loaded textures");
+                Check(packaged.loaded.model.materials[0].maps[MATERIAL_MAP_DIFFUSE].texture.id == diffuseId &&
+                      packaged.loaded.model.materials[0].maps[MATERIAL_MAP_EMISSION].texture.id == emissiveId,
+                      "Repeated package undo/redo must preserve viewport texture bindings");
+                BeginTextureMode(target);
+                ClearBackground(MAGENTA);
+                BeginMode3D(camera);
+                DrawMaterialModel(packaged, lit, MaterialPreviewMode::Emissive, true);
+                EndMode3D();
+                EndTextureMode();
+                Image capture = LoadImageFromTexture(target.texture);
+                const Color rendered = GetImageColor(capture, 64, 64);
+                UnloadImage(capture);
+                Check(std::abs(int(rendered.r) - RED.r) < 3 && std::abs(int(rendered.g) - RED.g) < 3 &&
+                      std::abs(int(rendered.b) - RED.b) < 3,
+                      "Repeated package undo/redo must keep textures visible in the viewport");
+            };
+            checkUndoTextures();
+            for (int step = 0; step < 8; ++step)
+            {
+                PushUndoSnapshot(packaged);
+                Vector3 pivot{};
+                Check(GetGizmoPivot(packaged, pivot), "Package fixture has no transform pivot");
+                RotateSelectedSubtree(packaged, pivot, TransformAxis::Z, Vector3{0, 0, 1}, 0.1f);
+                Check(UndoEdit(packaged), "Package rotation undo failed");
+                checkUndoTextures();
+                Check(RedoEdit(packaged), "Package rotation redo failed");
+                checkUndoTextures();
+            }
+            packaged.undoStack.clear();
+            packaged.redoStack.clear();
             UnloadPbrTextures(packaged);
+            for (int i = 0; i < packaged.loaded.model.materialCount; ++i)
+                packaged.loaded.model.materials[i].shader = Shader{rlGetShaderIdDefault(), rlGetShaderLocsDefault()};
             UnloadFbxModel(packaged.loaded);
         };
         checkPackage(packagedPath, true);

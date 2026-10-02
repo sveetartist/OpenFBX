@@ -44,7 +44,7 @@ Rectangle GetPreferencesBounds()
 bool DrawPreferences(Font font, Rectangle bounds, NavigationPreset& navigation)
 {
     static float scroll = 0;
-    constexpr float contentHeight = 492.0f;
+    constexpr float contentHeight = 524.0f;
     const float maxScroll = std::max(0.0f, contentHeight + 16.0f - bounds.height);
     if (CheckCollisionPointRec(GetMousePosition(), bounds)) scroll -= GetMouseWheelMove() * 32.0f;
     scroll = ClampFloat(scroll, 0, maxScroll);
@@ -93,6 +93,12 @@ bool DrawPreferences(Font font, Rectangle bounds, NavigationPreset& navigation)
     text("TRANSFORM GIZMO", RAYWHITE);
     numeric("Scale", gTransformGizmoScale, 0.1f, kMinTransformGizmoScale, kMaxTransformGizmoScale, 1.0f, "x");
     numeric("Thickness", gTransformGizmoLineWidth, 0.5f, kMinTransformGizmoLineWidth, kMaxTransformGizmoLineWidth, 3.0f, " px");
+    if (button(Rectangle{clip.x, y, clip.width, 26}, gShowViewRotationRing ? "[x] View rotation ring" : "[ ] View rotation ring"))
+    {
+        gShowViewRotationRing = !gShowViewRotationRing;
+        if (!SaveViewportSettings()) TraceLog(LOG_WARNING, "Could not save viewport preferences");
+    }
+    y += 32;
     text("BONE ORIENTATION", RAYWHITE);
     numeric("Scale", gBoneOrientationScale, 0.25f, kMinBoneOrientationScale, kMaxBoneOrientationScale, 1.0f, "x");
     numeric("Thickness", gBoneOrientationLineWidth, 0.5f, kMinBoneOrientationLineWidth, kMaxBoneOrientationLineWidth, 2.0f, " px");

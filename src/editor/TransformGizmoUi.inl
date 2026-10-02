@@ -59,7 +59,7 @@ float GetTransformGizmoLength(const ModelTab& tab)
 
 float GetRotationGizmoRadius(const ModelTab& tab, TransformAxis axis)
 {
-    return GetTransformGizmoLength(tab) * (axis == TransformAxis::View ? 1.05f : 0.82f);
+    return GetTransformGizmoLength(tab) * (axis == TransformAxis::View ? 0.96f : 0.82f);
 }
 
 bool GetGizmoPivot(const ModelTab& tab, Vector3& pivot)
@@ -176,7 +176,7 @@ TransformAxis PickTransformGizmoAxis(ModelTab& tab, TransformTool tool, GizmoOri
     const float length = GetTransformGizmoLength(tab);
     for (TransformAxis axis : { TransformAxis::X, TransformAxis::Y, TransformAxis::Z, TransformAxis::View })
     {
-        if (axis == TransformAxis::View && tool != TransformTool::Rotate) continue;
+        if (axis == TransformAxis::View && (tool != TransformTool::Rotate || !gShowViewRotationRing)) continue;
         float distance = std::numeric_limits<float>::max();
         if (tool == TransformTool::Rotate)
         {
@@ -458,7 +458,7 @@ void DrawTransformGizmo(const ModelTab& tab, TransformTool tool, const Transform
 
     for (TransformAxis axis : { TransformAxis::X, TransformAxis::Y, TransformAxis::Z, TransformAxis::View })
     {
-        if (axis == TransformAxis::View && activeTool != TransformTool::Rotate) continue;
+        if (axis == TransformAxis::View && (activeTool != TransformTool::Rotate || !gShowViewRotationRing)) continue;
         const bool active = state.dragging && state.axis == axis;
         const Color color = GetTransformAxisColor(axis, active);
         const Vector3 axisVector = GetTransformAxisVector(tab, axis, orientation);
