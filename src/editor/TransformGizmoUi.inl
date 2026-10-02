@@ -159,7 +159,8 @@ TransformAxis PickTransformGizmoAxis(ModelTab& tab, TransformTool tool, GizmoOri
     if (tool == TransformTool::Select || !GetGizmoPivot(tab, pivot)) return TransformAxis::None;
 
     const Vector2 pivotScreen = GetWorldToScreen(pivot, tab.orbit.camera);
-    if (Vector2Distance(mouse, pivotScreen) <= 15.0f)
+    const float centerHitRadius = tool == TransformTool::Rotate ? 15.0f : std::max(15.0f, 8.0f * gTransformGizmoScale + 3.0f);
+    if (Vector2Distance(mouse, pivotScreen) <= centerHitRadius)
     {
         return TransformAxis::Center;
     }
@@ -445,7 +446,9 @@ void DrawTransformGizmo(const ModelTab& tab, TransformTool tool, const Transform
         DrawSphereEx(pivot, length * 0.82f, 16, 24,
                      centerActive ? Color{ 255, 235, 128, 24 } : Color{ 225, 232, 238, 10 });
     }
-    DrawSphere(pivot, handleRadius * 0.65f, centerActive ? Color{ 255, 235, 128, 255 } : centerColor);
+    const float centerRadius = activeTool == TransformTool::Rotate ? handleRadius * 0.65f
+        : GetViewPlaneWorldPerPixel(tab, pivot) * 8.0f * gTransformGizmoScale;
+    DrawSphere(pivot, centerRadius, centerActive ? Color{ 255, 235, 128, 255 } : centerColor);
 
     for (TransformAxis axis : { TransformAxis::X, TransformAxis::Y, TransformAxis::Z })
     {

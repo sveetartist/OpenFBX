@@ -92,7 +92,7 @@ bool DrawPreferences(Font font, Rectangle bounds, NavigationPreset& navigation)
     text(navigation == NavigationPreset::Blender ? "Zoom: wheel | Snap: Alt while orbiting" : "Zoom: Alt+RMB / wheel | Snap: Shift");
     text("TRANSFORM GIZMO", RAYWHITE);
     numeric("Scale", gTransformGizmoScale, 0.1f, kMinTransformGizmoScale, kMaxTransformGizmoScale, 1.0f, "x");
-    numeric("Thickness", gTransformGizmoLineWidth, 0.5f, kMinTransformGizmoLineWidth, kMaxTransformGizmoLineWidth, 6.0f, " px");
+    numeric("Thickness", gTransformGizmoLineWidth, 0.5f, kMinTransformGizmoLineWidth, kMaxTransformGizmoLineWidth, 3.0f, " px");
     text("BONE ORIENTATION", RAYWHITE);
     numeric("Scale", gBoneOrientationScale, 0.25f, kMinBoneOrientationScale, kMaxBoneOrientationScale, 1.0f, "x");
     numeric("Thickness", gBoneOrientationLineWidth, 0.5f, kMinBoneOrientationLineWidth, kMaxBoneOrientationLineWidth, 2.0f, " px");
