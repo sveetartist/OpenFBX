@@ -22,6 +22,7 @@ bool GetSelectedNodeLocalAxis(const ModelTab& tab, TransformAxis axis, Vector3& 
 
 Vector3 GetTransformAxisVector(const ModelTab& tab, TransformAxis axis, GizmoOrientation orientation)
 {
+    if (axis == TransformAxis::View) return GetCameraForward(tab.orbit.camera);
     if (orientation == GizmoOrientation::Local)
     {
         Vector3 localAxis{};
@@ -36,6 +37,12 @@ bool GetTransformPlaneBasis(const ModelTab& tab,
                             Vector3& axisA,
                             Vector3& axisB)
 {
+    if (axis == TransformAxis::View)
+    {
+        axisA = GetCameraRight(tab.orbit.camera);
+        axisB = GetCameraUpVector(tab.orbit.camera);
+        return true;
+    }
     if (orientation == GizmoOrientation::Local && tab.selectedNode >= 0 && tab.selectedNode < static_cast<int>(tab.loaded.nodes.size()))
     {
         const SceneNode& node = tab.loaded.nodes[static_cast<size_t>(tab.selectedNode)];
@@ -101,6 +108,7 @@ Color GetTransformAxisColor(TransformAxis axis, bool active = false)
     case TransformAxis::X: return activeColor(Color{ 235, 74, 74, 255 });
     case TransformAxis::Y: return activeColor(Color{ 92, 210, 94, 255 });
     case TransformAxis::Z: return activeColor(Color{ 86, 142, 255, 255 });
+    case TransformAxis::View: return active ? Color{ 255, 235, 128, 255 } : Color{ 225, 232, 238, 220 };
     case TransformAxis::Center:
     case TransformAxis::None: break;
     }

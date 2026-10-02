@@ -586,6 +586,7 @@ Vector3 GetTransformAxisVector(TransformAxis axis)
     case TransformAxis::X: return Vector3{ 1.0f, 0.0f, 0.0f };
     case TransformAxis::Y: return Vector3{ 0.0f, 1.0f, 0.0f };
     case TransformAxis::Z: return Vector3{ 0.0f, 0.0f, 1.0f };
+    case TransformAxis::View:
     case TransformAxis::Center:
     case TransformAxis::None: break;
     }

@@ -235,7 +235,8 @@ enum class TransformAxis
     X,
     Y,
     Z,
-    Center
+    Center,
+    View
 };
 
 enum class GizmoOrientation
