@@ -664,6 +664,28 @@ std::vector<int> GetContextActionRoots(const ModelTab& tab, int contextNodeIndex
     return GetContextActionRoots(tab, GetContextActionNodes(tab, contextNodeIndex, contextNodeIndices));
 }
 
+int SelectContextNodeChildren(ModelTab& tab, const std::vector<int>& contextNodes)
+{
+    const auto roots = GetContextActionRoots(tab, contextNodes);
+    std::vector<int> children;
+    for (int nodeIndex = 0; nodeIndex < static_cast<int>(tab.loaded.nodes.size()); ++nodeIndex)
+    {
+        if (!IsValidSelectableNode(tab, nodeIndex)) continue;
+        for (int root : roots)
+        {
+            if (IsDescendantNode(tab.loaded, nodeIndex, root))
+            {
+                children.push_back(nodeIndex);
+                break;
+            }
+        }
+    }
+    if (children.empty()) return 0;
+    tab.selectedNodes = std::move(children);
+    tab.selectedNode = tab.selectedNodes.front();
+    return static_cast<int>(tab.selectedNodes.size());
+}
+
 int FindReparentNearestBoneParent(const LoadedFbxModel& loaded, int nodeIndex)
 {
     int parent = nodeIndex >= 0 && nodeIndex < static_cast<int>(loaded.nodes.size()) ? loaded.nodes[static_cast<size_t>(nodeIndex)].parent : -1;

@@ -345,6 +345,8 @@ void DrawHierarchyPanel(Font font,
             float itemY = menu.y;
             const Rectangle renameItem{ menu.x, itemY, menu.width, 30.0f };
             itemY += 30.0f;
+            const Rectangle selectChildrenItem{ menu.x, itemY, menu.width, 30.0f };
+            itemY += 30.0f;
             const Rectangle deleteItem{ menu.x, itemY, menu.width, 30.0f };
             itemY += 30.0f;
             const Rectangle unparentItem{ menu.x, itemY, menu.width, 30.0f };
@@ -357,6 +359,25 @@ void DrawHierarchyPanel(Font font,
                 {
                     StartRenameNode(renameEditor, active->loaded, panel.contextNodeIndex);
                 }
+                panel.contextMenuOpen = false;
+            }
+            if (!inputBlocked && DrawPanelButton(font, selectChildrenItem, "Select Children"))
+            {
+                const int selectedCount = SelectContextNodeChildren(*active, contextNodes);
+                if (selectedCount > 0)
+                {
+                    for (int nodeIndex : contextRoots)
+                        if (nodeIndex < static_cast<int>(active->collapsedNodes.size())) active->collapsedNodes[nodeIndex] = false;
+                    for (int nodeIndex : active->selectedNodes)
+                        if (nodeIndex < static_cast<int>(active->collapsedNodes.size())) active->collapsedNodes[nodeIndex] = false;
+                    RevealNodeInHierarchy(*active, panel, active->selectedNode);
+                    notice = "Selected " + std::to_string(selectedCount) + " child node" + (selectedCount == 1 ? "." : "s.");
+                }
+                else
+                {
+                    notice = "No child nodes to select.";
+                }
+                error.clear();
                 panel.contextMenuOpen = false;
             }
             if (!inputBlocked && DrawPanelButton(font, deleteItem, "Delete"))
