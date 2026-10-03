@@ -127,10 +127,11 @@ in openfbx.
 
 ## Checker view
 
-Press **V** to cycle to **Checker**, or choose **View > Checker**. The bundled
-`assets/checker.png` displays a repeating UV checker without changing materials.
-In **Preferences > Checker Texture**, adjust squares per UV tile from 2 to 128
-(default 16). More squares make each checker smaller.
+Press **V** to cycle to **Checker**, or choose **View > Checker** to display a
+repeating UV checker without changing materials. In **Preferences > Checker
+Texture**, adjust squares per UV tile from 2 to 1024 (default 16). More squares
+make each checker smaller. The generated texture grows with the square count,
+and nearest-neighbor sampling keeps the edges sharp.
 
 Enable **Preferences > Colored checker** to use the supplied labeled textures.
 Click **Color** to cycle through all five variants. The texture-size controls select

@@ -10,7 +10,7 @@ int RunOpenFbxApp(int argc, char** argv)
     ApplyWindowIcon();
     LoadHotkeys();
     LoadViewportSettings();
-    SetTargetFPS(0);
+    SetTargetFPS(60);
 
     Font uiFont = LoadTechnicalFont();
     LitShader litShader = LoadBasicLitShader();
@@ -274,13 +274,21 @@ int RunOpenFbxApp(int argc, char** argv)
         }
         const bool validationMenuOpen = activeTab >= 0 && activeTab < static_cast<int>(tabs.size()) &&
             tabs[static_cast<size_t>(activeTab)]->validationFixNode != -1;
-        const bool menuBlocksPointer = openMenu != OpenMenu::None || menuPointerCaptured || validationMenuOpen || gHotkeyEditorOpen || selectionMaskOpen;
+        const bool modalOpen = aboutVisible || gHotkeyEditorOpen || gUpdateWindowOpen;
+        const bool preferencesInputBlocked = openMenu != OpenMenu::None || menuPointerCaptured || validationMenuOpen ||
+            modalOpen || selectionMaskOpen || renameEditor.active || transformValueEditor.active ||
+            hierarchyPanel.contextMenuOpen || textureClipboard.menuOpen || transformGizmo.dragging ||
+            marquee.tab != nullptr || hierarchyPanel.resizing || hierarchyPanel.scrollDragging || logPanel.dragging;
+        const bool preferencesBlocksPointer = UpdatePreferencesWindowInput(GetMousePosition(),
+            IsMouseButtonPressed(MOUSE_BUTTON_LEFT), IsMouseButtonDown(MOUSE_BUTTON_LEFT),
+            pointerGestureActive, preferencesInputBlocked);
+        const bool menuBlocksPointer = openMenu != OpenMenu::None || menuPointerCaptured || validationMenuOpen ||
+            gHotkeyEditorOpen || selectionMaskOpen || preferencesBlocksPointer;
         openfbx::SetUiPointerBlocked(menuBlocksPointer);
 
         const bool controlDown = IsKeyDown(KEY_LEFT_CONTROL) || IsKeyDown(KEY_RIGHT_CONTROL);
         const bool shiftDown = IsKeyDown(KEY_LEFT_SHIFT) || IsKeyDown(KEY_RIGHT_SHIFT);
         const bool altDown = IsKeyDown(KEY_LEFT_ALT) || IsKeyDown(KEY_RIGHT_ALT);
-        const bool modalOpen = aboutVisible || gHotkeyEditorOpen || gUpdateWindowOpen;
         bool openRequested = !modalOpen && !renameEditor.active && !transformValueEditor.active && HotkeyPressed(HotkeyAction::Open);
         bool reloadFbxRequested = !modalOpen && !renameEditor.active && !transformValueEditor.active && HotkeyPressed(HotkeyAction::Reload);
         bool saveFbxRequested = !modalOpen && !renameEditor.active && !transformValueEditor.active && HotkeyPressed(HotkeyAction::Save);
@@ -336,7 +344,7 @@ int RunOpenFbxApp(int argc, char** argv)
                                         menuBlocksPointer || modalOpen || hierarchyPanel.contextMenuOpen || logPanel.dragging);
         const float hierarchyBlockW = GetHierarchyPanelBlockWidth(hierarchyPanel);
         const bool selectionMaskConsumedMouse = UpdateSelectionMaskInput(selectionMask, selectionMaskOpen, hierarchyBlockW,
-            openMenu != OpenMenu::None || modalOpen || renameEditor.active || transformValueEditor.active ||
+            openMenu != OpenMenu::None || modalOpen || preferencesBlocksPointer || renameEditor.active || transformValueEditor.active ||
             transformGizmo.dragging || marquee.tab != nullptr || hierarchyPanel.contextMenuOpen ||
             textureClipboard.menuOpen || validationMenuOpen || hierarchyPanel.resizing ||
             hierarchyPanel.scrollDragging || logPanel.dragging);
@@ -399,8 +407,14 @@ int RunOpenFbxApp(int argc, char** argv)
         }
         if (!modalOpen && !renameEditor.active && !transformValueEditor.active && !selectionMaskConsumedMouse && IsKeyPressed(KEY_ESCAPE))
         {
-            openMenu = OpenMenu::None;
-            if (marquee.tab) marquee = MarqueeSelectionState{};
+            if (openMenu != OpenMenu::None) openMenu = OpenMenu::None;
+            else if (gPreferencesWindow.open)
+            {
+                gPreferencesWindow.open = false;
+                gPreferencesWindow.dragging = gPreferencesWindow.resizing = false;
+                ClearPreferencesPreviews();
+            }
+            else if (marquee.tab) marquee = MarqueeSelectionState{};
             else if (active) ClearNodeSelection(*active);
         }
 
@@ -593,6 +607,12 @@ int RunOpenFbxApp(int argc, char** argv)
             UpdateMaterialShader(litShader, nullptr, MaterialPreviewMode::Shaded, false);
         }
 
+        const double previewTime = GetTime();
+        const bool checkerPreview = IsCheckerPreviewActive(previewTime);
+        const bool gizmoPreview = IsTransformGizmoPreviewActive(previewTime);
+        const ViewMode drawViewMode = GetViewportPreviewMode(viewMode, previewTime);
+        const TransformTool drawTransformTool = GetViewportPreviewTool(transformTool, previewTime);
+        const bool drawSkinWeights = visibility.skinWeights && !checkerPreview;
         BeginDrawing();
         ClearBackground(Color{ 38, 40, 43, 255 });
 
@@ -601,7 +621,7 @@ int RunOpenFbxApp(int argc, char** argv)
         DrawMeterGrid(drawOrbit);
         if (active && active->loaded.valid)
         {
-            if (active->loaded.hasMesh && visibility.geometry)
+            if (active->loaded.hasMesh && (visibility.geometry || checkerPreview))
             {
                 if (visibility.backfaceCulling)
                 {
@@ -612,41 +632,41 @@ int RunOpenFbxApp(int argc, char** argv)
                     rlDisableBackfaceCulling();
                 }
 
-                if (visibility.skinWeights)
+                if (drawSkinWeights)
                 {
                     DrawSkinWeightHeatMap(*active);
                 }
-                else if (viewMode == ViewMode::Shaded || viewMode == ViewMode::ShadedWireframe)
+                else if (drawViewMode == ViewMode::Shaded || drawViewMode == ViewMode::ShadedWireframe)
                 {
                     BeginBlendMode(BLEND_ALPHA);
                     DrawMaterialModel(*active, litShader, materialPreviewMode, visibility.textures);
                     EndBlendMode();
                 }
-                else if (viewMode == ViewMode::MaterialColors)
+                else if (drawViewMode == ViewMode::MaterialColors)
                 {
                     BeginBlendMode(BLEND_ALPHA);
                     DrawMaterialColorModel(*active, litShader);
                     EndBlendMode();
                 }
-                else if (viewMode == ViewMode::Checker)
+                else if (drawViewMode == ViewMode::Checker)
                 {
                     UpdateCheckerMaterial(checkerMaterial, appliedCheckerVariant, error);
                     DrawCheckerModel(*active, checkerMaterial);
                 }
-                else if (viewMode == ViewMode::UvIslands)
+                else if (drawViewMode == ViewMode::UvIslands)
                 {
                     DrawUvIslandColorOverlay(*active);
                 }
 
-                if (visibility.skinWeights)
+                if (drawSkinWeights)
                 {
                     DrawSkinWeightWireframe(*active);
                 }
-                else if (viewMode == ViewMode::ShadedWireframe)
+                else if (drawViewMode == ViewMode::ShadedWireframe)
                 {
                     DrawShadedMeshWireframe(*active, visibility.textures);
                 }
-                else if (viewMode == ViewMode::Wireframe)
+                else if (drawViewMode == ViewMode::Wireframe)
                 {
                     DrawVisibleMeshWireframe(*active, Color{220, 225, 230, 255});
                 }
@@ -663,13 +683,14 @@ int RunOpenFbxApp(int argc, char** argv)
             if (visibility.bones)
             {
                 DrawBones(GetVisibleBones(*active), GetVisibleBonePoses(*active), active->selectedNode, active->selectedNodes);
-                if (visibility.boneRotations)
-                {
-                    DrawBoneRotations(GetVisibleBonePoses(*active), GetBoundsDiagonal(active->loaded.bounds), active->selectedNode, active->orbit.camera);
-                }
             }
-            DrawSelectedNodeOverlay(*active, visibility, transformTool);
-            DrawTransformGizmo(*active, transformTool, transformGizmo, gizmoOrientation, editPivotMode, visibility.skinWeights);
+            if (ShouldDrawBoneOrientations(visibility, GetTime()))
+            {
+                DrawBoneRotations(GetVisibleBonePoses(*active), GetBoundsDiagonal(active->loaded.bounds), active->selectedNode, active->orbit.camera);
+            }
+            DrawSelectedNodeOverlay(*active, visibility, drawTransformTool);
+            DrawTransformGizmo(*active, drawTransformTool, transformGizmo, gizmoOrientation,
+                               gizmoPreview ? false : editPivotMode, drawSkinWeights, gizmoPreview);
             rlDrawRenderBatchActive();
             rlEnableDepthTest();
         }
@@ -691,22 +712,22 @@ int RunOpenFbxApp(int argc, char** argv)
         if (active)
         {
             char channelText[128] = {};
-            if (visibility.skinWeights)
+            if (drawSkinWeights)
             {
                 std::snprintf(channelText, sizeof(channelText), "Viewport: Skin Weights");
             }
-            else if (viewMode == ViewMode::MaterialColors)
+            else if (drawViewMode == ViewMode::MaterialColors)
             {
                 std::snprintf(channelText, sizeof(channelText), "Viewport: Material Colors");
             }
-            else if (viewMode == ViewMode::Checker)
+            else if (drawViewMode == ViewMode::Checker)
             {
                 if (gUseColoredChecker)
                     std::snprintf(channelText, sizeof(channelText), "Viewport: Colored Checker %d (%dx%d)", gCheckerColor, gCheckerTextureSize, gCheckerTextureSize);
                 else
                     std::snprintf(channelText, sizeof(channelText), "Viewport: Checker (%d squares / UV tile)", gCheckerSquares);
             }
-            else if (viewMode == ViewMode::UvIslands)
+            else if (drawViewMode == ViewMode::UvIslands)
             {
                 if (!active->loaded.uvSetNames.empty() && active->selectedUvSet >= 0 && active->selectedUvSet < static_cast<int>(active->loaded.uvSetNames.size()))
                 {
@@ -767,7 +788,7 @@ int RunOpenFbxApp(int argc, char** argv)
                            textureClipboard,
                            notice,
                            error,
-                           openMenu != OpenMenu::None || modalOpen,
+                           openMenu != OpenMenu::None || modalOpen || preferencesBlocksPointer,
                            transformGizmo.dragging);
         DrawTransformToolbar(uiFont, transformTool, gizmoOrientation, editPivotMode, hierarchyBlockW);
         DrawOrientationGizmo(uiFont, active ? active->orbit.camera : emptyOrbit.camera);
@@ -796,6 +817,7 @@ int RunOpenFbxApp(int argc, char** argv)
         bool exportJsonRequested = false;
         bool compareFbxRequested = false;
         bool aboutRequested = false;
+        DrawPreferencesWindow(uiFont, navigation, preferencesInputBlocked);
         openfbx::SetUiPointerBlocked(false);
         if (!aboutVisible && !gHotkeyEditorOpen && !gUpdateWindowOpen)
         {
@@ -816,7 +838,6 @@ int RunOpenFbxApp(int argc, char** argv)
                         aboutRequested,
                         quitRequested,
                         viewMode,
-                        navigation,
                         visibility,
                         active && !active->undoStack.empty(),
                         active && !active->redoStack.empty(),

@@ -6,6 +6,159 @@ static void Check(bool condition, const char* message)
     if (!condition) throw std::runtime_error(message);
 }
 
+static void TestBoneOrientationPreview()
+{
+    gPreferencesWindow = PreferencesWindowState{};
+    gPreferencesWindow.open = true;
+    VisibilityState visibility;
+    Check(!ShouldDrawBoneOrientations(visibility, 100), "Disabled bone orientation must start hidden");
+    PreviewBoneOrientation(100);
+    Check(ShouldDrawBoneOrientations(visibility, 100.5) && !visibility.boneRotations,
+          "Adjusting orientation must preview it without changing visibility");
+    visibility.bones = false;
+    Check(ShouldDrawBoneOrientations(visibility, 100.5) && !visibility.bones,
+          "Orientation preview must also work when the bone display is hidden");
+    PreviewBoneOrientation(100.75);
+    Check(ShouldDrawBoneOrientations(visibility, 101.5), "Continued adjustments must extend the preview");
+    Check(!ShouldDrawBoneOrientations(visibility, 101.75), "Orientation preview must expire after adjustments stop");
+    PreviewBoneOrientation(102);
+    gPreferencesWindow.open = false;
+    Check(!ShouldDrawBoneOrientations(visibility, 102.5), "Closing Preferences must stop its preview");
+    visibility.bones = visibility.boneRotations = true;
+    Check(ShouldDrawBoneOrientations(visibility, 104), "Enabled bone orientation must remain visible after preview ends");
+    visibility.bones = false;
+    Check(!ShouldDrawBoneOrientations(visibility, 104), "Normal bone visibility must apply outside the preview");
+    gPreferencesWindow = PreferencesWindowState{};
+}
+
+static void TestPreferencesWindowInteraction()
+{
+    SetWindowSize(1280, 800);
+    gPreferencesWindow = PreferencesWindowState{};
+    gPreferencesWindow.open = true;
+    gPreferencesWindow.bounds = Rectangle{200, 100, 420, 480};
+    Check(!UpdatePreferencesWindowInput(Vector2{900, 400}, true, true, true, false) && gPreferencesWindow.open,
+          "Viewport clicks must remain available without closing Preferences");
+    Check(UpdatePreferencesWindowInput(Vector2{220, 116}, true, true, true, false) && gPreferencesWindow.dragging,
+          "Dragging the title bar must capture input");
+    UpdatePreferencesWindowInput(Vector2{470, 196}, false, true, true, false);
+    Check(gPreferencesWindow.bounds.x == 450 && gPreferencesWindow.bounds.y == 180,
+          "Preferences must follow title-bar dragging");
+    Check(UpdatePreferencesWindowInput(Vector2{-100, -100}, false, false, true, false) && !gPreferencesWindow.dragging,
+          "A drag release outside Preferences must not reach the viewport");
+    Check(!UpdatePreferencesWindowInput(Vector2{900, 400}, false, false, false, false),
+          "The viewport must accept input again after a Preferences drag ends");
+
+    gPreferencesWindow.bounds = Rectangle{200, 100, 420, 480};
+    Check(UpdatePreferencesWindowInput(Vector2{618, 578}, true, true, true, false) && gPreferencesWindow.resizing,
+          "The bottom-right resize handle must capture input");
+    UpdatePreferencesWindowInput(Vector2{778, 698}, false, true, true, false);
+    Check(gPreferencesWindow.bounds.width == 580 && gPreferencesWindow.bounds.height == 600,
+          "Preferences must resize with its corner handle");
+    UpdatePreferencesWindowInput(Vector2{250, 150}, false, true, true, false);
+    Check(gPreferencesWindow.bounds.width == 320 && gPreferencesWindow.bounds.height == 180,
+          "Preferences resizing must respect the minimum readable size");
+    UpdatePreferencesWindowInput(Vector2{900, 400}, false, false, false, false);
+
+    Check(!UpdatePreferencesWindowInput(Vector2{220, 116}, true, true, true, true) && !gPreferencesWindow.dragging,
+          "Other dialogs must block Preferences input");
+    UpdatePreferencesWindowInput(Vector2{220, 116}, true, true, true, false);
+    UpdatePreferencesWindowInput(Vector2{2000, 2000}, false, true, true, false);
+    const auto moved = GetPreferencesBounds();
+    Check(moved.x + moved.width <= GetScreenWidth() - 8 && moved.y + moved.height <= GetScreenHeight() - 8,
+          "Dragging Preferences must keep the window reachable");
+    UpdatePreferencesWindowInput(Vector2{-200, -200}, false, true, true, false);
+    Check(GetPreferencesBounds().x == 8 && GetPreferencesBounds().y == 64,
+          "Preferences must stay below the menu and tabs when dragged offscreen");
+    UpdatePreferencesWindowInput(Vector2{900, 400}, false, false, false, false);
+    const auto close = GetPreferencesCloseRect(GetPreferencesBounds());
+    PreviewBoneOrientation(100);
+    PreviewTransformGizmo(100);
+    PreviewChecker(100);
+    Check(UpdatePreferencesWindowInput(Vector2{close.x + 5, close.y + 5}, true, true, true, false) &&
+          !gPreferencesWindow.open && gPreferencesWindow.boneOrientationPreviewUntil == 0 &&
+          gPreferencesWindow.gizmoPreviewUntil == 0 && gPreferencesWindow.checkerPreviewUntil == 0,
+          "Closing Preferences must consume the close click");
+    Check(UpdatePreferencesWindowInput(Vector2{900, 400}, false, false, true, false),
+          "Closing Preferences must also consume the release frame");
+    Check(!UpdatePreferencesWindowInput(Vector2{900, 400}, false, false, false, false),
+          "Closed Preferences must release input capture");
+    gPreferencesWindow.bounds = Rectangle{1000, 900, 600, 700};
+    SetWindowSize(640, 360);
+    const auto resized = GetPreferencesBounds();
+    Check(resized.x >= 8 && resized.y >= 64 && resized.x + resized.width <= 632 && resized.y + resized.height <= 352,
+          "Preferences must stay reachable after the application window shrinks");
+    gPreferencesWindow = PreferencesWindowState{};
+}
+
+static void TestViewportPreferencesPreviews()
+{
+    gPreferencesWindow = PreferencesWindowState{};
+    gPreferencesWindow.open = true;
+    const TransformTool selectedTool = TransformTool::Select;
+    PreviewPreference(PreferencePreview::Gizmo, 100);
+    Check(GetViewportPreviewTool(selectedTool, 100.5) == TransformTool::Move && selectedTool == TransformTool::Select,
+          "Gizmo preview must show handles without activating the Move tool");
+    for (const TransformTool tool : {TransformTool::Move, TransformTool::Rotate, TransformTool::Scale})
+        Check(GetViewportPreviewTool(tool, 100.5) == tool, "Gizmo adjustments must preview the current transform tool");
+    Check(GetViewportPreviewTool(selectedTool, 101) == selectedTool, "Gizmo preview must expire");
+    PreviewTransformGizmo(102, TransformTool::Rotate);
+    Check(GetViewportPreviewTool(selectedTool, 102.5) == TransformTool::Rotate,
+          "Rotation ring settings must preview the rotation gizmo");
+    PreviewPreference(PreferencePreview::Gizmo, 102.75);
+    Check(GetViewportPreviewTool(selectedTool, 103.5) == TransformTool::Move,
+          "Size adjustments must replace the rotation ring preview and extend its duration");
+    for (const ViewMode mode : {ViewMode::Shaded, ViewMode::ShadedWireframe, ViewMode::Wireframe,
+                                ViewMode::MaterialColors, ViewMode::UvIslands, ViewMode::Checker})
+    {
+        PreviewPreference(PreferencePreview::Checker, 100);
+        Check(GetViewportPreviewMode(mode, 100.5) == ViewMode::Checker, "Checker adjustments must preview on the model");
+        Check(GetViewportPreviewMode(mode, 101) == mode, "Checker preview must restore the current viewport mode");
+    }
+    PreviewChecker(102);
+    PreviewChecker(102.75);
+    Check(IsCheckerPreviewActive(103.5), "Continued checker adjustments must extend the preview");
+    gPreferencesWindow.open = false;
+    Check(!IsCheckerPreviewActive(103.5) && GetViewportPreviewTool(selectedTool, 103.5) == selectedTool,
+          "Closing Preferences must end gizmo and checker previews");
+    gPreferencesWindow.open = true;
+    ClearPreferencesPreviews();
+    Check(!IsCheckerPreviewActive(103) && !IsTransformGizmoPreviewActive(103), "Reopening Preferences must not resume old previews");
+
+    ModelTab tab;
+    tab.loaded.bounds = BoundingBox{Vector3{-1, -1, -1}, Vector3{1, 1, 1}};
+    tab.orbit.camera = Camera3D{Vector3{3, 3, 3}, Vector3{}, Vector3{0, 1, 0}, 45, CAMERA_PERSPECTIVE};
+    const RenderTexture2D target = LoadRenderTexture(256, 256);
+    const auto countGizmoPixels = [&](bool preview, float scale)
+    {
+        gTransformGizmoScale = scale;
+        BeginTextureMode(target);
+        ClearBackground(BLACK);
+        BeginMode3D(tab.orbit.camera);
+        DrawTransformGizmo(tab, TransformTool::Move, {}, GizmoOrientation::Global, false, false, preview);
+        EndMode3D();
+        EndTextureMode();
+        Image image = LoadImageFromTexture(target.texture);
+        int pixels = 0;
+        for (int y = 0; y < image.height; ++y)
+        for (int x = 0; x < image.width; ++x)
+        {
+            const Color color = GetImageColor(image, x, y);
+            if (color.r || color.g || color.b) ++pixels;
+        }
+        UnloadImage(image);
+        return pixels;
+    };
+    Check(countGizmoPixels(false, 1) == 0, "Normal gizmo drawing must still require a selection");
+    const int small = countGizmoPixels(true, 0.5f);
+    Check(small > 20 && countGizmoPixels(true, 2) > small,
+          "Gizmo preview must appear without a selection and respond to its scale setting");
+    Check(tab.selectedNode == -1 && tab.selectedNodes.empty(), "Gizmo preview must not select a model node");
+    gTransformGizmoScale = 1;
+    UnloadRenderTexture(target);
+    gPreferencesWindow = PreferencesWindowState{};
+}
+
 int main()
 {
     try
@@ -89,6 +242,9 @@ int main()
         Check(gShowViewportFps, "FPS display must default to on");
         Check(gBoneDisplayScale == 1.0f, "Missing bone display preference must preserve the original size");
         InitWindow(640, 360, "Preferences regression");
+        TestBoneOrientationPreview();
+        TestViewportPreferencesPreviews();
+        TestPreferencesWindowInteraction();
         Font font = LoadTechnicalFont();
         NavigationPreset navigation = NavigationPreset::Blender;
         const auto checkBounds = []()
@@ -105,9 +261,11 @@ int main()
             if (hotkeys) { gHotkeyEditorOpen = true; DrawHotkeyEditor(font); }
             else
             {
-                Rectangle bounds = GetPreferencesBounds();
-                if (fullPreferences) bounds.height = static_cast<float>(GetScreenHeight()) - 37;
-                DrawPreferences(font, bounds, navigation);
+                const Rectangle previousBounds = gPreferencesWindow.bounds;
+                gPreferencesWindow.open = true;
+                if (fullPreferences) gPreferencesWindow.bounds = Rectangle{186, 64, 420, static_cast<float>(GetScreenHeight()) - 72};
+                DrawPreferencesWindow(font, navigation);
+                gPreferencesWindow.bounds = previousBounds;
             }
             EndTextureMode();
             Image image = LoadImageFromTexture(target.texture);
@@ -133,7 +291,10 @@ int main()
         checkBounds();
         capture("preferences.png", false);
         capture("hotkeys.png", true);
-        SetWindowSize(800, 800);
+        gPreferencesWindow.bounds = Rectangle{350, 96, 420, 450};
+        capture("preferences-moved.png", false);
+        gPreferencesWindow = PreferencesWindowState{};
+        SetWindowSize(800, 840);
         gUseColoredChecker = false;
         capture("preferences-sliders.png", false, true);
         gUseColoredChecker = true;

@@ -224,21 +224,16 @@ void UpdateCheckerMaterial(Material& material, int& appliedVariant, std::string&
     }
     else
     {
-        if (gCheckerSquares == 16)
-        {
-            const std::string path = std::string(GetApplicationDirectory()) + "checker.png";
-            if (FileExists(path.c_str())) texture = LoadTexture(path.c_str());
-        }
-        if (texture.id == 0)
-        {
-            Image checker = GenImageChecked(512, 512, 512 / gCheckerSquares, 512 / gCheckerSquares,
-                                           Color{ 210, 210, 210, 255 }, Color{ 55, 55, 55, 255 });
-            texture = LoadTextureFromImage(checker);
-            UnloadImage(checker);
-        }
+        const int squares = ClampInt(gCheckerSquares, kMinCheckerSquares, kMaxCheckerSquares);
+        // Keep at least two texels per square, including at the highest density.
+        const int resolution = std::max(512, squares * 2);
+        const int squareSize = resolution / squares;
+        Image checker = GenImageChecked(resolution, resolution, squareSize, squareSize,
+                                       Color{ 210, 210, 210, 255 }, Color{ 55, 55, 55, 255 });
+        texture = LoadTextureFromImage(checker);
+        UnloadImage(checker);
     }
-    GenTextureMipmaps(&texture);
-    SetTextureFilter(texture, TEXTURE_FILTER_TRILINEAR);
+    SetTextureFilter(texture, TEXTURE_FILTER_POINT);
     SetTextureWrap(texture, TEXTURE_WRAP_REPEAT);
     if (appliedVariant != 0) UnloadTexture(material.maps[MATERIAL_MAP_DIFFUSE].texture);
     material.maps[MATERIAL_MAP_DIFFUSE].texture = texture;

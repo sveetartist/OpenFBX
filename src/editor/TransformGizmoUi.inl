@@ -37,7 +37,7 @@ float GetTransformGizmoLength(const ModelTab& tab)
     Vector3 pivot{};
     if (!GetSelectedNodePosition(tab, pivot))
     {
-        return ClampFloat(GetBoundsDiagonal(tab.loaded.bounds) * 0.18f, 0.15f, 2.0f);
+        return ClampFloat(GetBoundsDiagonal(tab.loaded.bounds) * 0.18f, 0.15f, 2.0f) * gTransformGizmoScale;
     }
 
     const Camera3D& camera = tab.orbit.camera;
@@ -428,7 +428,8 @@ void DrawMoveGizmoArrow(const ModelTab& tab, Vector3 start, Vector3 end, Vector3
     DrawGizmoStroke(tab, end, Vector3Subtract(base, Vector3Scale(upWing, headWidth)), color);
 }
 
-void DrawTransformGizmo(const ModelTab& tab, TransformTool tool, const TransformGizmoState& state, GizmoOrientation orientation, bool editPivotMode, bool skinWeightView = false)
+void DrawTransformGizmo(const ModelTab& tab, TransformTool tool, const TransformGizmoState& state, GizmoOrientation orientation,
+                        bool editPivotMode, bool skinWeightView = false, bool preview = false)
 {
     const bool pivotDragInProgress = state.dragging && state.pivotMode;
     const TransformTool requestedTool = editPivotMode && tool != TransformTool::Move && tool != TransformTool::Rotate ? TransformTool::Select : tool;
@@ -437,7 +438,11 @@ void DrawTransformGizmo(const ModelTab& tab, TransformTool tool, const Transform
     if ((editPivotMode || pivotDragInProgress) && !IsValidPivotNode(tab, tab.selectedNode)) return;
 
     Vector3 pivot{};
-    if (!GetGizmoPivot(tab, pivot)) return;
+    if (!GetGizmoPivot(tab, pivot))
+    {
+        if (!preview) return;
+        pivot = Vector3Scale(Vector3Add(tab.loaded.bounds.min, tab.loaded.bounds.max), 0.5f);
+    }
 
     const float length = GetTransformGizmoLength(tab);
     const float handleRadius = ClampFloat(length * 0.032f, 0.008f, 0.055f);
@@ -591,7 +596,7 @@ void DrawTransformToolbar(Font font, TransformTool tool, GizmoOrientation orient
 void DrawViewportFps(Font font)
 {
     if (!gShowViewportFps) return;
-    const Rectangle bounds{static_cast<float>(GetScreenWidth()) - 112.0f, 66.0f, 100.0f, 26.0f};
+    const Rectangle bounds{static_cast<float>(GetScreenWidth()) - 112.0f, 168.0f, 100.0f, 26.0f};
     DrawRectangleRec(bounds, Color{24, 27, 31, 255});
     DrawUiText(font, TextFormat("%d FPS", GetFPS()), bounds.x + 8.0f, bounds.y + 5.0f,
                16, Color{165, 220, 255, 255});
@@ -599,8 +604,8 @@ void DrawViewportFps(Font font)
 
 void DrawOrientationGizmo(Font font, const Camera3D& camera)
 {
-    // Reserve the top-right row for FPS and keep every axis label below the tabs.
-    const Vector2 center{ static_cast<float>(GetScreenWidth()) - 70.0f, 150.0f };
+    // Keep the gizmo at the top of the viewport, with every axis label below the tabs.
+    const Vector2 center{ static_cast<float>(GetScreenWidth()) - 70.0f, 112.0f };
     constexpr float axisLength = 38.0f;
     const Vector3 forward = Vector3Normalize(Vector3Subtract(camera.target, camera.position));
     Vector3 right = Vector3CrossProduct(forward, camera.up);

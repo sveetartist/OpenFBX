@@ -34,14 +34,161 @@ void DrawUpdateWindow(Font font)
         OpenURL("https://github.com/sveetartist/OpenFBX/releases/latest");
 }
 
-Rectangle GetPreferencesBounds()
+struct PreferencesWindowState
 {
-    const float width = std::min(420.0f, GetScreenWidth() - 16.0f);
-    return Rectangle{ std::max(8.0f, std::min(186.0f, GetScreenWidth() - width - 8.0f)),
-                      29.0f, width, std::max(60.0f, std::min(452.0f, GetScreenHeight() - 37.0f)) };
+    bool open = false;
+    bool dragging = false;
+    bool resizing = false;
+    bool pointerCaptured = false;
+    Rectangle bounds{186, 66, 420, 560};
+    Vector2 dragOffset{};
+    Vector2 resizeOffset{};
+    double boneOrientationPreviewUntil = 0;
+    double gizmoPreviewUntil = 0;
+    double checkerPreviewUntil = 0;
+    TransformTool gizmoPreviewTool = TransformTool::Select;
+};
+
+PreferencesWindowState gPreferencesWindow;
+constexpr float kPreferencesTitleHeight = 32;
+
+enum class PreferencePreview { None, BoneOrientation, Gizmo, Checker };
+
+void ClearPreferencesPreviews()
+{
+    gPreferencesWindow.boneOrientationPreviewUntil = 0;
+    gPreferencesWindow.gizmoPreviewUntil = 0;
+    gPreferencesWindow.checkerPreviewUntil = 0;
+    gPreferencesWindow.gizmoPreviewTool = TransformTool::Select;
 }
 
-bool DrawPreferences(Font font, Rectangle bounds, NavigationPreset& navigation)
+void PreviewBoneOrientation(double now)
+{
+    gPreferencesWindow.boneOrientationPreviewUntil = now + 1.0;
+}
+
+void PreviewTransformGizmo(double now, TransformTool tool = TransformTool::Select)
+{
+    gPreferencesWindow.gizmoPreviewUntil = now + 1.0;
+    gPreferencesWindow.gizmoPreviewTool = tool;
+}
+
+void PreviewChecker(double now)
+{
+    gPreferencesWindow.checkerPreviewUntil = now + 1.0;
+}
+
+void PreviewPreference(PreferencePreview preview, double now)
+{
+    switch (preview)
+    {
+    case PreferencePreview::BoneOrientation: PreviewBoneOrientation(now); break;
+    case PreferencePreview::Gizmo: PreviewTransformGizmo(now); break;
+    case PreferencePreview::Checker: PreviewChecker(now); break;
+    case PreferencePreview::None: break;
+    }
+}
+
+bool IsTransformGizmoPreviewActive(double now)
+{
+    return gPreferencesWindow.open && now < gPreferencesWindow.gizmoPreviewUntil;
+}
+
+TransformTool GetViewportPreviewTool(TransformTool tool, double now)
+{
+    if (!IsTransformGizmoPreviewActive(now)) return tool;
+    if (gPreferencesWindow.gizmoPreviewTool != TransformTool::Select) return gPreferencesWindow.gizmoPreviewTool;
+    return tool == TransformTool::Select ? TransformTool::Move : tool;
+}
+
+bool IsCheckerPreviewActive(double now)
+{
+    return gPreferencesWindow.open && now < gPreferencesWindow.checkerPreviewUntil;
+}
+
+ViewMode GetViewportPreviewMode(ViewMode mode, double now)
+{
+    return IsCheckerPreviewActive(now) ? ViewMode::Checker : mode;
+}
+
+bool ShouldDrawBoneOrientations(const VisibilityState& visibility, double now)
+{
+    return (visibility.bones && visibility.boneRotations) ||
+        (gPreferencesWindow.open && now < gPreferencesWindow.boneOrientationPreviewUntil);
+}
+
+Rectangle GetPreferencesBounds()
+{
+    Rectangle bounds = gPreferencesWindow.bounds;
+    bounds.width = ClampFloat(bounds.width, 320, static_cast<float>(GetScreenWidth()) - 16);
+    bounds.height = ClampFloat(bounds.height, 180, static_cast<float>(GetScreenHeight()) - 72);
+    bounds.x = ClampFloat(bounds.x, 8, static_cast<float>(GetScreenWidth()) - bounds.width - 8);
+    bounds.y = ClampFloat(bounds.y, 64, static_cast<float>(GetScreenHeight()) - bounds.height - 8);
+    return bounds;
+}
+
+Rectangle GetPreferencesCloseRect(Rectangle bounds)
+{
+    return Rectangle{bounds.x + bounds.width - 34, bounds.y + 4, 26, 24};
+}
+
+Rectangle GetPreferencesResizeRect(Rectangle bounds)
+{
+    return Rectangle{bounds.x + bounds.width - 16, bounds.y + bounds.height - 16, 16, 16};
+}
+
+// Capture a gesture that starts in Preferences through its release frame, even
+// when a slider, title-bar drag, resize, or close click leaves the window.
+bool UpdatePreferencesWindowInput(Vector2 mouse, bool leftPressed, bool leftDown,
+                                  bool pointerGestureActive, bool inputBlocked)
+{
+    auto& window = gPreferencesWindow;
+    if (!pointerGestureActive) window.pointerCaptured = false;
+    if (!leftDown || inputBlocked || !window.open) window.dragging = window.resizing = false;
+    if (!window.open) return window.pointerCaptured;
+    const Rectangle bounds = GetPreferencesBounds();
+    const bool hovered = CheckCollisionPointRec(mouse, bounds);
+    if (inputBlocked) return window.pointerCaptured;
+    if (hovered && pointerGestureActive &&
+        (leftPressed || IsMouseButtonPressed(MOUSE_BUTTON_RIGHT) || IsMouseButtonPressed(MOUSE_BUTTON_MIDDLE)))
+        window.pointerCaptured = true;
+    if (hovered && leftPressed)
+    {
+        if (CheckCollisionPointRec(mouse, GetPreferencesCloseRect(bounds)))
+        {
+            window.open = false;
+            ClearPreferencesPreviews();
+        }
+        else if (CheckCollisionPointRec(mouse, GetPreferencesResizeRect(bounds)))
+        {
+            window.resizing = true;
+            window.resizeOffset = Vector2{bounds.x + bounds.width - mouse.x, bounds.y + bounds.height - mouse.y};
+            window.bounds = bounds;
+        }
+        else if (mouse.y < bounds.y + kPreferencesTitleHeight)
+        {
+            window.dragging = true;
+            window.dragOffset = Vector2{mouse.x - bounds.x, mouse.y - bounds.y};
+            window.bounds = bounds;
+        }
+    }
+    if (window.dragging && leftDown)
+    {
+        window.bounds.x = mouse.x - window.dragOffset.x;
+        window.bounds.y = mouse.y - window.dragOffset.y;
+        window.bounds = GetPreferencesBounds();
+    }
+    if (window.resizing && leftDown)
+    {
+        window.bounds.width = ClampFloat(mouse.x + window.resizeOffset.x - bounds.x, 320,
+                                        static_cast<float>(GetScreenWidth()) - bounds.x - 8);
+        window.bounds.height = ClampFloat(mouse.y + window.resizeOffset.y - bounds.y, 180,
+                                         static_cast<float>(GetScreenHeight()) - bounds.y - 8);
+    }
+    return hovered || window.pointerCaptured;
+}
+
+bool DrawPreferences(Font font, Rectangle bounds, NavigationPreset& navigation, bool inputBlocked = false)
 {
     static float scroll = 0;
     static int activeSlider = -1;
@@ -50,7 +197,8 @@ bool DrawPreferences(Font font, Rectangle bounds, NavigationPreset& navigation)
     if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT) || IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) activeSlider = -1;
     constexpr float contentHeight = 692.0f;
     const float maxScroll = std::max(0.0f, contentHeight + 16.0f - bounds.height);
-    if (activeSlider < 0 && CheckCollisionPointRec(mouse, bounds)) scroll -= GetMouseWheelMove() * 32.0f;
+    if (inputBlocked) activeSlider = -1;
+    if (!inputBlocked && activeSlider < 0 && CheckCollisionPointRec(mouse, bounds)) scroll -= GetMouseWheelMove() * 32.0f;
     scroll = ClampFloat(scroll, 0, maxScroll);
     DrawRectangleRec(bounds, Color{28, 31, 35, 255});
     DrawRectangleLinesEx(bounds, 1, Color{70, 80, 90, 255});
@@ -64,7 +212,7 @@ bool DrawPreferences(Font font, Rectangle bounds, NavigationPreset& navigation)
     };
     auto button = [&](Rectangle rect, const char* label)
     {
-        openfbx::SetUiPointerBlocked(!CheckCollisionPointRec(GetMousePosition(), clip));
+        openfbx::SetUiPointerBlocked(inputBlocked || !CheckCollisionPointRec(GetMousePosition(), clip));
         const bool clicked = DrawPanelButton(font, rect, label);
         openfbx::SetUiPointerBlocked(false);
         return clicked;
@@ -76,7 +224,7 @@ bool DrawPreferences(Font font, Rectangle bounds, NavigationPreset& navigation)
         const float left = hit.x + 6;
         const float width = hit.width - 12;
         const bool hovered = CheckCollisionPointRec(mouse, clip) && CheckCollisionPointRec(mouse, hit);
-        if (hovered && openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT)) activeSlider = id;
+        if (!inputBlocked && hovered && openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT)) activeSlider = id;
         if (activeSlider == id && IsMouseButtonDown(MOUSE_BUTTON_LEFT))
         {
             const float t = ClampFloat((mouse.x - left) / width, 0, 1);
@@ -89,10 +237,14 @@ bool DrawPreferences(Font font, Rectangle bounds, NavigationPreset& navigation)
         DrawRectangleRec(Rectangle{left + width * t - 5, hit.y + 5, 10, 16}, accent);
         return value;
     };
-    auto numeric = [&](const char* label, float& value, float step, float minimum, float maximum, float defaultValue, const char* units)
+    auto numeric = [&](const char* label, float& value, float step, float minimum, float maximum, float defaultValue,
+                       const char* units, PreferencePreview preview = PreferencePreview::None)
     {
         value = slider(value, minimum, maximum, step);
-        if (button(Rectangle{clip.x + clip.width - 64, y + 20, 64, 26}, "Reset")) value = defaultValue;
+        const bool reset = button(Rectangle{clip.x + clip.width - 64, y + 20, 64, 26}, "Reset");
+        if (reset) value = defaultValue;
+        if (reset || (activeSlider == sliderIndex - 1 && IsMouseButtonDown(MOUSE_BUTTON_LEFT)))
+            PreviewPreference(preview, GetTime());
         char line[96];
         std::snprintf(line, sizeof(line), "%s: %.2f%s", label, static_cast<double>(value), units);
         DrawUiTextClipped(font, line, clip.x + 4, y + 2, 14, clip.width - 8, RAYWHITE);
@@ -113,11 +265,12 @@ bool DrawPreferences(Font font, Rectangle bounds, NavigationPreset& navigation)
     text(navigation == NavigationPreset::Blender ? "Orbit: MMB | Pan: Shift+MMB" : "Orbit: Alt+LMB | Pan: Alt+MMB");
     text(navigation == NavigationPreset::Blender ? "Zoom: wheel | Snap: Alt while orbiting" : "Zoom: Alt+RMB / wheel | Snap: Shift");
     text("TRANSFORM GIZMO", RAYWHITE);
-    numeric("Scale", gTransformGizmoScale, 0.1f, kMinTransformGizmoScale, kMaxTransformGizmoScale, 1.0f, "x");
-    numeric("Thickness", gTransformGizmoLineWidth, 0.5f, kMinTransformGizmoLineWidth, kMaxTransformGizmoLineWidth, 3.0f, " px");
+    numeric("Scale", gTransformGizmoScale, 0.1f, kMinTransformGizmoScale, kMaxTransformGizmoScale, 1.0f, "x", PreferencePreview::Gizmo);
+    numeric("Thickness", gTransformGizmoLineWidth, 0.5f, kMinTransformGizmoLineWidth, kMaxTransformGizmoLineWidth, 3.0f, " px", PreferencePreview::Gizmo);
     if (button(Rectangle{clip.x, y, clip.width, 26}, gShowViewRotationRing ? "[x] View rotation ring" : "[ ] View rotation ring"))
     {
         gShowViewRotationRing = !gShowViewRotationRing;
+        PreviewTransformGizmo(GetTime(), TransformTool::Rotate);
         if (!SaveViewportSettings()) TraceLog(LOG_WARNING, "Could not save viewport preferences");
     }
     y += 32;
@@ -127,25 +280,34 @@ bool DrawPreferences(Font font, Rectangle bounds, NavigationPreset& navigation)
     if (gBoneDisplayScale != previousBoneDisplayScale && !SaveViewportSettings())
         TraceLog(LOG_WARNING, "Could not save viewport preferences");
     text("BONE ORIENTATION", RAYWHITE);
-    numeric("Scale", gBoneOrientationScale, 0.25f, kMinBoneOrientationScale, kMaxBoneOrientationScale, 1.0f, "x");
-    numeric("Thickness", gBoneOrientationLineWidth, 0.5f, kMinBoneOrientationLineWidth, kMaxBoneOrientationLineWidth, 2.0f, " px");
+    numeric("Scale", gBoneOrientationScale, 0.25f, kMinBoneOrientationScale, kMaxBoneOrientationScale, 1.0f, "x", PreferencePreview::BoneOrientation);
+    numeric("Thickness", gBoneOrientationLineWidth, 0.5f, kMinBoneOrientationLineWidth, kMaxBoneOrientationLineWidth, 2.0f, " px", PreferencePreview::BoneOrientation);
     text("CHECKER TEXTURE", RAYWHITE);
-    if (button(Rectangle{clip.x, y, clip.width, 26}, gUseColoredChecker ? "[x] Colored checker" : "[ ] Colored checker")) gUseColoredChecker = !gUseColoredChecker;
+    if (button(Rectangle{clip.x, y, clip.width, 26}, gUseColoredChecker ? "[x] Colored checker" : "[ ] Colored checker"))
+    {
+        gUseColoredChecker = !gUseColoredChecker;
+        PreviewChecker(GetTime());
+    }
     y += 32;
     if (gUseColoredChecker)
     {
         const std::string color = "Color: " + std::to_string(gCheckerColor) + " / 5";
-        if (button(Rectangle{clip.x, y, clip.width, 26}, color.c_str())) gCheckerColor = gCheckerColor % 5 + 1;
+        if (button(Rectangle{clip.x, y, clip.width, 26}, color.c_str()))
+        {
+            gCheckerColor = gCheckerColor % 5 + 1;
+            PreviewChecker(GetTime());
+        }
     }
     else DrawUiTextClipped(font, "Monochrome checker", clip.x + 4, y + 6, 14, clip.width - 8, Color{185, 198, 210, 255});
     y += 32;
     int& size = gUseColoredChecker ? gCheckerTextureSize : gCheckerSquares;
-    const int minimumExponent = gUseColoredChecker ? 9 : 1;
-    const int maximumExponent = gUseColoredChecker ? 12 : 7;
-    const float exponent = slider(std::log2(static_cast<float>(size)), static_cast<float>(minimumExponent),
-                                  static_cast<float>(maximumExponent), 1.0f);
+    const float minimumExponent = std::log2(static_cast<float>(gUseColoredChecker ? 512 : kMinCheckerSquares));
+    const float maximumExponent = std::log2(static_cast<float>(gUseColoredChecker ? 4096 : kMaxCheckerSquares));
+    const float exponent = slider(std::log2(static_cast<float>(size)), minimumExponent, maximumExponent, 1.0f);
     size = 1 << static_cast<int>(std::round(exponent));
-    if (button(Rectangle{clip.x + clip.width - 64, y + 20, 64, 26}, "Reset")) size = gUseColoredChecker ? 1024 : 16;
+    const bool resetChecker = button(Rectangle{clip.x + clip.width - 64, y + 20, 64, 26}, "Reset");
+    if (resetChecker) size = gUseColoredChecker ? 1024 : 16;
+    if (resetChecker || (activeSlider == sliderIndex - 1 && IsMouseButtonDown(MOUSE_BUTTON_LEFT))) PreviewChecker(GetTime());
     const std::string sizeLabel = gUseColoredChecker ? "Resolution: " + std::to_string(size) + " px" : "Squares / tile: " + std::to_string(size);
     DrawUiTextClipped(font, sizeLabel.c_str(), clip.x + 4, y + 2, 14, clip.width - 8, RAYWHITE);
     y += 52;
@@ -159,6 +321,27 @@ bool DrawPreferences(Font font, Rectangle bounds, NavigationPreset& navigation)
     }
     if (edit) OpenHotkeyEditor();
     return edit;
+}
+
+void DrawPreferencesWindow(Font font, NavigationPreset& navigation, bool inputBlocked = false)
+{
+    if (!gPreferencesWindow.open) return;
+    const Rectangle bounds = GetPreferencesBounds();
+    DrawRectangleRec(Rectangle{bounds.x + 4, bounds.y + 4, bounds.width, bounds.height}, Color{0, 0, 0, 100});
+    openfbx::SetUiPointerBlocked(inputBlocked);
+    DrawPreferences(font, Rectangle{bounds.x, bounds.y + kPreferencesTitleHeight, bounds.width,
+                                   bounds.height - kPreferencesTitleHeight}, navigation,
+                    inputBlocked || gPreferencesWindow.dragging || gPreferencesWindow.resizing);
+    DrawRectangleRec(Rectangle{bounds.x, bounds.y, bounds.width, kPreferencesTitleHeight}, Color{42, 50, 59, 255});
+    DrawUiText(font, "PREFERENCES", bounds.x + 12, bounds.y + 8, 15, RAYWHITE);
+    openfbx::SetUiPointerBlocked(inputBlocked);
+    DrawPanelButton(font, GetPreferencesCloseRect(bounds), "x");
+    DrawRectangleLinesEx(bounds, 1, Color{90, 110, 130, 255});
+    for (int offset = 4; offset <= 12; offset += 4)
+        DrawLineEx(Vector2{bounds.x + bounds.width - offset, bounds.y + bounds.height - 2},
+                   Vector2{bounds.x + bounds.width - 2, bounds.y + bounds.height - offset},
+                   1, Color{130, 150, 170, 255});
+    openfbx::SetUiPointerBlocked(false);
 }
 
 void DrawMenuBar(Font font,
@@ -178,7 +361,6 @@ void DrawMenuBar(Font font,
                  bool& aboutRequested,
                  bool& quitRequested,
                  ViewMode& viewMode,
-                 NavigationPreset& navigation,
                  VisibilityState& visibility,
                  bool canUndo,
                  bool canRedo,
@@ -207,13 +389,19 @@ void DrawMenuBar(Font font,
     const Vector2 mouse = GetMousePosition();
     for (const MenuButton& button : buttons)
     {
-        const bool active = openMenu == button.menu;
+        const bool active = button.menu == OpenMenu::Preferences ? gPreferencesWindow.open : openMenu == button.menu;
         const bool hovered = CheckCollisionPointRec(mouse, button.bounds);
         DrawRectangleRec(button.bounds, active ? Color{ 52, 60, 68, 255 } : hovered ? Color{ 42, 46, 51, 255 } : Color{ 24, 26, 29, 255 });
         DrawUiText(font, button.label, button.bounds.x + 8.0f, button.bounds.y + 3.0f, 16.0f, RAYWHITE);
         if (hovered && openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT))
         {
-            openMenu = active ? OpenMenu::None : button.menu;
+            if (button.menu == OpenMenu::Preferences)
+            {
+                gPreferencesWindow.open = !gPreferencesWindow.open;
+                ClearPreferencesPreviews();
+                openMenu = OpenMenu::None;
+            }
+            else openMenu = active ? OpenMenu::None : button.menu;
         }
     }
 
@@ -230,7 +418,6 @@ void DrawMenuBar(Font font,
         openMenuBounds = Rectangle{ 124.0f, 29.0f, 230.0f, 458.0f };
         break;
     case OpenMenu::Preferences:
-        openMenuBounds = GetPreferencesBounds();
         break;
     case OpenMenu::Debug:
         openMenuBounds = Rectangle{ 308.0f, 29.0f, 230.0f, 68.0f };
@@ -389,10 +576,6 @@ void DrawMenuBar(Font font,
             visibility.bones = true;
             visibility.empties = true;
         }
-    }
-    else if (openMenu == OpenMenu::Preferences)
-    {
-        if (DrawPreferences(font, openMenuBounds, navigation)) openMenu = OpenMenu::None;
     }
     else if (openMenu == OpenMenu::Debug)
     {

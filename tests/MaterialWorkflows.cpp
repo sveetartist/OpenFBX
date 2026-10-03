@@ -7,6 +7,56 @@ static void Check(bool condition, const std::string& message)
     if (!condition) throw std::runtime_error(message);
 }
 
+static void TestUvCheckerRendering()
+{
+    gUseColoredChecker = false;
+    Material material = LoadMaterialDefault();
+    int variant = 0;
+    std::string error;
+    for (const int squares : {kMinCheckerSquares, 16, 128, 256, 512, kMaxCheckerSquares})
+    {
+        gCheckerSquares = squares;
+        UpdateCheckerMaterial(material, variant, error);
+        const Texture2D texture = material.maps[MATERIAL_MAP_DIFFUSE].texture;
+        Check(error.empty() && texture.id != 0, "UV checker texture failed to generate");
+        Check(texture.width >= squares * 2 && texture.height == texture.width,
+              "High-density UV checkers must retain distinct squares");
+        Image image = LoadImageFromTexture(texture);
+        int horizontalEdges = 0, verticalEdges = 0;
+        for (int pixel = 1; pixel < image.width; ++pixel)
+        {
+            if (GetImageColor(image, pixel, 0).r != GetImageColor(image, pixel - 1, 0).r) ++horizontalEdges;
+            if (GetImageColor(image, 0, pixel).r != GetImageColor(image, 0, pixel - 1).r) ++verticalEdges;
+        }
+        Check(horizontalEdges == squares - 1 && verticalEdges == squares - 1,
+              "UV checker density must match the selected squares-per-tile value");
+        Check(GetImageColor(image, 0, 0).r != GetImageColor(image, image.width - 1, 0).r,
+              "UV checker must alternate across repeating tile boundaries");
+        UnloadImage(image);
+    }
+    // Fractional scaling exposes smoothing: crisp checker samples retain only
+    // the two original colors, even when many squares occupy one screen pixel.
+    const RenderTexture2D target = LoadRenderTexture(137, 137);
+    const Texture2D texture = material.maps[MATERIAL_MAP_DIFFUSE].texture;
+    BeginTextureMode(target);
+    ClearBackground(BLACK);
+    DrawTexturePro(texture, Rectangle{0, 0, static_cast<float>(texture.width), static_cast<float>(texture.height)},
+                   Rectangle{0.25f, 0.25f, 137, 137}, Vector2{}, 0, WHITE);
+    EndTextureMode();
+    Image capture = LoadImageFromTexture(target.texture);
+    for (int y = 1; y < 136; ++y)
+    for (int x = 1; x < 136; ++x)
+    {
+        const Color pixel = GetImageColor(capture, x, y);
+        Check((pixel.r == 55 || pixel.r == 210) && pixel.r == pixel.g && pixel.g == pixel.b,
+              "UV checker filtering must preserve sharp, unblended square colors");
+    }
+    UnloadImage(capture);
+    UnloadRenderTexture(target);
+    UnloadMaterial(material);
+    gCheckerSquares = 16;
+}
+
 static void CreateFixture(const std::string& path, const std::string& texturePath = {})
 {
     auto* manager = FbxManager::Create();
@@ -177,6 +227,7 @@ int main()
         SetTraceLogLevel(LOG_WARNING);
         SetConfigFlags(FLAG_WINDOW_HIDDEN);
         InitWindow(640, 800, "Material workflow regression");
+        TestUvCheckerRendering();
         const auto folder = std::filesystem::temp_directory_path() / "openfbx-material-regression";
         std::filesystem::create_directories(folder);
         TestValidationTextureRepair(folder);
