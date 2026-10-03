@@ -642,10 +642,13 @@ int RunOpenFbxApp(int argc, char** argv)
                 {
                     DrawSkinWeightWireframe(*active);
                 }
-                else if (viewMode == ViewMode::ShadedWireframe || viewMode == ViewMode::Wireframe)
+                else if (viewMode == ViewMode::ShadedWireframe)
                 {
-                    DrawVisibleMeshWireframe(*active, viewMode == ViewMode::Wireframe
-                        ? Color{220, 225, 230, 255} : Color{25, 28, 31, 180});
+                    DrawShadedMeshWireframe(*active, visibility.textures);
+                }
+                else if (viewMode == ViewMode::Wireframe)
+                {
+                    DrawVisibleMeshWireframe(*active, Color{220, 225, 230, 255});
                 }
 
                 rlDisableBackfaceCulling();

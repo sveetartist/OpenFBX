@@ -49,14 +49,16 @@ void ForEachMeshNodeWireframeEdge(const LoadedFbxModel& loaded, const SceneNode&
     }
 }
 
-void DrawMeshNodeWireframe(const ModelTab& tab, const SceneNode& node, Color color)
+template <typename EdgeColor>
+void DrawMeshNodeWireframeColors(const ModelTab& tab, const SceneNode& node, EdgeColor edgeColor)
 {
     const float* vertices = GetCurrentMeshVertices(tab);
     if (!vertices) return;
     rlBegin(RL_LINES);
-    rlColor4ub(color.r, color.g, color.b, color.a);
     ForEachMeshNodeWireframeEdge(tab.loaded, node, [&](int a, int b)
     {
+        const Color color = edgeColor(a);
+        rlColor4ub(color.r, color.g, color.b, color.a);
         const int i0 = a * 3;
         const int i1 = b * 3;
         const Vector3 p0{vertices[i0], vertices[i0 + 1], vertices[i0 + 2]};
@@ -65,6 +67,11 @@ void DrawMeshNodeWireframe(const ModelTab& tab, const SceneNode& node, Color col
         rlVertex3f(p1.x, p1.y, p1.z);
     });
     rlEnd();
+}
+
+void DrawMeshNodeWireframe(const ModelTab& tab, const SceneNode& node, Color color)
+{
+    DrawMeshNodeWireframeColors(tab, node, [color](int) { return color; });
 }
 
 void DrawVisibleMeshWireframe(const ModelTab& tab, Color color)
@@ -77,7 +84,8 @@ void DrawVisibleMeshWireframe(const ModelTab& tab, Color color)
     }
 }
 
-void DrawSkinWeightWireframe(const ModelTab& tab)
+template <typename DrawWireframe>
+void DrawSurfaceMeshWireframe(DrawWireframe drawWireframe)
 {
     rlDrawRenderBatchActive();
     const Matrix projection = rlGetMatrixProjection();
@@ -91,10 +99,58 @@ void DrawSkinWeightWireframe(const ModelTab& tab)
     biased.m14 -= depthBias * projection.m15;
     rlSetMatrixProjection(biased);
     rlDisableDepthMask();
-    DrawVisibleMeshWireframe(tab, Color{20, 23, 27, 255});
+    const float previousLineWidth = rlGetLineWidth();
+    rlSetLineWidth(1.0f);
+    drawWireframe();
     rlDrawRenderBatchActive();
+    rlSetLineWidth(previousLineWidth);
     rlEnableDepthMask();
     rlSetMatrixProjection(projection);
+}
+
+void DrawSkinWeightWireframe(const ModelTab& tab)
+{
+    DrawSurfaceMeshWireframe([&] { DrawVisibleMeshWireframe(tab, Color{20, 23, 27, 255}); });
+}
+
+void DrawShadedMeshWireframe(const ModelTab& tab, bool texturesVisible = true)
+{
+    const auto hasDiffuse = [&](int materialIndex)
+    {
+        return texturesVisible && materialIndex >= 0 && materialIndex < static_cast<int>(tab.pbrMaterials.size()) &&
+            GetPbrTexture(tab.pbrMaterials[static_cast<size_t>(materialIndex)], PbrTextureSlot::Diffuse).loaded;
+    };
+    // Material batches can split a single node, so use their global vertex mappings
+    // to choose the color of each polygon rather than the node's first material.
+    std::vector<unsigned char> diffuseVertices;
+    if (texturesVisible && !tab.loaded.meshGlobalVertexIndices.empty())
+    {
+        diffuseVertices.resize(tab.loaded.bindVertices.size() / 3);
+        for (size_t meshIndex = 0; meshIndex < tab.loaded.meshGlobalVertexIndices.size(); ++meshIndex)
+        {
+            const int materialIndex = tab.loaded.model.meshMaterial && meshIndex < static_cast<size_t>(tab.loaded.model.meshCount)
+                ? tab.loaded.model.meshMaterial[meshIndex] : 0;
+            if (!hasDiffuse(materialIndex)) continue;
+            for (int vertex : tab.loaded.meshGlobalVertexIndices[meshIndex])
+                if (vertex >= 0 && vertex < static_cast<int>(diffuseVertices.size()))
+                    diffuseVertices[static_cast<size_t>(vertex)] = 1;
+        }
+    }
+    DrawSurfaceMeshWireframe([&]
+    {
+        for (int nodeIndex = 0; nodeIndex < static_cast<int>(tab.loaded.nodes.size()); ++nodeIndex)
+        {
+            const SceneNode& node = tab.loaded.nodes[nodeIndex];
+            if (node.type != SceneNodeType::Mesh || !IsViewportNodeVisible(tab, nodeIndex)) continue;
+            const int materialIndex = FindMaterialIndexByName(tab, node.materialName);
+            const bool nodeDiffuse = hasDiffuse(materialIndex < 0 ? 0 : materialIndex);
+            DrawMeshNodeWireframeColors(tab, node, [&](int vertex)
+            {
+                const bool diffuse = diffuseVertices.empty() ? nodeDiffuse : diffuseVertices[static_cast<size_t>(vertex)] != 0;
+                return diffuse ? WHITE : BLACK;
+            });
+        }
+    });
 }
 
 bool GetRayCollisionMeshNodeTriangles(const ModelTab& tab, const SceneNode& node, Ray ray, RayCollision& outHit)

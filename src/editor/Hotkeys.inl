@@ -163,6 +163,7 @@ void LoadViewportSettings(const std::filesystem::path& path = ViewportSettingsPa
 {
     gShowViewportFps = true;
     gShowViewRotationRing = true;
+    gBoneDisplayScale = 1.0f;
     std::ifstream input(path);
     std::string key;
     int value;
@@ -170,6 +171,8 @@ void LoadViewportSettings(const std::filesystem::path& path = ViewportSettingsPa
     {
         if (key == "show_fps" && (value == 0 || value == 1)) gShowViewportFps = value != 0;
         if (key == "show_view_rotation_ring" && (value == 0 || value == 1)) gShowViewRotationRing = value != 0;
+        if (key == "bone_display_size_percent" && value >= 10 && value <= 200)
+            gBoneDisplayScale = static_cast<float>(value) / 100.0f;
     }
 }
 
@@ -181,6 +184,7 @@ bool SaveViewportSettings(const std::filesystem::path& path = ViewportSettingsPa
     std::ofstream output(path);
     output << "show_fps " << (gShowViewportFps ? 1 : 0) << '\n';
     output << "show_view_rotation_ring " << (gShowViewRotationRing ? 1 : 0) << '\n';
+    output << "bone_display_size_percent " << static_cast<int>(std::lround(gBoneDisplayScale * 100.0f)) << '\n';
     output.close();
     return static_cast<bool>(output);
 }

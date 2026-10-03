@@ -92,6 +92,7 @@ void DrawBones(const std::vector<BoneSegment>& bones, const std::vector<BonePose
         }
         radius = ClampFloat(totalLength / static_cast<float>(bones.size()) * 0.06f, 0.015f, 0.12f);
     }
+    radius *= gBoneDisplayScale;
 
     for (const BoneSegment& bone : bones)
     {

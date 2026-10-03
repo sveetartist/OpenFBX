@@ -476,6 +476,10 @@ static int BenchmarkFbx(const char* path, const std::string& selection = "bone",
     std::string textureError;
     LoadImportedPbrTextures(tab, textureError);
     AutoLoadModelTextures(tab);
+    renderStage("Textured shaded viewport and wireframe", [&] {
+        DrawMaterialModel(tab, lit, MaterialPreviewMode::Shaded, true);
+        DrawShadedMeshWireframe(tab);
+    });
     renderStage("Shaded viewport and rotation gizmo", [&] {
         DrawMaterialModel(tab, lit, MaterialPreviewMode::Shaded, true);
         DrawBones(GetVisibleBones(tab), GetVisibleBonePoses(tab), tab.selectedNode, tab.selectedNodes);
@@ -959,6 +963,122 @@ static void TestSkinWeightWireframeRendering()
     UnloadImage(heatmap);
     UnloadImage(wireframe);
     UnloadRenderTexture(target);
+    CloseWindow();
+}
+
+static void TestTexturedShadedWireframeRendering()
+{
+    SetConfigFlags(FLAG_WINDOW_HIDDEN);
+    InitWindow(256, 256, "Textured shaded wireframe regression");
+    ModelTab tab;
+    tab.loaded.hasMesh = true;
+    tab.loaded.bindVertices = {-1,-1,0, 1,-1,0, 1,1,0, -1,-1,0, 1,1,0, -1,1,0,
+        -0.4f,-0.4f,-1, 0.4f,-0.4f,-1, 0,0.4f,-1};
+    tab.loaded.nodes.resize(1);
+    auto& node = tab.loaded.nodes[0];
+    node.type = SceneNodeType::Mesh;
+    node.meshVertexStart = 0;
+    node.meshVertexCount = 9;
+    tab.pbrMaterials.resize(2);
+    GetPbrTexture(tab.pbrMaterials[0], PbrTextureSlot::Diffuse).loaded = true;
+    GetPbrTexture(tab.pbrMaterials[1], PbrTextureSlot::Normal).loaded = true;
+    Mesh mesh{};
+    mesh.vertexCount = 9;
+    mesh.triangleCount = 3;
+    mesh.vertices = static_cast<float*>(MemAlloc(static_cast<unsigned int>(tab.loaded.bindVertices.size() * sizeof(float))));
+    std::copy(tab.loaded.bindVertices.begin(), tab.loaded.bindVertices.end(), mesh.vertices);
+    mesh.texcoords = static_cast<float*>(MemAlloc(18 * sizeof(float)));
+    for (int vertex = 0; vertex < 9; ++vertex)
+    {
+        mesh.texcoords[vertex * 2] = (mesh.vertices[vertex * 3] + 1) * 0.5f;
+        mesh.texcoords[vertex * 2 + 1] = (mesh.vertices[vertex * 3 + 1] + 1) * 0.5f;
+    }
+    UploadMesh(&mesh, false);
+    Image checker = GenImageChecked(64, 64, 32, 64, Color{35, 35, 35, 255}, Color{225, 225, 225, 255});
+    const Texture2D texture = LoadTextureFromImage(checker);
+    UnloadImage(checker);
+    Material material = LoadMaterialDefault();
+    const Texture2D defaultDiffuse = material.maps[MATERIAL_MAP_DIFFUSE].texture;
+    material.maps[MATERIAL_MAP_DIFFUSE].texture = texture;
+    const Camera3D camera{Vector3{0,0,4}, Vector3{}, Vector3{0,1,0}, 45, CAMERA_PERSPECTIVE};
+    const RenderTexture2D target = LoadRenderTexture(256, 256);
+    const auto render = [&](bool wireframe, bool texturesVisible = true)
+    {
+        BeginTextureMode(target);
+        ClearBackground(Color{38, 40, 43, 255});
+        BeginMode3D(camera);
+        rlDisableBackfaceCulling();
+        material.maps[MATERIAL_MAP_DIFFUSE].texture = texturesVisible ? texture : defaultDiffuse;
+        DrawMesh(mesh, material, MatrixIdentity());
+        if (wireframe)
+        {
+            rlSetLineWidth(2.0f);
+            DrawShadedMeshWireframe(tab, texturesVisible);
+            Require(std::fabs(rlGetLineWidth() - 2.0f) < 0.001f, "Wireframe overlay changed the line width of subsequent drawing");
+            rlSetLineWidth(1.0f);
+        }
+        EndMode3D();
+        EndTextureMode();
+        Image image = LoadImageFromTexture(target.texture);
+        ImageFlipVertical(&image);
+        return image;
+    };
+    Image surface = render(false);
+    Image wireframe = render(true);
+    int visibleOnDark = 0, visibleOnLight = 0;
+    for (int y = 0; y < 256; ++y)
+    for (int x = 0; x < 256; ++x)
+    {
+        const Color before = GetImageColor(surface, x, y);
+        const Color after = GetImageColor(wireframe, x, y);
+        if (before.r == 35 && after.r > 200) ++visibleOnDark;
+        if (before.r == 225 && after.r == 255) ++visibleOnLight;
+    }
+    Require(visibleOnDark > 40, "Shaded wireframe must contrast with dark textures");
+    Require(visibleOnLight > 40, "Diffuse-textured meshes must have white wireframe on light textures too");
+    const Vector2 rearEdge = GetWorldToScreen(Vector3{0, -0.4f, -1}, camera);
+    const int rearX = static_cast<int>(rearEdge.x), rearY = static_cast<int>(rearEdge.y);
+    const Color before = GetImageColor(surface, rearX, rearY);
+    const Color after = GetImageColor(wireframe, rearX, rearY);
+    Require(before.r == after.r && before.g == after.g && before.b == after.b,
+        "Shaded wireframe exposed edges behind the textured surface");
+    ExportImage(wireframe, (std::filesystem::temp_directory_path() / "openfbx-textured-shaded-wireframe.png").string().c_str());
+    const auto edgeHasColor = [&](Image image, Vector3 point, Color color)
+    {
+        const Vector2 screen = GetWorldToScreen(point, camera);
+        for (int y = static_cast<int>(screen.y) - 2; y <= static_cast<int>(screen.y) + 2; ++y)
+        for (int x = static_cast<int>(screen.x) - 2; x <= static_cast<int>(screen.x) + 2; ++x)
+        {
+            const Color pixel = GetImageColor(image, x, y);
+            if (pixel.r == color.r && pixel.g == color.g && pixel.b == color.b) return true;
+        }
+        return false;
+    };
+    Image untextured = render(true, false);
+    Require(edgeHasColor(untextured, Vector3{1, 0, 0}, BLACK), "Disabling textures must switch shaded wireframe to black");
+    ExportImage(untextured, (std::filesystem::temp_directory_path() / "openfbx-untextured-shaded-wireframe.png").string().c_str());
+    int materialIndices[] = {0, 1};
+    tab.loaded.model.meshCount = 2;
+    tab.loaded.model.meshMaterial = materialIndices;
+    tab.loaded.meshGlobalVertexIndices = {{0, 1, 2, 6, 7, 8}, {3, 4, 5}};
+    Image mixed = render(true);
+    Require(edgeHasColor(mixed, Vector3{1, 0, 0}, WHITE), "Diffuse material in a shared node must use white wireframe");
+    Require(edgeHasColor(mixed, Vector3{-1, 0, 0}, BLACK), "Material without diffuse must use black wireframe even with a normal map");
+    ExportImage(mixed, (std::filesystem::temp_directory_path() / "openfbx-mixed-shaded-wireframe.png").string().c_str());
+    GetPbrTexture(tab.pbrMaterials[0], PbrTextureSlot::Diffuse).loaded = false;
+    Image cleared = render(true);
+    Require(edgeHasColor(cleared, Vector3{1, 0, 0}, BLACK), "Removing diffuse must immediately switch wireframe to black");
+    tab.loaded.model.meshCount = 0;
+    tab.loaded.model.meshMaterial = nullptr;
+    UnloadImage(surface);
+    UnloadImage(wireframe);
+    UnloadImage(untextured);
+    UnloadImage(mixed);
+    UnloadImage(cleared);
+    UnloadRenderTexture(target);
+    material.maps[MATERIAL_MAP_DIFFUSE].texture = texture;
+    UnloadMaterial(material);
+    UnloadMesh(mesh);
     CloseWindow();
 }
 
@@ -1499,6 +1619,7 @@ int main(int argc, char** argv)
         TestAppliedBoneScaleSurvivesBindReset();
         TestAttachedMeshBoneTransforms();
         TestSkinWeightWireframeRendering();
+        TestTexturedShadedWireframeRendering();
         TestValidationCache();
         TestVisibility();
         TestMarqueeSelection();

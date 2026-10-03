@@ -71,9 +71,23 @@ int main()
         gShowViewportFps = true;
         LoadViewportSettings(viewportPath);
         Check(!gShowViewportFps, "Explicitly disabled FPS preference must survive reload");
+        gBoneDisplayScale = 0.3f;
+        Check(SaveViewportSettings(viewportPath), "Bone display size must save");
+        gBoneDisplayScale = 1.0f;
+        LoadViewportSettings(viewportPath);
+        Check(std::fabs(gBoneDisplayScale - 0.3f) < 0.0001f && !gShowViewportFps,
+              "Smaller bone display size must survive reload alongside existing preferences");
+        {
+            std::ofstream settings(viewportPath);
+            settings << "bone_display_size_percent 0\nshow_fps 0\nshow_view_rotation_ring 0\n";
+        }
+        LoadViewportSettings(viewportPath);
+        Check(gBoneDisplayScale == 1.0f && !gShowViewportFps && !gShowViewRotationRing,
+              "Invalid bone display size must use the default without disrupting other preferences");
         std::filesystem::remove(viewportPath);
         LoadViewportSettings(viewportPath);
         Check(gShowViewportFps, "FPS display must default to on");
+        Check(gBoneDisplayScale == 1.0f, "Missing bone display preference must preserve the original size");
         InitWindow(640, 360, "Preferences regression");
         Font font = LoadTechnicalFont();
         NavigationPreset navigation = NavigationPreset::Blender;
@@ -83,13 +97,18 @@ int main()
             Check(bounds.x >= 0 && bounds.y >= 0 && bounds.x + bounds.width <= GetScreenWidth() &&
                   bounds.y + bounds.height <= GetScreenHeight(), "Preferences must stay inside the window");
         };
-        const auto capture = [&](const char* name, bool hotkeys)
+        const auto capture = [&](const char* name, bool hotkeys, bool fullPreferences = false)
         {
             RenderTexture2D target = LoadRenderTexture(GetScreenWidth(), GetScreenHeight());
             BeginTextureMode(target);
             ClearBackground(Color{40, 44, 50, 255});
             if (hotkeys) { gHotkeyEditorOpen = true; DrawHotkeyEditor(font); }
-            else DrawPreferences(font, GetPreferencesBounds(), navigation);
+            else
+            {
+                Rectangle bounds = GetPreferencesBounds();
+                if (fullPreferences) bounds.height = static_cast<float>(GetScreenHeight()) - 37;
+                DrawPreferences(font, bounds, navigation);
+            }
             EndTextureMode();
             Image image = LoadImageFromTexture(target.texture);
             ImageFlipVertical(&image);
@@ -114,6 +133,13 @@ int main()
         checkBounds();
         capture("preferences.png", false);
         capture("hotkeys.png", true);
+        SetWindowSize(800, 800);
+        gUseColoredChecker = false;
+        capture("preferences-sliders.png", false, true);
+        gUseColoredChecker = true;
+        capture("preferences-sliders-colored.png", false, true);
+        gUseColoredChecker = false;
+        SetWindowSize(800, 600);
         // Capture the overlays with the toolbar and tab strip drawn as in the app.
         gShowViewportFps = true;
         RenderTexture2D overlays = LoadRenderTexture(800, 600);

@@ -44,9 +44,13 @@ Rectangle GetPreferencesBounds()
 bool DrawPreferences(Font font, Rectangle bounds, NavigationPreset& navigation)
 {
     static float scroll = 0;
-    constexpr float contentHeight = 524.0f;
+    static int activeSlider = -1;
+    int sliderIndex = 0;
+    const Vector2 mouse = GetMousePosition();
+    if (!IsMouseButtonDown(MOUSE_BUTTON_LEFT) || IsMouseButtonPressed(MOUSE_BUTTON_LEFT)) activeSlider = -1;
+    constexpr float contentHeight = 692.0f;
     const float maxScroll = std::max(0.0f, contentHeight + 16.0f - bounds.height);
-    if (CheckCollisionPointRec(GetMousePosition(), bounds)) scroll -= GetMouseWheelMove() * 32.0f;
+    if (activeSlider < 0 && CheckCollisionPointRec(mouse, bounds)) scroll -= GetMouseWheelMove() * 32.0f;
     scroll = ClampFloat(scroll, 0, maxScroll);
     DrawRectangleRec(bounds, Color{28, 31, 35, 255});
     DrawRectangleLinesEx(bounds, 1, Color{70, 80, 90, 255});
@@ -65,16 +69,34 @@ bool DrawPreferences(Font font, Rectangle bounds, NavigationPreset& navigation)
         openfbx::SetUiPointerBlocked(false);
         return clicked;
     };
-    auto numeric = [&](const char* label, auto& value, auto step, auto minimum, auto maximum, auto defaultValue, const char* units)
+    auto slider = [&](float value, float minimum, float maximum, float step)
     {
+        const int id = sliderIndex++;
+        const Rectangle hit{clip.x + 4, y + 20, std::max(16.0f, clip.width - 80), 26};
+        const float left = hit.x + 6;
+        const float width = hit.width - 12;
+        const bool hovered = CheckCollisionPointRec(mouse, clip) && CheckCollisionPointRec(mouse, hit);
+        if (hovered && openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT)) activeSlider = id;
+        if (activeSlider == id && IsMouseButtonDown(MOUSE_BUTTON_LEFT))
+        {
+            const float t = ClampFloat((mouse.x - left) / width, 0, 1);
+            value = ClampFloat(minimum + std::round(t * (maximum - minimum) / step) * step, minimum, maximum);
+        }
+        const float t = ClampFloat((value - minimum) / (maximum - minimum), 0, 1);
+        const Color accent = activeSlider == id || hovered ? Color{125, 190, 240, 255} : Color{85, 150, 205, 255};
+        DrawRectangleRec(Rectangle{left, hit.y + 11, width, 4}, Color{55, 64, 74, 255});
+        DrawRectangleRec(Rectangle{left, hit.y + 11, width * t, 4}, accent);
+        DrawRectangleRec(Rectangle{left + width * t - 5, hit.y + 5, 10, 16}, accent);
+        return value;
+    };
+    auto numeric = [&](const char* label, float& value, float step, float minimum, float maximum, float defaultValue, const char* units)
+    {
+        value = slider(value, minimum, maximum, step);
+        if (button(Rectangle{clip.x + clip.width - 64, y + 20, 64, 26}, "Reset")) value = defaultValue;
         char line[96];
-        std::snprintf(line, sizeof(line), "%s: %.1f%s", label, static_cast<double>(value), units);
-        const float controlsX = clip.x + clip.width - 128;
-        DrawUiTextClipped(font, line, clip.x + 4, y + 6, 14, clip.width - 138, RAYWHITE);
-        if (button(Rectangle{controlsX, y, 28, 26}, "-")) value = std::max(minimum, value - step);
-        if (button(Rectangle{controlsX + 32, y, 28, 26}, "+")) value = std::min(maximum, value + step);
-        if (button(Rectangle{controlsX + 64, y, 64, 26}, "Reset")) value = defaultValue;
-        y += 32;
+        std::snprintf(line, sizeof(line), "%s: %.2f%s", label, static_cast<double>(value), units);
+        DrawUiTextClipped(font, line, clip.x + 4, y + 2, 14, clip.width - 8, RAYWHITE);
+        y += 52;
     };
     text("VIEWPORT", RAYWHITE);
     if (button(Rectangle{clip.x, y, clip.width, 26}, gShowViewportFps ? "[x] Show FPS" : "[ ] Show FPS"))
@@ -99,6 +121,11 @@ bool DrawPreferences(Font font, Rectangle bounds, NavigationPreset& navigation)
         if (!SaveViewportSettings()) TraceLog(LOG_WARNING, "Could not save viewport preferences");
     }
     y += 32;
+    text("BONE DISPLAY", RAYWHITE);
+    const float previousBoneDisplayScale = gBoneDisplayScale;
+    numeric("Size", gBoneDisplayScale, 0.1f, kMinBoneDisplayScale, kMaxBoneDisplayScale, 1.0f, "x");
+    if (gBoneDisplayScale != previousBoneDisplayScale && !SaveViewportSettings())
+        TraceLog(LOG_WARNING, "Could not save viewport preferences");
     text("BONE ORIENTATION", RAYWHITE);
     numeric("Scale", gBoneOrientationScale, 0.25f, kMinBoneOrientationScale, kMaxBoneOrientationScale, 1.0f, "x");
     numeric("Thickness", gBoneOrientationLineWidth, 0.5f, kMinBoneOrientationLineWidth, kMaxBoneOrientationLineWidth, 2.0f, " px");
@@ -113,13 +140,15 @@ bool DrawPreferences(Font font, Rectangle bounds, NavigationPreset& navigation)
     else DrawUiTextClipped(font, "Monochrome checker", clip.x + 4, y + 6, 14, clip.width - 8, Color{185, 198, 210, 255});
     y += 32;
     int& size = gUseColoredChecker ? gCheckerTextureSize : gCheckerSquares;
+    const int minimumExponent = gUseColoredChecker ? 9 : 1;
+    const int maximumExponent = gUseColoredChecker ? 12 : 7;
+    const float exponent = slider(std::log2(static_cast<float>(size)), static_cast<float>(minimumExponent),
+                                  static_cast<float>(maximumExponent), 1.0f);
+    size = 1 << static_cast<int>(std::round(exponent));
+    if (button(Rectangle{clip.x + clip.width - 64, y + 20, 64, 26}, "Reset")) size = gUseColoredChecker ? 1024 : 16;
     const std::string sizeLabel = gUseColoredChecker ? "Resolution: " + std::to_string(size) + " px" : "Squares / tile: " + std::to_string(size);
-    DrawUiTextClipped(font, sizeLabel.c_str(), clip.x + 4, y + 6, 14, clip.width - 138, RAYWHITE);
-    const float controlsX = clip.x + clip.width - 128;
-    if (button(Rectangle{controlsX, y, 28, 26}, "-")) size = std::max(gUseColoredChecker ? 512 : 2, size / 2);
-    if (button(Rectangle{controlsX + 32, y, 28, 26}, "+")) size = std::min(gUseColoredChecker ? 4096 : 128, size * 2);
-    if (button(Rectangle{controlsX + 64, y, 64, 26}, "Reset")) size = gUseColoredChecker ? 1024 : 16;
-    y += 40;
+    DrawUiTextClipped(font, sizeLabel.c_str(), clip.x + 4, y + 2, 14, clip.width - 8, RAYWHITE);
+    y += 52;
     const bool edit = button(Rectangle{clip.x, y, clip.width, 28}, "Edit Hotkeys...");
     EndScissorMode();
     if (maxScroll > 0)
