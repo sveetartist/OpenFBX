@@ -901,22 +901,62 @@ void ValidateTexelDensityConsistency(const ModelTab& tab, std::vector<ValidatorI
 
 void RefreshUvMeshBuffers(ModelTab& tab)
 {
-    if (tab.loaded.uvSets.empty()) return;
-    const auto& uv = tab.loaded.uvSets.front();
     for (int m = 0; m < tab.loaded.model.meshCount; ++m)
     {
+        const int material = tab.loaded.model.meshMaterial ? tab.loaded.model.meshMaterial[m] : 0;
         if (m >= static_cast<int>(tab.loaded.meshGlobalVertexIndices.size())) continue;
         Mesh& mesh = tab.loaded.model.meshes[m];
         if (!mesh.texcoords) continue;
         const auto& indices = tab.loaded.meshGlobalVertexIndices[m];
         for (size_t v = 0; v < indices.size() && v < static_cast<size_t>(mesh.vertexCount); ++v)
         {
+            const int set = GetMaterialVertexUvSetIndex(tab, material, indices[v]);
+            if (set < 0)
+            {
+                mesh.texcoords[v * 2] = mesh.texcoords[v * 2 + 1] = 0.0f;
+                continue;
+            }
+            const auto& uv = tab.loaded.uvSets[set];
             const size_t base = static_cast<size_t>(indices[v]) * 2;
             mesh.texcoords[v * 2] = base + 1 < uv.size() ? uv[base] : 0.0f;
             mesh.texcoords[v * 2 + 1] = base + 1 < uv.size() ? uv[base + 1] : 0.0f;
         }
         UpdateMeshBuffer(mesh, 1, mesh.texcoords, mesh.vertexCount * 2 * sizeof(float), 0);
     }
+}
+
+bool DeleteUvSet(ModelTab& tab, int set)
+{
+    auto& loaded = tab.loaded;
+    if (set < 0 || set >= static_cast<int>(loaded.uvSets.size())) return false;
+    const std::string name = set < static_cast<int>(loaded.uvSetNames.size()) ? loaded.uvSetNames[set] : "";
+    PushUndoSnapshot(tab);
+    loaded.uvSets.erase(loaded.uvSets.begin() + set);
+    if (set < static_cast<int>(loaded.uvSetNames.size())) loaded.uvSetNames.erase(loaded.uvSetNames.begin() + set);
+    if (set < static_cast<int>(loaded.uvSetPresence.size())) loaded.uvSetPresence.erase(loaded.uvSetPresence.begin() + set);
+    for (int& index : loaded.defaultUvSetIndices)
+    {
+        if (index == set) index = -1;
+        else if (index > set) --index;
+    }
+    for (auto& material : tab.pbrMaterials)
+        if (!name.empty() && material.uvSetName == name) material.uvSetName.clear();
+    // Resolve defaults whose channel was deleted using a remaining channel present
+    // on that vertex. Leave -1 where the mesh no longer has UVs.
+    for (size_t vertex = 0; vertex < loaded.defaultUvSetIndices.size(); ++vertex)
+        if (loaded.defaultUvSetIndices[vertex] < 0)
+            loaded.defaultUvSetIndices[vertex] = GetMaterialVertexUvSetIndex(tab, -1, static_cast<int>(vertex));
+    loaded.uvSetsEdited = true;
+    if (tab.selectedUvSet > set) --tab.selectedUvSet;
+    tab.selectedUvSet = std::max(0, std::min(tab.selectedUvSet, static_cast<int>(loaded.uvSets.size()) - 1));
+    tab.uvSetScroll = std::max(0, std::min(tab.uvSetScroll, static_cast<int>(loaded.uvSets.size()) - 1));
+    tab.uvContextSet = -1;
+    tab.selectedUvIslands.clear();
+    tab.uvIslandMarqueeSelecting = false;
+    tab.viewportUvIslandCache = ViewportUvIslandCache{};
+    RefreshUvMeshBuffers(tab);
+    RefreshDisplayedMesh(tab);
+    return true;
 }
 
 void CombineAllUvSets(ModelTab& tab, int preferred, bool recordUndo)
@@ -945,6 +985,8 @@ void CombineAllUvSets(ModelTab& tab, int preferred, bool recordUndo)
     loaded.uvSets = { std::move(combined) };
     loaded.uvSetPresence = { std::move(presence) };
     loaded.uvSetNames = { name };
+    loaded.defaultUvSetIndices.assign(count, 0);
+    for (auto& material : tab.pbrMaterials) material.uvSetName = name;
     loaded.uvSetsEdited = true;
     tab.selectedUvSet = 0;
     tab.uvSetScroll = 0;
@@ -956,6 +998,160 @@ void CombineAllUvSets(ModelTab& tab, int preferred, bool recordUndo)
     RefreshDisplayedMesh(tab);
 }
 
+struct UvRepackReport
+{
+    int processedIslands = 0;
+    int skippedIslands = 0;
+    int uvSet = -1;
+    std::string uvSetName;
+    std::string error;
+};
+
+bool PackUvIslands(ModelTab& tab, int uvSet, const std::vector<UvTriangleSample>& triangles, bool averageDensity, bool recordUndo,
+                   UvRepackReport* report = nullptr, bool repack = true, bool createUvSet = false)
+{
+    if (report) *report = {};
+    auto fail = [&](const char* message) { if (report) report->error = message; return false; };
+    if (uvSet < 0 || uvSet >= static_cast<int>(tab.loaded.uvSets.size())) return fail("The selected UV set is unavailable.");
+    auto& uvs = tab.loaded.uvSets[uvSet];
+    for (const auto& triangle : triangles)
+        for (const auto& uv : triangle.uv)
+            if (!std::isfinite(uv.x) || !std::isfinite(uv.y)) return fail("The UV set contains non-finite coordinates. Repair them before editing islands.");
+    const auto islands = CalculateUvIslandStats(triangles, 1, 1);
+    if (islands.empty()) return fail("No active mesh faces have UVs in this set. Choose another UV set or combine complementary sets.");
+
+    // A common final scale preserves relative density after averaging the islands.
+    struct Box { int island; double scale, width, height; Vector2 origin{}; };
+    std::vector<Box> boxes;
+    double maxDimension = 0;
+    double totalUvArea = 0, totalSurfaceArea = 0;
+    for (int i = 0; i < static_cast<int>(islands.size()); ++i)
+    {
+        const auto& island = islands[i];
+        double uvArea = 0, surfaceArea = 0;
+        for (int t : island.triangles)
+        {
+            const auto& triangle = triangles[t];
+            const double u1 = double(triangle.uv[1].x)-triangle.uv[0].x, v1 = double(triangle.uv[1].y)-triangle.uv[0].y,
+                         u2 = double(triangle.uv[2].x)-triangle.uv[0].x, v2 = double(triangle.uv[2].y)-triangle.uv[0].y;
+            uvArea += std::abs(u1*v2-v1*u2)*.5;
+            const double x1 = double(triangle.position[1].x)-triangle.position[0].x,
+                         y1 = double(triangle.position[1].y)-triangle.position[0].y,
+                         z1 = double(triangle.position[1].z)-triangle.position[0].z,
+                         x2 = double(triangle.position[2].x)-triangle.position[0].x,
+                         y2 = double(triangle.position[2].y)-triangle.position[0].y,
+                         z2 = double(triangle.position[2].z)-triangle.position[0].z;
+            surfaceArea += std::hypot(y1*z2-z1*y2,z1*x2-x1*z2,x1*y2-y1*x2)*.5;
+        }
+        if (uvArea <= 0 || !std::isfinite(uvArea) ||
+            (averageDensity && (surfaceArea <= 0 || !std::isfinite(surfaceArea))))
+        { if (report) ++report->skippedIslands; continue; }
+        const double scale = averageDensity ? std::sqrt(surfaceArea/uvArea) : 1;
+        const double width = (double(island.maxU)-island.minU)*scale;
+        const double height = (double(island.maxV)-island.minV)*scale;
+        if (!std::isfinite(width) || !std::isfinite(height)) return fail("Island dimensions cannot be represented safely. Repair its UVs or geometry.");
+        boxes.push_back(Box{ i, scale, width, height });
+        totalUvArea += uvArea; totalSurfaceArea += surfaceArea;
+        maxDimension = std::max(maxDimension, std::max(width, height));
+    }
+    if (boxes.empty() || maxDimension <= 0)
+        return fail("All islands in this UV set are degenerate (zero UV or surface area). Choose another set or repair those faces.");
+    std::stable_sort(boxes.begin(), boxes.end(), [](const Box& a, const Box& b) { return a.height > b.height; });
+    double low = 1;
+    if (!repack)
+    {
+        // Equalize density while preserving the total UV area of valid islands.
+        const double targetDensity = std::sqrt(totalUvArea/totalSurfaceArea);
+        for (auto& box : boxes) box.scale *= targetDensity;
+    }
+    else
+    {
+        const double padding = std::min(0.002,0.1/double(boxes.size()+1));
+        auto place = [&](double scale)
+        {
+            double x = padding, y = padding, rowHeight = 0;
+            for (auto& box : boxes)
+            {
+                const double width = box.width*scale, height = box.height*scale;
+                if (x + width + padding > 1.0f) { x = padding; y += rowHeight + padding; rowHeight = 0.0f; }
+                if (x + width + padding > 1.0f || y + height + padding > 1.0f) return false;
+                box.origin = Vector2{float(x),float(y)};
+                x += width + padding;
+                rowHeight = std::max(rowHeight, height);
+            }
+            return true;
+        };
+        low = 0; double high = 1/maxDimension;
+        for (int iteration = 0; iteration < 48; ++iteration)
+        {
+            const double middle = (low+high)*.5;
+            if (place(middle)) low = middle; else high = middle;
+        }
+        low *= 1-1e-6;
+        if (low <= 0 || !place(low)) return fail("UV islands do not fit into the tile with padding.");
+    }
+    auto editedUvs = uvs;
+    for (const auto& box : boxes)
+    {
+        const auto& island = islands[box.island];
+        const double centerU = (double(island.minU)+island.maxU)*.5, centerV = (double(island.minV)+island.maxV)*.5;
+        for (int triangleIndex : island.triangles)
+        {
+            const auto& triangle = triangles[triangleIndex];
+            for (int corner = 0; corner < 3; ++corner)
+            {
+                const size_t offset = static_cast<size_t>(triangle.vertexStart + corner) * 2;
+                const float u = repack ? float(box.origin.x+(double(triangle.uv[corner].x)-island.minU)*box.scale*low) :
+                                        float(centerU+(double(triangle.uv[corner].x)-centerU)*box.scale);
+                const float v = repack ? float(box.origin.y+(double(triangle.uv[corner].y)-island.minV)*box.scale*low) :
+                                        float(centerV+(double(triangle.uv[corner].y)-centerV)*box.scale);
+                if (offset+1 >= editedUvs.size() || !std::isfinite(u) || !std::isfinite(v))
+                    return fail("The island transform cannot be represented safely. UVs were left unchanged.");
+                editedUvs[offset] = u; editedUvs[offset+1] = v;
+            }
+        }
+    }
+    int resultSet = uvSet;
+    std::string resultName = uvSet < static_cast<int>(tab.loaded.uvSetNames.size()) ? tab.loaded.uvSetNames[uvSet] : "UVSet";
+    if (createUvSet)
+    {
+        const std::string base = resultName + (repack ? "_Repacked" : "_Averaged");
+        resultName = base;
+        for (int suffix = 2; std::find(tab.loaded.uvSetNames.begin(),tab.loaded.uvSetNames.end(),resultName) != tab.loaded.uvSetNames.end(); ++suffix)
+            resultName = base + "_" + std::to_string(suffix);
+        auto sets = tab.loaded.uvSets;
+        auto names = tab.loaded.uvSetNames;
+        auto presence = tab.loaded.uvSetPresence;
+        names.resize(sets.size()); presence.resize(sets.size());
+        // Legacy channels without presence masks contain UVs for every vertex.
+        for (size_t set = tab.loaded.uvSetPresence.size(); set < presence.size(); ++set)
+            presence[set].assign(sets[set].size()/2,1);
+        const auto sourcePresence = presence[uvSet];
+        resultSet = static_cast<int>(sets.size());
+        sets.push_back(std::move(editedUvs)); names.push_back(resultName); presence.push_back(sourcePresence);
+        if (recordUndo) PushUndoSnapshot(tab);
+        tab.loaded.uvSets.swap(sets); tab.loaded.uvSetNames.swap(names); tab.loaded.uvSetPresence.swap(presence);
+        tab.uvSetScroll = std::max(0,resultSet-3);
+    }
+    else
+    {
+        if (recordUndo) PushUndoSnapshot(tab);
+        uvs.swap(editedUvs);
+    }
+    tab.loaded.uvSetsEdited = true;
+    tab.selectedUvSet = resultSet;
+    tab.selectedUvIslands.clear();
+    tab.viewportUvIslandCache = ViewportUvIslandCache{};
+    RefreshUvMeshBuffers(tab);
+    RefreshDisplayedMesh(tab);
+    if (report)
+    {
+        report->processedIslands = static_cast<int>(boxes.size());
+        report->uvSet = resultSet; report->uvSetName = resultName;
+    }
+    return true;
+}
+
 bool PackValidationUvIslands(ModelTab& tab, int nodeIndex, int uvSet, bool averageDensity, bool recordUndo)
 {
     if (nodeIndex < 0 || nodeIndex >= static_cast<int>(tab.loaded.nodes.size()) ||
@@ -963,75 +1159,40 @@ bool PackValidationUvIslands(ModelTab& tab, int nodeIndex, int uvSet, bool avera
     const std::string material = GetPrimaryMaterialName(tab.loaded.nodes[nodeIndex]);
     std::vector<int> nodes;
     for (int i = 0; i < static_cast<int>(tab.loaded.nodes.size()); ++i)
-        if (!IsDeletedNode(tab, i) && NodeUsesSamePrimaryMaterial(tab.loaded.nodes[i], material)) nodes.push_back(i);
-    auto& uvs = tab.loaded.uvSets[uvSet];
-    const auto triangles = BuildUvScopeTriangles(tab, uvs, nodes);
-    for (const auto& triangle : triangles)
-        for (const auto& uv : triangle.uv)
-            if (!std::isfinite(uv.x) || !std::isfinite(uv.y)) return false;
-    const auto islands = CalculateUvIslandStats(triangles, 1, 1);
-    if (islands.empty()) return false;
+        if (!IsDeletedNode(tab,i) && NodeUsesSamePrimaryMaterial(tab.loaded.nodes[i],material)) nodes.push_back(i);
+    return PackUvIslands(tab,uvSet,BuildUvScopeTriangles(tab,tab.loaded.uvSets[uvSet],nodes),averageDensity,recordUndo);
+}
 
-    // A common final scale preserves relative density after averaging the islands.
-    struct Box { int island; float scale, width, height; Vector2 origin{}; };
-    std::vector<Box> boxes;
-    float maxDimension = 0.0f;
-    for (int i = 0; i < static_cast<int>(islands.size()); ++i)
+bool ProcessUvSetIslands(ModelTab& tab, int uvSet, bool averageDensity, bool repack, UvRepackReport* report = nullptr, bool createUvSet = false)
+{
+    if (uvSet < 0 || uvSet >= static_cast<int>(tab.loaded.uvSets.size())) return PackUvIslands(tab,uvSet,{},averageDensity,true,report,repack);
+    std::vector<int> nodes;
+    for (int i = 0; i < static_cast<int>(tab.loaded.nodes.size()); ++i)
+        if (!IsDeletedNode(tab,i) && tab.loaded.nodes[i].type == SceneNodeType::Mesh) nodes.push_back(i);
+    auto triangles = BuildUvScopeTriangles(tab,tab.loaded.uvSets[uvSet],nodes);
+    if (uvSet < static_cast<int>(tab.loaded.uvSetPresence.size()))
     {
-        const auto& island = islands[i];
-        const float scale = averageDensity && island.density > 0.0f ? 1.0f / island.density : 1.0f;
-        const float width = (island.maxU - island.minU) * scale;
-        const float height = (island.maxV - island.minV) * scale;
-        if (!std::isfinite(width) || !std::isfinite(height)) return false;
-        boxes.push_back(Box{ i, scale, width, height });
-        maxDimension = std::max(maxDimension, std::max(width, height));
-    }
-    if (maxDimension <= 0.0f) return false;
-    std::stable_sort(boxes.begin(), boxes.end(), [](const Box& a, const Box& b) { return a.height > b.height; });
-    const float padding = std::min(0.002f, 0.1f / static_cast<float>(boxes.size() + 1));
-    auto place = [&](float scale)
-    {
-        float x = padding, y = padding, rowHeight = 0.0f;
-        for (auto& box : boxes)
-        {
-            const float width = box.width * scale, height = box.height * scale;
-            if (x + width + padding > 1.0f) { x = padding; y += rowHeight + padding; rowHeight = 0.0f; }
-            if (x + width + padding > 1.0f || y + height + padding > 1.0f) return false;
-            box.origin = Vector2{ x, y };
-            x += width + padding;
-            rowHeight = std::max(rowHeight, height);
-        }
-        return true;
-    };
-    float low = 0.0f, high = 1.0f / maxDimension;
-    for (int iteration = 0; iteration < 40; ++iteration)
-    {
-        const float middle = (low + high) * 0.5f;
-        if (place(middle)) low = middle; else high = middle;
-    }
-    if (low <= 0.0f || !place(low)) return false;
-    if (recordUndo) PushUndoSnapshot(tab);
-    for (const auto& box : boxes)
-    {
-        const auto& island = islands[box.island];
-        for (int triangleIndex : island.triangles)
-        {
-            const auto& triangle = triangles[triangleIndex];
-            for (int corner = 0; corner < 3; ++corner)
+        const auto& presence = tab.loaded.uvSetPresence[uvSet];
+        triangles.erase(std::remove_if(triangles.begin(),triangles.end(),[&](const UvTriangleSample& triangle) {
+            for (int c = 0; c < 3; ++c)
             {
-                const size_t offset = static_cast<size_t>(triangle.vertexStart + corner) * 2;
-                uvs[offset] = box.origin.x + (triangle.uv[corner].x - island.minU) * box.scale * low;
-                uvs[offset + 1] = box.origin.y + (triangle.uv[corner].y - island.minV) * box.scale * low;
+                const size_t vertex = static_cast<size_t>(triangle.vertexStart+c);
+                if (vertex >= presence.size() || !presence[vertex]) return true;
             }
-        }
+            return false;
+        }),triangles.end());
     }
-    tab.loaded.uvSetsEdited = true;
-    tab.selectedUvSet = uvSet;
-    tab.selectedUvIslands.clear();
-    tab.viewportUvIslandCache = ViewportUvIslandCache{};
-    RefreshUvMeshBuffers(tab);
-    RefreshDisplayedMesh(tab);
-    return true;
+    return PackUvIslands(tab,uvSet,triangles,averageDensity,true,report,repack,createUvSet);
+}
+
+bool AverageUvSetIslands(ModelTab& tab, int uvSet, UvRepackReport* report = nullptr)
+{
+    return ProcessUvSetIslands(tab,uvSet,true,false,report,true);
+}
+
+bool RepackUvSetIslands(ModelTab& tab, int uvSet, UvRepackReport* report = nullptr)
+{
+    return ProcessUvSetIslands(tab,uvSet,false,true,report,true);
 }
 
 std::vector<int> BuildUvVertexMaterials(const ModelTab& tab)
@@ -1128,6 +1289,85 @@ void DrawUvDensityHelp(Font font)
                           i == 0 ? Color{ 150, 225, 170, 255 } : Color{ 205, 213, 220, 255 });
 }
 
+// Draw after the panels so the UV set menu floats over the viewport, without
+// changing the panel layout or inheriting a panel's clipping rectangle.
+void DrawUvSetContextMenu(Font font, ModelTab& tab, RenameEditor& renameEditor, std::string& notice, std::string& error)
+{
+    if (tab.uvContextSet < 0) return;
+    if (renameEditor.active || tab.uvContextSet >= static_cast<int>(tab.loaded.uvSets.size()) ||
+        tab.uvContextSet >= static_cast<int>(tab.loaded.uvSetNames.size()))
+    { tab.uvContextSet = -1; return; }
+    const Rectangle menu{ClampFloat(tab.uvContextPosition.x,4,std::max(4.0f,float(GetScreenWidth())-284)),
+                         ClampFloat(tab.uvContextPosition.y,4,std::max(4.0f,float(GetScreenHeight())-188)),280,184};
+    DrawRectangleRec({menu.x+3,menu.y+3,menu.width,menu.height},Color{0,0,0,110});
+    DrawRectangleRec(menu,Color{25,30,36,255});
+    DrawRectangleLinesEx(menu,1,Color{100,120,140,255});
+    const bool justOpened = tab.uvContextJustOpened;
+    tab.uvContextJustOpened = false;
+    openfbx::SetUiPointerBlocked(justOpened);
+    if (DrawPanelButton(font,{menu.x+4,menu.y+4,menu.width-8,26},"Rename UV Set"))
+    {
+        renameEditor = RenameEditor{}; renameEditor.target = RenameTarget::UvSet;
+        renameEditor.uvSetIndex = tab.uvContextSet; renameEditor.active = true; renameEditor.justOpened = true;
+        std::snprintf(renameEditor.text,sizeof(renameEditor.text),"%s",tab.loaded.uvSetNames[tab.uvContextSet].c_str());
+        renameEditor.cursor = static_cast<int>(std::strlen(renameEditor.text)); renameEditor.textSelected = true;
+        tab.uvContextSet = -1;
+    }
+    openfbx::SetUiPointerBlocked(justOpened || tab.loaded.uvSets.size() <= 1 || tab.uvContextSet < 0);
+    if (DrawPanelButton(font,{menu.x+4,menu.y+34,menu.width-8,26},"Combine All UV Sets"))
+        CombineAllUvSets(tab,tab.uvContextSet);
+    openfbx::SetUiPointerBlocked(justOpened || tab.uvContextSet < 0);
+    auto processIslands = [&](bool average)
+    {
+        UvRepackReport report;
+        if (average ? AverageUvSetIslands(tab,tab.uvContextSet,&report) : RepackUvSetIslands(tab,tab.uvContextSet,&report))
+        {
+            notice = std::string(average ? "Averaged " : "Repacked ") + std::to_string(report.processedIslands) +
+                " UV islands into " + report.uvSetName + ". Original UVs and material bindings are preserved.";
+            if (report.skippedIslands > 0)
+                notice += " Skipped " + std::to_string(report.skippedIslands) + " degenerate islands; their UVs are unchanged.";
+            error.clear();
+        }
+        else { error = std::string(average ? "Cannot average this UV set: " : "Cannot repack this UV set: ") + report.error; notice.clear(); }
+        tab.uvContextSet = -1;
+    };
+    if (DrawPanelButton(font,{menu.x+4,menu.y+64,menu.width-8,26},"Average Islands")) processIslands(true);
+    openfbx::SetUiPointerBlocked(justOpened || tab.uvContextSet < 0);
+    if (DrawPanelButton(font,{menu.x+4,menu.y+94,menu.width-8,26},"Repack Islands")) processIslands(false);
+    openfbx::SetUiPointerBlocked(justOpened || tab.uvContextSet < 0);
+    if (DrawPanelButton(font,{menu.x+4,menu.y+124,menu.width-8,26},"Transfer Textures..."))
+    {
+        tab.selectedUvSet = tab.uvContextSet; tab.uvContextSet = -1;
+        OpenTextureBakeDialog(tab);
+    }
+    openfbx::SetUiPointerBlocked(justOpened || tab.uvContextSet < 0);
+    if (DrawPanelButton(font,{menu.x+4,menu.y+154,menu.width-8,26},"Delete UV Set"))
+    {
+        const std::string name = tab.loaded.uvSetNames[tab.uvContextSet];
+        const bool used = std::any_of(tab.pbrMaterials.begin(),tab.pbrMaterials.end(),[&](const PbrMaterialState& m) { return m.uvSetName == name; });
+        if (DeleteUvSet(tab,tab.uvContextSet))
+        {
+            notice = "Deleted UV set " + name + ".";
+            if (used) notice += " Materials using this set now use Auto UVs.";
+            if (tab.loaded.uvSets.empty()) notice += " No UV sets remain.";
+            error.clear();
+        }
+    }
+    openfbx::SetUiPointerBlocked(false);
+    if (!justOpened && (IsKeyPressed(KEY_ESCAPE) ||
+        (IsMouseButtonPressed(MOUSE_BUTTON_LEFT) && !CheckCollisionPointRec(GetMousePosition(),menu))))
+        tab.uvContextSet = -1;
+}
+
+// Keep gestures owned by the UV editor through the release frame, including
+// when the cursor crosses a panel edge or the UV panel is temporarily hidden.
+bool UpdateUvEditorPointerCapture(ModelTab& tab, bool panGestureActive, bool selectionGestureActive, bool windowFocused)
+{
+    if (!windowFocused || !panGestureActive) tab.uvViewPanning = false;
+    if (!windowFocused || !selectionGestureActive) tab.uvIslandMarqueeSelecting = false;
+    return tab.uvViewPanning || tab.uvIslandMarqueeSelecting;
+}
+
 void DrawUvPanel(Font font, ModelTab& tab, RenameEditor& renameEditor, float panelX, float panelY, float panelW, bool deferRefresh = false)
 {
     const float contentX = panelX + 12.0f;
@@ -1201,6 +1441,8 @@ void DrawUvPanel(Font font, ModelTab& tab, RenameEditor& renameEditor, float pan
         {
             tab.selectedUvSet = uvSetIndex;
             tab.uvContextSet = uvSetIndex;
+            tab.uvContextPosition = mouse;
+            tab.uvContextJustOpened = true;
         }
 
         char rowText[256] = {};
@@ -1220,28 +1462,6 @@ void DrawUvPanel(Font font, ModelTab& tab, RenameEditor& renameEditor, float pan
         DrawRectangleRec(Rectangle{ track.x, thumbY, track.width, thumbHeight }, Color{ 130, 145, 158, 255 });
     }
     y += listBounds.height + 14.0f;
-    if (tab.uvContextSet >= 0 && tab.uvContextSet < uvSetCount && !renameEditor.active)
-    {
-        const Rectangle menu{ contentX, y, panelW - 24.0f, 60.0f };
-        DrawRectangleRec(menu, Color{ 25, 30, 36, 255 });
-        if (DrawPanelButton(font, Rectangle{ contentX + 4, y + 3, menu.width - 8, 24 }, "Rename UV Set"))
-        {
-            renameEditor = RenameEditor{};
-            renameEditor.target = RenameTarget::UvSet;
-            renameEditor.uvSetIndex = tab.uvContextSet;
-            renameEditor.active = true;
-            renameEditor.justOpened = true;
-            std::snprintf(renameEditor.text, sizeof(renameEditor.text), "%s", tab.loaded.uvSetNames[tab.uvContextSet].c_str());
-            renameEditor.cursor = static_cast<int>(std::strlen(renameEditor.text));
-            renameEditor.textSelected = true;
-            tab.uvContextSet = -1;
-        }
-        if (uvSetCount > 1 && DrawPanelButton(font, Rectangle{ contentX + 4, y + 31, menu.width - 8, 24 }, "Combine All UV Sets"))
-            CombineAllUvSets(tab, tab.uvContextSet);
-        if (IsKeyPressed(KEY_ESCAPE) || (openfbx::UiMouseButtonPressed(MOUSE_BUTTON_LEFT) && !CheckCollisionPointRec(mouse, menu)))
-            tab.uvContextSet = -1;
-        y += 66.0f;
-    }
 
     const bool hasSelectedMesh = tab.selectedNode >= 0 && tab.selectedNode < static_cast<int>(tab.loaded.nodes.size()) &&
         tab.loaded.nodes[tab.selectedNode].type == SceneNodeType::Mesh && !IsDeletedNode(tab, tab.selectedNode);
@@ -1544,10 +1764,6 @@ void DrawUvPanel(Font font, ModelTab& tab, RenameEditor& renameEditor, float pan
     if (!openfbx::UiMouseButtonDown(MOUSE_BUTTON_LEFT) && !openfbx::UiMouseButtonReleased(MOUSE_BUTTON_LEFT))
     {
         tab.uvIslandMarqueeSelecting = false;
-    }
-    if (openfbx::UiMouseButtonReleased(MOUSE_BUTTON_RIGHT) || openfbx::UiMouseButtonReleased(MOUSE_BUTTON_MIDDLE))
-    {
-        tab.uvViewPanning = false;
     }
     if (tab.uvViewPanning && (openfbx::UiMouseButtonDown(MOUSE_BUTTON_RIGHT) || openfbx::UiMouseButtonDown(MOUSE_BUTTON_MIDDLE)))
     {

@@ -12,6 +12,7 @@
 #include "HierarchyAndValidation.inl"
 #include "MaterialsPanel.inl"
 #include "UvPanel.inl"
+#include "TextureBaking.inl"
 #include "HierarchyPanel.inl"
 #include "MenuTabsTimeline.inl"
 #include "LogPanel.inl"

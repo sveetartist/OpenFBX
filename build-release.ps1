@@ -5,6 +5,13 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# MSBuild treats environment keys case-insensitively and fails if both Path and PATH exist.
+$pathKeys = @([Environment]::GetEnvironmentVariables('Process').Keys | Where-Object { $_ -ieq 'Path' })
+if ($pathKeys.Count -gt 1) {
+    $pathValue = [Environment]::GetEnvironmentVariable('Path', 'Process')
+    foreach ($key in $pathKeys) { [Environment]::SetEnvironmentVariable($key, $null, 'Process') }
+    [Environment]::SetEnvironmentVariable('Path', $pathValue, 'Process')
+}
 Push-Location -LiteralPath $PSScriptRoot
 try {
     $cmakeCommand = Get-Command cmake -ErrorAction SilentlyContinue

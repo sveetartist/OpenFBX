@@ -27,12 +27,12 @@ void RestoreEditSnapshot(ModelTab& tab, const EditSnapshot& snapshot)
     tab.loaded.uvSets = snapshot.uvSets;
     tab.loaded.materialNames = snapshot.materialNames;
     tab.loaded.uvSetPresence = snapshot.uvSetPresence;
+    tab.loaded.defaultUvSetIndices = snapshot.defaultUvSetIndices;
     tab.loaded.uvSetsEdited = snapshot.uvSetsEdited;
     tab.selectedUvSet = snapshot.selectedUvSet;
     tab.uvContextSet = -1;
     tab.viewportUvIslandCache = ViewportUvIslandCache{};
     tab.selectedUvIslands.clear();
-    RefreshUvMeshBuffers(tab);
     tab.skinningGeometry.reset();
     tab.loaded.bounds = snapshot.bounds;
     tab.loaded.nodes = snapshot.nodes;
@@ -75,6 +75,7 @@ void RestoreEditSnapshot(ModelTab& tab, const EditSnapshot& snapshot)
         material.metallicChannel = materialSnapshot.metallicChannel;
         material.aoChannel = materialSnapshot.aoChannel;
         material.opacityChannel = materialSnapshot.opacityChannel;
+        material.uvSetName = materialSnapshot.uvSetName;
 
         for (int slotIndex = 0; slotIndex < static_cast<int>(PbrTextureSlot::Count); ++slotIndex)
         {
@@ -100,6 +101,7 @@ void RestoreEditSnapshot(ModelTab& tab, const EditSnapshot& snapshot)
     }
 
     EnsurePbrMaterialStates(tab);
+    RefreshUvMeshBuffers(tab);
     tab.selectedMaterial = std::max(0, std::min(tab.selectedMaterial, static_cast<int>(tab.pbrMaterials.size()) - 1));
     InvalidateDisplayedAnimationCaches(tab);
     RefreshDisplayedMesh(tab);

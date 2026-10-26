@@ -146,6 +146,12 @@ struct FbxMaterialSettings
     std::string materialName;
     bool specularGlossiness = false;
     int glossinessChannel = 0;
+    std::string uvSetName;
+    bool normalDirectX = false;
+    int roughnessChannel = 1;
+    int metallicChannel = 2;
+    int aoChannel = 0;
+    int opacityChannel = 0;
 };
 
 struct FbxTextureReference
@@ -154,6 +160,8 @@ struct FbxTextureReference
     FbxTextureUsage usage = FbxTextureUsage::Diffuse;
     std::string filePath;
     std::string relativePath;
+    std::string uvSetName;
+    bool unsupportedTransform = false;
 };
 
 struct LoadedFbxModel
@@ -170,6 +178,7 @@ struct LoadedFbxModel
     std::vector<std::string> uvSetNames;
     std::vector<std::vector<float>> uvSets;
     std::vector<std::vector<unsigned char>> uvSetPresence;
+    std::vector<int> defaultUvSetIndices;
     bool uvSetsEdited = false;
     std::vector<std::string> materialNames;
     std::vector<FbxTextureReference> textureReferences;

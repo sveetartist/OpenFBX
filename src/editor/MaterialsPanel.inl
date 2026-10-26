@@ -1060,7 +1060,7 @@ void DrawMaterialsPanel(Font font,
     if (viewport.height <= 0) return;
     const int materialCount = static_cast<int>(tab.pbrMaterials.size());
     // Heading, material rows, workflow/folder controls, and seven texture rows.
-    const float contentHeight = 28.0f + materialCount * 24.0f + 64.0f + 7 * 80.0f;
+    const float contentHeight = 28.0f + materialCount * 24.0f + 128.0f + 7 * 80.0f;
     const float maxScroll = std::max(0.0f, contentHeight - viewport.height);
     const Vector2 mouse = GetMousePosition();
     const bool panelInputBlocked = inputBlocked;
@@ -1109,6 +1109,19 @@ void DrawMaterialsPanel(Font font,
         y += 24.0f;
     }
     PbrMaterialState& material = tab.pbrMaterials[static_cast<size_t>(tab.selectedMaterial)];
+    const int materialUv = GetMaterialUvSetIndex(tab, tab.selectedMaterial);
+    const std::string uvLabel = "UV: " + (material.uvSetName.empty() ? std::string("Auto (per mesh)") :
+        materialUv >= 0 && materialUv < static_cast<int>(tab.loaded.uvSetNames.size()) ? tab.loaded.uvSetNames[materialUv] : std::string("None"));
+    if (DrawPanelButton(font, Rectangle{contentX, y, panelW - 24, 26}, uvLabel.c_str()) && !inputBlocked && !tab.loaded.uvSets.empty())
+    {
+        PushUndoSnapshot(tab);
+        const size_t next = material.uvSetName.empty() ? 0 : static_cast<size_t>(materialUv + 1);
+        material.uvSetName = next < tab.loaded.uvSetNames.size() ? tab.loaded.uvSetNames[next] : std::string{};
+        tab.loaded.uvSetsEdited = true;
+        RefreshUvMeshBuffers(tab);
+        RefreshDisplayedMesh(tab);
+    }
+    y += 32;
     const bool specGloss = material.workflow == MaterialWorkflow::SpecularGlossiness;
     const Rectangle workflowButton{contentX, y, panelW - 24.0f, 24.0f};
     const bool switchWorkflow = DrawPanelButton(font, workflowButton,

@@ -6,6 +6,26 @@ static void Check(bool condition, const char* message)
     if (!condition) throw std::runtime_error(message);
 }
 
+static void TestUvEditorPointerCapture()
+{
+    ModelTab tab;
+    Check(!UpdateUvEditorPointerCapture(tab,true,false,true),"A viewport-origin drag must not be captured by the UV editor");
+    tab.uvViewPanning = true;
+    Check(UpdateUvEditorPointerCapture(tab,true,false,true) && tab.uvViewPanning,
+          "UV panning must keep the viewport blocked after crossing the panel edge");
+    // Gesture-active includes the raw release event, before drawing the UV panel.
+    Check(UpdateUvEditorPointerCapture(tab,true,false,true),"UV release over the viewport must remain captured");
+    Check(!UpdateUvEditorPointerCapture(tab,false,false,true) && !tab.uvViewPanning,
+          "The viewport must become available after release, even if the UV panel is hidden");
+    tab.uvIslandMarqueeSelecting = true;
+    Check(UpdateUvEditorPointerCapture(tab,false,true,true),"UV island selection crossing the edge must also capture input");
+    Check(!UpdateUvEditorPointerCapture(tab,false,false,true) && !tab.uvIslandMarqueeSelecting,
+          "UV selection must release capture when its gesture ends");
+    tab.uvViewPanning = tab.uvIslandMarqueeSelecting = true;
+    Check(!UpdateUvEditorPointerCapture(tab,true,true,false) && !tab.uvViewPanning && !tab.uvIslandMarqueeSelecting,
+          "Losing focus must cancel UV gestures instead of leaving the viewport blocked");
+}
+
 static void TestBoneOrientationPreview()
 {
     gPreferencesWindow = PreferencesWindowState{};
@@ -243,6 +263,7 @@ int main()
         Check(gBoneDisplayScale == 1.0f, "Missing bone display preference must preserve the original size");
         InitWindow(640, 360, "Preferences regression");
         TestBoneOrientationPreview();
+        TestUvEditorPointerCapture();
         TestViewportPreferencesPreviews();
         TestPreferencesWindowInteraction();
         Font font = LoadTechnicalFont();

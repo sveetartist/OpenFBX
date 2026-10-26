@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(openfbx VERSION 0.1.0 LANGUAGES CXX RC)
+project(openfbx VERSION 0.2.0 LANGUAGES CXX RC)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -22,6 +22,7 @@ set(OPENFBX_SOURCES
     src/editor/HierarchyAndValidation.inl
     src/editor/MaterialsPanel.inl
     src/editor/UvPanel.inl
+    src/editor/TextureBaking.inl
     src/editor/HierarchyPanel.inl
     src/editor/MenuTabsTimeline.inl
     src/editor/LogPanel.inl
@@ -208,6 +209,10 @@ if(OPENFBX_BUILD_TESTS)
         "${CMAKE_CURRENT_SOURCE_DIR}/src" "${FBXSDK_INCLUDE_DIR}")
     target_link_libraries(openfbx_hotkey_tests PRIVATE ${OPENFBX_TEST_LIBRARIES})
     add_test(NAME hotkey_preferences_regression COMMAND openfbx_hotkey_tests)
+    add_executable(openfbx_baking_tests tests/TextureBaking.cpp ${OPENFBX_TEST_SOURCES})
+    target_include_directories(openfbx_baking_tests PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/src" "${FBXSDK_INCLUDE_DIR}")
+    target_link_libraries(openfbx_baking_tests PRIVATE ${OPENFBX_TEST_LIBRARIES})
+    add_test(NAME texture_baking_regression COMMAND openfbx_baking_tests)
     add_executable(openfbx_material_tests tests/MaterialWorkflows.cpp ${OPENFBX_TEST_SOURCES})
     target_include_directories(openfbx_material_tests PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/src" "${FBXSDK_INCLUDE_DIR}")

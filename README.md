@@ -2,7 +2,7 @@
 
 A small FBX viewer/editor built with CMake, raylib, and the Autodesk FBX SDK.
 
-Current version: `0.1.0`.
+Current version: `0.2.0`.
 
 ## Build
 
@@ -33,12 +33,13 @@ The latest app and runtime assets are in `build/`. CMake intermediates stay in
 
 ## Package a release
 
-After building, double-click **pack-release.cmd**, or run `./pack-release.ps1`.
-It packages the current `build/openfbx.exe` and runtime assets into
-`releases/openfbx-0.1.0-windows-x64.zip`, using the version from `CMakeLists.txt`.
-Only ZIPs go in `releases/`; it is ignored by Git and has no separate repository.
-Upload these ZIPs to GitHub Releases. Packaging replaces the ZIP for the same
-version; increase the project version to retain a separate release.
+Double-click **pack-release.cmd**, or run `./pack-release.ps1`. The script builds
+the latest Release executable, then packages it with the runtime DLLs, checker
+textures, icon, and README into `publish/openfbx-0.2.0-windows-x64.zip`. The ZIP
+name uses the version from `CMakeLists.txt`. For a custom SDK installation, run
+`./pack-release.ps1 -FbxSdkRoot "C:/path/to/FBX SDK/version"`.
+`publish/` is ignored by Git. Packaging replaces the ZIP for the same version;
+increase the project version to retain a separate release.
 
 ## Preferences and hotkeys
 
@@ -100,7 +101,7 @@ fixtures also verify that bone display helpers are excluded and skinning survive
 - `src/` contains application source files.
 - `assets/` contains the icon and source artwork used by the app.
 - `build/` contains the latest executable, runtime assets, and build intermediates.
-- `releases/` contains zipped builds.
+- `publish/` contains zipped builds.
 
 ## Object visibility
 
@@ -124,6 +125,60 @@ combined maps with `spec` and `gloss` in their names. Channel previews follow th
 selected workflow. Workflow changes support undo/redo; saving or packaging the
 FBX preserves the workflow, glossiness channel, and assigned maps for reopening
 in openfbx.
+
+## UV sets and transferring textures
+
+In **Mats**, click **UV: ...** to choose the UV channel used by the selected
+material. **Auto (per mesh)** uses each mesh's first available source channel,
+including meshes that share a material but have different UV channel names.
+Right-click a UV set in **UV** and choose **Transfer Textures...** from its popup
+menu. Transfer settings open in a separate window that you can move by its title bar.
+The same menu offers **Average Islands** to equalize island density while keeping
+each island's center and the total UV area, and **Repack Islands** to arrange islands
+inside the 0–1 tile with padding while preserving their relative scales. Both act
+on all meshes with UVs in the chosen channel and each creates a new named UV set,
+preserving the original channels, presence masks, and material UV bindings. The new
+set is selected for editing; each action supports undo/redo separately.
+**Delete UV Set** removes the selected channel with undo/redo support and preserves
+the remaining channels. Materials using the deleted channel switch to Auto UVs;
+deleting the last channel leaves the mesh without UVs.
+Degenerate islands are left unchanged and counted in the log while valid islands
+are repacked. A set with no usable islands reports the reason without editing UVs.
+Choose all materials or the selected material, a texture resolution (512–4096),
+texture dilation (0–64 pixels), **Source UV**, **Target UV**, and an output parent
+folder. **Source UV: Auto (material UVs)** samples each material's currently bound
+channel; select a named source to override it. The right-clicked channel is the
+initial target. Transfer bakes into that channel's exact existing coordinates:
+it does not repack, rescale, modify, or create UV sets. Use **Average Islands**
+and/or **Repack Islands** first to prepare a new target while keeping source UVs.
+Dilation extends edge colors into empty texels for every baked map, including
+normal maps and alpha. Set it to 0 to disable it; the default is 8 pixels.
+Leave room between target islands for the chosen dilation. Transfer creates a
+fresh numbered folder containing PNG maps and a manifest, and binds the affected
+materials to the chosen target channel and new textures. Both UV channels and
+source texture files are preserved. Save the FBX to retain material UV bindings
+and texture paths; the transfer supports undo/redo.
+
+Baking transfers every loaded map, including inactive workflow maps, packed
+channels, and alpha, using the corresponding triangle's original UV coordinates.
+It uses bilinear repeat sampling, 2×2 coverage samples, and padded borders.
+Thin and subpixel triangles use samples inside their actual texel intersections
+when the regular sample grid misses them.
+Rotated, mirrored, rescaled, or distorted target triangles use direct barycentric
+correspondence. Tangent normal maps are converted into the target tangent frame,
+including the material's DirectX/OpenGL convention. Textures remain separate per
+material. Transfer works on unchanged geometry; it does not project details
+between different meshes.
+
+Targets must cover the selected geometry, lie inside the 0–1 tile, and have no
+overlapping triangles with conflicting source mappings within a material. Folded
+or stacked faces retained by repacking are allowed when their shared texels sample
+the same source UVs and preserve the normal-map basis. Missing or collapsed UVs, unstable
+normal-map tangents, transformed or
+non-repeat source textures, and HDR/compressed textures are rejected before the
+scene is changed.
+Finite-resolution resampling can still lose fine texture detail; use a resolution
+appropriate for the source maps.
 
 ## Checker view
 
@@ -155,6 +210,8 @@ Undo/Redo and is included when saving the FBX.
 
 The **Log** panel below the animation timeline starts collapsed and keeps the
 latest 500 notices and errors. Scroll with the mouse wheel or drag its scrollbar; **Latest** resumes
-following new messages. **Copy** copies the history and **Clear** empties it.
+following new messages. Click a message to select it, then use **Copy Msg** or
+**Ctrl+C** to copy its full text, including wrapped lines. **Copy All** copies the
+history and **Clear** empties it. A **Copied** label confirms a clipboard copy.
 Collapse the panel with its arrow to leave only the latest message visible.
 Long messages wrap in the expanded panel.

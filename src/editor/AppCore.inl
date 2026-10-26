@@ -1,6 +1,7 @@
 #include <cmath>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -59,7 +60,7 @@ using openfbx::LoadTechnicalFont;
 namespace
 {
 #ifndef OPENFBX_VERSION
-#define OPENFBX_VERSION "0.1.0"
+#define OPENFBX_VERSION "0.2.0"
 #endif
 
 constexpr const char* kAppName = "openfbx";
@@ -269,6 +270,7 @@ struct PbrMaterialState
     PackedChannel metallicChannel = PackedChannel::B;
     PackedChannel aoChannel = PackedChannel::R;
     OpacityChannel opacityChannel = OpacityChannel::RGB;
+    std::string uvSetName;
 };
 
 struct PbrTextureSnapshot
@@ -288,6 +290,7 @@ struct PbrMaterialSnapshot
     PackedChannel metallicChannel = PackedChannel::B;
     PackedChannel aoChannel = PackedChannel::R;
     OpacityChannel opacityChannel = OpacityChannel::RGB;
+    std::string uvSetName;
 };
 
 struct EditSnapshot
@@ -296,6 +299,7 @@ struct EditSnapshot
     std::vector<std::string> uvSetNames;
     std::vector<std::vector<float>> uvSets;
     std::vector<std::vector<unsigned char>> uvSetPresence;
+    std::vector<int> defaultUvSetIndices;
     bool uvSetsEdited = false;
     int selectedUvSet = 0;
     BoundingBox bounds{};
@@ -422,6 +426,8 @@ struct ModelTab
     float materialsScrollDragOffset = 0.0f;
     int selectedUvSet = 0;
     int uvContextSet = -1;
+    Vector2 uvContextPosition{};
+    bool uvContextJustOpened = false;
     int uvSetScroll = 0;
     int uvTextureSet = -1;
     int uvTextureSetNode = -1;
@@ -944,6 +950,54 @@ void RecomputeMeshNodeBounds(ModelTab& tab, SceneNode& node);
 void RecomputeSceneBounds(ModelTab& tab);
 void RefreshDisplayedMesh(ModelTab& tab);
 void RefreshUvMeshBuffers(ModelTab& tab);
+void OpenTextureBakeDialog(ModelTab& tab);
+
+int GetMaterialUvSetIndex(const ModelTab& tab, int materialIndex)
+{
+    if (tab.loaded.uvSets.empty()) return -1;
+    if (materialIndex >= 0 && materialIndex < static_cast<int>(tab.pbrMaterials.size()))
+    {
+        const auto& name = tab.pbrMaterials[materialIndex].uvSetName;
+        for (size_t i = 0; i < tab.loaded.uvSetNames.size() && i < tab.loaded.uvSets.size(); ++i)
+            if (!name.empty() && tab.loaded.uvSetNames[i] == name) return static_cast<int>(i);
+        if (!name.empty()) return -1;
+    }
+    return 0;
+}
+int GetMaterialVertexUvSetIndex(const ModelTab& tab, int materialIndex, int vertex)
+{
+    if (vertex < 0) return -1;
+    if (materialIndex >= 0 && materialIndex < static_cast<int>(tab.pbrMaterials.size()) &&
+        !tab.pbrMaterials[materialIndex].uvSetName.empty()) return GetMaterialUvSetIndex(tab, materialIndex);
+    const auto& defaults = tab.loaded.defaultUvSetIndices;
+    if (size_t(vertex) < defaults.size())
+    {
+        const int set = defaults[vertex];
+        if (set >= 0 && set < static_cast<int>(tab.loaded.uvSets.size()) && size_t(vertex)*2+1 < tab.loaded.uvSets[set].size() &&
+            (set >= static_cast<int>(tab.loaded.uvSetPresence.size()) ||
+             (size_t(vertex) < tab.loaded.uvSetPresence[set].size() && tab.loaded.uvSetPresence[set][vertex]))) return set;
+    }
+    // Fall back for generated vertices or after combining source channels.
+    for (size_t set = 0; set < tab.loaded.uvSets.size(); ++set)
+        if (size_t(vertex)*2+1 < tab.loaded.uvSets[set].size() &&
+            (set >= tab.loaded.uvSetPresence.size() ||
+             (size_t(vertex) < tab.loaded.uvSetPresence[set].size() && tab.loaded.uvSetPresence[set][vertex])))
+            return static_cast<int>(set);
+    return -1;
+}
+bool MaterialUvSetIsComplete(const ModelTab& tab, int material, int set)
+{
+    if (set < 0 || set >= static_cast<int>(tab.loaded.uvSets.size())) return false;
+    for (size_t mesh = 0; mesh < tab.loaded.meshGlobalVertexIndices.size() && mesh < static_cast<size_t>(tab.loaded.model.meshCount); ++mesh)
+    {
+        if (!tab.loaded.model.meshMaterial || tab.loaded.model.meshMaterial[mesh] != material) continue;
+        for (int v : tab.loaded.meshGlobalVertexIndices[mesh])
+            if (v < 0 || size_t(v)*2+1 >= tab.loaded.uvSets[set].size() ||
+                (set < static_cast<int>(tab.loaded.uvSetPresence.size()) &&
+                 (size_t(v) >= tab.loaded.uvSetPresence[set].size() || !tab.loaded.uvSetPresence[set][v]))) return false;
+    }
+    return true;
+}
 bool HasCpuSkinnedMesh(const LoadedFbxModel& loaded);
 const BonePose* FindBonePoseByNode(const std::vector<BonePose>& poses, int nodeIndex);
 bool RebuildCurrentSkinnedMeshFromBones(ModelTab& tab);
@@ -1001,8 +1055,21 @@ void SyncMaterialSettings(ModelTab& tab)
 {
     tab.loaded.materialSettings.clear();
     for (int i = 0; i < static_cast<int>(tab.pbrMaterials.size()) && i < static_cast<int>(tab.loaded.materialNames.size()); ++i)
-        tab.loaded.materialSettings.push_back(FbxMaterialSettings{tab.loaded.materialNames[i],
-            tab.pbrMaterials[i].workflow == MaterialWorkflow::SpecularGlossiness, static_cast<int>(tab.pbrMaterials[i].glossinessChannel)});
+    {
+        const auto& pbr = tab.pbrMaterials[i];
+        FbxMaterialSettings settings;
+        settings.materialName = tab.loaded.materialNames[i];
+        settings.specularGlossiness = pbr.workflow == MaterialWorkflow::SpecularGlossiness;
+        settings.glossinessChannel = static_cast<int>(pbr.glossinessChannel);
+        const int uvSet = GetMaterialUvSetIndex(tab, i);
+        if (!pbr.uvSetName.empty() && uvSet >= 0 && uvSet < static_cast<int>(tab.loaded.uvSetNames.size())) settings.uvSetName = tab.loaded.uvSetNames[uvSet];
+        settings.normalDirectX = pbr.normalDirectX;
+        settings.roughnessChannel = static_cast<int>(pbr.roughnessChannel);
+        settings.metallicChannel = static_cast<int>(pbr.metallicChannel);
+        settings.aoChannel = static_cast<int>(pbr.aoChannel);
+        settings.opacityChannel = static_cast<int>(pbr.opacityChannel);
+        tab.loaded.materialSettings.push_back(std::move(settings));
+    }
 }
 
 void UnloadPbrTexture(ModelTab& tab, int materialIndex, PbrTextureSlot slot)
@@ -1300,6 +1367,12 @@ int LoadImportedPbrTextures(ModelTab& tab, std::string& error)
         if (index < 0 || index >= static_cast<int>(tab.pbrMaterials.size())) continue;
         SetMaterialWorkflow(tab, index, settings.specularGlossiness ? MaterialWorkflow::SpecularGlossiness : MaterialWorkflow::MetallicRoughness);
         tab.pbrMaterials[index].glossinessChannel = static_cast<PackedChannel>(ClampInt(settings.glossinessChannel, 0, 3));
+        tab.pbrMaterials[index].uvSetName = settings.uvSetName;
+        tab.pbrMaterials[index].normalDirectX = settings.normalDirectX;
+        tab.pbrMaterials[index].roughnessChannel = static_cast<PackedChannel>(ClampInt(settings.roughnessChannel, 0, 3));
+        tab.pbrMaterials[index].metallicChannel = static_cast<PackedChannel>(ClampInt(settings.metallicChannel, 0, 3));
+        tab.pbrMaterials[index].aoChannel = static_cast<PackedChannel>(ClampInt(settings.aoChannel, 0, 3));
+        tab.pbrMaterials[index].opacityChannel = static_cast<OpacityChannel>(ClampInt(settings.opacityChannel, 0, 1));
     }
 
     int loadedCount = 0;
@@ -1309,6 +1382,12 @@ int LoadImportedPbrTextures(ModelTab& tab, std::string& error)
         const int materialIndex = FindMaterialIndexByName(tab, reference.materialName);
         if (materialIndex < 0 || materialIndex >= static_cast<int>(tab.pbrMaterials.size())) continue;
         if (reference.filePath.empty()) continue;
+        if (tab.pbrMaterials[materialIndex].uvSetName.empty() && !reference.uvSetName.empty())
+        {
+            const auto found = std::find(tab.loaded.uvSetNames.begin(), tab.loaded.uvSetNames.end(), reference.uvSetName);
+            if (found != tab.loaded.uvSetNames.end() && MaterialUvSetIsComplete(tab, materialIndex, static_cast<int>(found-tab.loaded.uvSetNames.begin())))
+                tab.pbrMaterials[materialIndex].uvSetName = reference.uvSetName;
+        }
 
         if (IsOrmTextureReference(reference))
         {
@@ -1338,6 +1417,8 @@ int LoadImportedPbrTextures(ModelTab& tab, std::string& error)
         }
     }
 
+    RefreshUvMeshBuffers(tab);
+    RefreshDisplayedMesh(tab);
     return loadedCount;
 }
 
@@ -1480,6 +1561,14 @@ bool CollectPackageTextures(ModelTab& tab,
 
             AddPackageTextureReference(textureReferences, materialName, slot, sourcePath, relativeFound->second);
         }
+    }
+
+    for (auto& reference : textureReferences)
+    {
+        const int material = FindMaterialIndexByName(tab, reference.materialName);
+        const int uvSet = GetMaterialUvSetIndex(tab, material);
+        if (material >= 0 && !tab.pbrMaterials[material].uvSetName.empty() && uvSet >= 0 && uvSet < static_cast<int>(tab.loaded.uvSetNames.size()))
+            reference.uvSetName = tab.loaded.uvSetNames[uvSet];
     }
 
     return true;
@@ -1641,6 +1730,7 @@ EditSnapshot CaptureEditSnapshot(ModelTab& tab)
     snapshot.uvSets = tab.loaded.uvSets;
     snapshot.materialNames = tab.loaded.materialNames;
     snapshot.uvSetPresence = tab.loaded.uvSetPresence;
+    snapshot.defaultUvSetIndices = tab.loaded.defaultUvSetIndices;
     snapshot.uvSetsEdited = tab.loaded.uvSetsEdited;
     snapshot.selectedUvSet = tab.selectedUvSet;
     snapshot.bounds = tab.loaded.bounds;
@@ -1676,6 +1766,7 @@ EditSnapshot CaptureEditSnapshot(ModelTab& tab)
         materialSnapshot.metallicChannel = material.metallicChannel;
         materialSnapshot.aoChannel = material.aoChannel;
         materialSnapshot.opacityChannel = material.opacityChannel;
+        materialSnapshot.uvSetName = material.uvSetName;
 
         for (int slotIndex = 0; slotIndex < static_cast<int>(PbrTextureSlot::Count); ++slotIndex)
         {

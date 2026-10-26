@@ -222,7 +222,6 @@ bool RebuildRaylibModelFromGlobalGeometry(ModelTab& tab, std::string& error)
 
     const std::vector<float>& verticesSource = tab.currentVertices.size() == loaded.bindVertices.size() ? tab.currentVertices : loaded.bindVertices;
     const std::vector<float>& normalsSource = tab.currentNormals.size() == loaded.bindNormals.size() ? tab.currentNormals : loaded.bindNormals;
-    const std::vector<float>* uvSource = loaded.uvSets.empty() ? nullptr : &loaded.uvSets.front();
 
     std::vector<Mesh> meshes;
     std::vector<int> meshMaterials;
@@ -251,6 +250,8 @@ bool RebuildRaylibModelFromGlobalGeometry(ModelTab& tab, std::string& error)
             normals.push_back(normalsSource[vertexBase]);
             normals.push_back(normalsSource[vertexBase + 1]);
             normals.push_back(normalsSource[vertexBase + 2]);
+            const int uvSet = GetMaterialVertexUvSetIndex(tab, materialIndex, globalVertex);
+            const std::vector<float>* uvSource = uvSet < 0 ? nullptr : &loaded.uvSets[uvSet];
             if (uvSource && uvBase + 1 < uvSource->size())
             {
                 texcoords.push_back((*uvSource)[uvBase]);
@@ -397,6 +398,8 @@ int MergeSelectedGeometry(ModelTab& tab, const std::vector<int>& contextNodes, s
             const float normalY = tab.loaded.bindNormals[sourceBase + 1];
             const float normalZ = tab.loaded.bindNormals[sourceBase + 2];
             tab.loaded.bindVertices.insert(tab.loaded.bindVertices.end(), { bindX, bindY, bindZ });
+            tab.loaded.defaultUvSetIndices.push_back(sourceVertex < static_cast<int>(tab.loaded.defaultUvSetIndices.size()) ?
+                tab.loaded.defaultUvSetIndices[sourceVertex] : -1);
             tab.loaded.bindNormals.insert(tab.loaded.bindNormals.end(), { normalX, normalY, normalZ });
             if (hadCurrentMesh)
             {
@@ -1355,6 +1358,8 @@ void DrawRenameEditor(Font font, ModelTab* active, RenameEditor& editor, std::st
                 if (names[editor.uvSetIndex] != newName)
                 {
                     PushUndoSnapshot(*active);
+                    for (auto& material : active->pbrMaterials)
+                        if (material.uvSetName == names[editor.uvSetIndex]) material.uvSetName = newName;
                     names[editor.uvSetIndex] = newName;
                     active->loaded.uvSetsEdited = true;
                 }

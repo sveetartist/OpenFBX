@@ -45,6 +45,7 @@ struct MeshBuilder
     std::vector<std::string> uvSetNames;
     std::vector<std::vector<float>> uvSets;
     std::vector<std::vector<unsigned char>> uvSetPresence;
+    std::vector<int> defaultUvSetIndices;
     std::vector<FbxTextureReference> textureReferences;
     std::vector<FbxMaterialSettings> materialSettings;
     std::vector<SkinnedVertex> skinnedVertices;
@@ -530,6 +531,8 @@ void AppendMesh(FbxNode* node, FbxMesh* mesh, MeshBuilder& out)
 
             const int renderVertexStart = out.VertexCount();
             AddTriangle(out, points, normals, uvs, uvSetValues, refs, skinBind, materialIndex, polygonHasNormals, polygonHasUvs);
+            for (int corner = 0; corner < 3; ++corner)
+                out.defaultUvSetIndices.push_back(meshUvSetIndices.empty() ? -1 : meshUvSetIndices.front());
             for (int corner = 0; corner < 3; ++corner)
             {
                 const int sourceCorner = sourceCorners[corner];
@@ -1388,6 +1391,28 @@ FbxSurfaceMaterial* FindOrCreateSceneMaterial(FbxScene* scene, const std::string
     return material;
 }
 
+FbxGeometryElementUV* CreateMeshUvElement(FbxMesh* mesh, const char* name, int layer)
+{
+    // Bind each named channel to an explicit layer. Reusing CreateElementUV
+    // after removing channels can leave an unnamed default UV layer on export.
+    while (mesh->GetLayerCount() <= layer) mesh->CreateLayer();
+    auto* element = FbxGeometryElementUV::Create(mesh, name);
+    mesh->GetLayer(layer)->SetUVs(element);
+    return element;
+}
+std::vector<size_t> MeshUvSetOrder(const LoadedFbxModel& model, int firstVertex)
+{
+    std::vector<size_t> sets;
+    for (size_t set = 0; set < model.uvSets.size(); ++set) sets.push_back(set);
+    if (firstVertex >= 0 && firstVertex < static_cast<int>(model.defaultUvSetIndices.size()))
+    {
+        const int preferred = model.defaultUvSetIndices[firstVertex];
+        if (preferred > 0 && preferred < static_cast<int>(sets.size()))
+            std::rotate(sets.begin(), sets.begin()+preferred, sets.begin()+preferred+1);
+    }
+    return sets;
+}
+
 bool CreateGeneratedMeshSceneNode(FbxScene* scene,
                                   const LoadedFbxModel& model,
                                   int nodeIndex,
@@ -1436,16 +1461,17 @@ bool CreateGeneratedMeshSceneNode(FbxScene* scene,
         }
     }
 
-    FbxGeometryElementUV* uvElement = nullptr;
-    const std::vector<float>* uvSet = model.uvSets.empty() ? nullptr : &model.uvSets.front();
-    if (uvSet && uvSet->size() >= static_cast<size_t>(end) * 2)
+    std::vector<std::pair<size_t, FbxGeometryElementUV*>> uvElements;
+    for (size_t set : MeshUvSetOrder(model, start))
     {
-        const char* uvName = model.uvSetNames.empty() ? "UVSet" : model.uvSetNames.front().c_str();
-        uvElement = mesh->CreateElementUV(uvName);
+        if (model.uvSets[set].size() < static_cast<size_t>(end) * 2) continue;
+        const char* uvName = set < model.uvSetNames.size() ? model.uvSetNames[set].c_str() : "UVSet";
+        auto* uvElement = CreateMeshUvElement(mesh, uvName, static_cast<int>(uvElements.size()));
         if (uvElement)
         {
             uvElement->SetMappingMode(FbxGeometryElement::eByPolygonVertex);
             uvElement->SetReferenceMode(FbxGeometryElement::eDirect);
+            uvElements.emplace_back(set, uvElement);
         }
     }
 
@@ -1500,10 +1526,11 @@ bool CreateGeneratedMeshSceneNode(FbxScene* scene,
                 }
                 normalElement->GetDirectArray().Add(normal);
             }
-            if (uvElement)
+            for (const auto& entry : uvElements)
             {
                 const size_t uvBase = static_cast<size_t>(currentGlobalVertex) * 2;
-                uvElement->GetDirectArray().Add(FbxVector2((*uvSet)[uvBase], 1.0f - (*uvSet)[uvBase + 1]));
+                const auto& uv = model.uvSets[entry.first];
+                entry.second->GetDirectArray().Add(FbxVector2(uv[uvBase], 1.0f - uv[uvBase + 1]));
             }
         }
         mesh->EndPolygon();
@@ -1867,7 +1894,10 @@ void ApplyEditedMeshGeometry(const LoadedFbxModel& model,
                 nodePolygonVertex + rawPolygonVertexCount <= static_cast<int>(model.meshPolygonVertexGlobalIndices.size()))
             {
                 while (mesh->GetElementUVCount() > 0) mesh->RemoveElementUV(mesh->GetElementUV(0));
-                for (size_t set = 0; set < model.uvSets.size(); ++set)
+                while (mesh->GetElementTangentCount() > 0) mesh->RemoveElementTangent(mesh->GetElementTangent(0));
+                while (mesh->GetElementBinormalCount() > 0) mesh->RemoveElementBinormal(mesh->GetElementBinormal(0));
+                const int firstVertex = rawPolygonVertexCount > 0 ? model.meshPolygonVertexGlobalIndices[nodePolygonVertex] : -1;
+                for (size_t set : MeshUvSetOrder(model, firstVertex))
                 {
                     bool present = set >= model.uvSetPresence.size();
                     for (int p = 0; !present && p < rawPolygonVertexCount; ++p)
@@ -1877,7 +1907,7 @@ void ApplyEditedMeshGeometry(const LoadedFbxModel& model,
                     }
                     if (!present) continue;
                     const char* name = set < model.uvSetNames.size() ? model.uvSetNames[set].c_str() : "UVSet";
-                    auto* element = mesh->CreateElementUV(name);
+                    auto* element = CreateMeshUvElement(mesh, name, static_cast<int>(editedUvElements.size()));
                     element->SetMappingMode(FbxGeometryElement::eByPolygonVertex);
                     element->SetReferenceMode(FbxGeometryElement::eDirect);
                     editedUvElements.emplace_back(set, element);
@@ -2441,6 +2471,13 @@ void AddImportedTextureReference(FbxSurfaceMaterial* material,
     reference.usage = usage;
     reference.filePath = texturePath;
     reference.relativePath = GetTextureRelativeName(texture);
+    reference.uvSetName = texture->UVSet.Get().Buffer();
+    reference.unsupportedTransform = texture->GetSwapUV() ||
+        std::fabs(texture->GetTranslationU()) > 1e-8 || std::fabs(texture->GetTranslationV()) > 1e-8 ||
+        std::fabs(texture->GetScaleU() - 1) > 1e-8 || std::fabs(texture->GetScaleV() - 1) > 1e-8 ||
+        std::fabs(texture->GetRotationU()) > 1e-8 || std::fabs(texture->GetRotationV()) > 1e-8 ||
+        std::fabs(texture->GetRotationW()) > 1e-8 || texture->GetWrapModeU() != FbxTexture::eRepeat ||
+        texture->GetWrapModeV() != FbxTexture::eRepeat;
     out.textureReferences.push_back(reference);
 }
 
@@ -2531,6 +2568,18 @@ void CollectImportedTextureReferences(FbxScene* scene,
             }
             auto channel = material->FindPropertyHierarchical("openfbx|GlossinessChannel");
             if (channel.IsValid()) settings.glossinessChannel = std::clamp(channel.Get<FbxInt>(), 0, 3);
+            auto uvSet = material->FindPropertyHierarchical("openfbx|UVSet");
+            if (uvSet.IsValid()) settings.uvSetName = uvSet.Get<FbxString>().Buffer();
+            auto readChannel = [&](const char* name, int fallback, int maximum = 3)
+            {
+                const auto value = material->FindPropertyHierarchical(name);
+                return value.IsValid() ? std::clamp(value.Get<FbxInt>(), 0, maximum) : fallback;
+            };
+            settings.normalDirectX = readChannel("openfbx|NormalDirectX", 0, 1) != 0;
+            settings.roughnessChannel = readChannel("openfbx|RoughnessChannel", 1);
+            settings.metallicChannel = readChannel("openfbx|MetallicChannel", 2);
+            settings.aoChannel = readChannel("openfbx|AOChannel", 0);
+            settings.opacityChannel = readChannel("openfbx|OpacityChannel", 0, 1);
             out.materialSettings.push_back(settings);
 
             for (FbxTextureUsage usage : usages)
@@ -2581,6 +2630,14 @@ void ApplyMaterialSettingsToScene(FbxScene* scene, const std::vector<FbxMaterial
             };
             write("openfbx|MaterialWorkflow", value.specularGlossiness ? 1 : 0);
             write("openfbx|GlossinessChannel", value.glossinessChannel);
+            write("openfbx|NormalDirectX", value.normalDirectX ? 1 : 0);
+            write("openfbx|RoughnessChannel", value.roughnessChannel);
+            write("openfbx|MetallicChannel", value.metallicChannel);
+            write("openfbx|AOChannel", value.aoChannel);
+            write("openfbx|OpacityChannel", value.opacityChannel);
+            auto uvSet = GetOrCreateMaterialProperty(material, "openfbx|UVSet", FbxStringDT);
+            uvSet.ModifyFlag(FbxPropertyFlags::eUserDefined, true);
+            uvSet.Set<FbxString>(FbxString(value.uvSetName.c_str()));
         }
     }
 }
@@ -2626,6 +2683,7 @@ void ApplyTextureReferencesToScene(FbxScene* scene, const std::vector<FbxTexture
             texture->SetTranslation(0.0, 0.0);
             texture->SetScale(1.0, 1.0);
             texture->SetRotation(0.0, 0.0);
+            if (!reference.uvSetName.empty()) texture->UVSet.Set(FbxString(reference.uvSetName.c_str()));
 
             property.ConnectSrcObject(texture);
         }
@@ -3170,6 +3228,7 @@ bool BuildRaylibModel(const MeshBuilder& builder, LoadedFbxModel& outModel, std:
     outModel.uvSetNames = builder.uvSetNames;
     outModel.uvSets = builder.uvSets;
     outModel.uvSetPresence = builder.uvSetPresence;
+    outModel.defaultUvSetIndices = builder.defaultUvSetIndices;
     outModel.materialNames = builder.materialNames.empty() ? std::vector<std::string>{ "Default" } : builder.materialNames;
     outModel.textureReferences = builder.textureReferences;
     outModel.materialSettings = builder.materialSettings;

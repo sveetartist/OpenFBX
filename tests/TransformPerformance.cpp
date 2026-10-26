@@ -387,6 +387,42 @@ static void TestMergeSelectedGeometryPreservesSkinning()
     CloseWindow();
 }
 
+static void TestUvSetDeletion()
+{
+    ModelTab tab;
+    tab.loaded.bindVertices.resize(12);
+    tab.loaded.uvSetNames = { "First", "Middle", "Last" };
+    tab.loaded.uvSets = { std::vector<float>(8,.1f), std::vector<float>(8,.2f), std::vector<float>(8,.3f) };
+    tab.loaded.uvSetPresence = { {1,0,0,0}, {0,1,0,0}, {0,1,1,1} };
+    tab.loaded.defaultUvSetIndices = {0,1,2,-1};
+    tab.pbrMaterials.resize(3);
+    tab.pbrMaterials[0].uvSetName = "Middle";
+    tab.pbrMaterials[1].uvSetName = "Last";
+    tab.selectedUvSet = 2;
+    const auto original = tab.loaded.uvSets;
+    const auto presence = tab.loaded.uvSetPresence;
+    Require(!DeleteUvSet(tab,-1) && !DeleteUvSet(tab,3) && tab.undoStack.empty(),"Invalid UV deletion changed history");
+    Require(DeleteUvSet(tab,1),"Could not delete middle UV channel");
+    Require(tab.loaded.uvSetNames == std::vector<std::string>{"First","Last"} &&
+            tab.loaded.uvSets == std::vector<std::vector<float>>{original[0],original[2]} &&
+            tab.loaded.uvSetPresence == std::vector<std::vector<unsigned char>>{presence[0],presence[2]},
+            "Deleting a UV set changed surviving channels or presence masks");
+    Require(tab.loaded.defaultUvSetIndices == std::vector<int>{0,1,1,1} && tab.selectedUvSet == 1 &&
+            tab.pbrMaterials[0].uvSetName.empty() && tab.pbrMaterials[1].uvSetName == "Last" && tab.loaded.uvSetsEdited,
+            "UV deletion did not repair defaults, selection, or material bindings");
+    Require(UndoEdit(tab) && tab.loaded.uvSets == original && tab.loaded.uvSetPresence == presence &&
+            tab.loaded.defaultUvSetIndices == std::vector<int>{0,1,2,-1} && tab.pbrMaterials[0].uvSetName == "Middle" &&
+            tab.selectedUvSet == 2 && !tab.loaded.uvSetsEdited,"Undo did not restore deleted UV set and bindings");
+    Require(RedoEdit(tab) && tab.loaded.uvSets.size() == 2,"Redo did not delete UV set");
+    Require(DeleteUvSet(tab,1) && tab.loaded.defaultUvSetIndices == std::vector<int>{0,-1,-1,-1} &&
+            tab.pbrMaterials[1].uvSetName.empty(),"Deletion fabricated UV coverage on meshes missing remaining channels");
+    Require(DeleteUvSet(tab,0) && tab.loaded.uvSets.empty() && tab.loaded.uvSetNames.empty() && tab.loaded.uvSetPresence.empty() &&
+            tab.loaded.defaultUvSetIndices == std::vector<int>{-1,-1,-1,-1} && GetMaterialVertexUvSetIndex(tab,0,0) == -1,
+            "Deleting last UV set retained invalid UV data");
+    Require(UndoEdit(tab) && tab.loaded.uvSets.size() == 1 && RedoEdit(tab) && tab.loaded.uvSets.empty(),
+            "Last UV channel deletion did not undo/redo");
+}
+
 static void TestParallelBindStorage()
 {
     ModelTab tab;
@@ -686,6 +722,139 @@ static void TestValidationFixes()
     Require(!hasIssue("Non-uniform texel density"), "Density warning persisted after fix");
     for (float uv : tab.loaded.uvSets[0]) Require(uv > 0.0f && uv < 1.0f, "Packed UV outside tile or padding");
     Require(UndoEdit(tab), "Average islands undo failed");
+    {
+        const auto beforeTriangles = BuildUvScopeTriangles(tab,original[0],{1,2});
+        const auto beforeIslands = CalculateUvIslandStats(beforeTriangles,1,1);
+        const double totalArea = beforeIslands[0].uvArea+beforeIslands[1].uvArea;
+        UvRepackReport report;
+        const size_t initialHistory = tab.undoStack.size();
+        Require(AverageUvSetIslands(tab,0,&report) && report.processedIslands == 2,"Standalone island averaging failed");
+        const int averagedSet = report.uvSet;
+        Require(averagedSet == static_cast<int>(original.size()) && tab.loaded.uvSets.size() == original.size()+1 &&
+                tab.loaded.uvSets[0] == original[0] && tab.loaded.uvSets[1] == original[1] &&
+                tab.loaded.uvSetPresence[averagedSet] == tab.loaded.uvSetPresence[0] && report.uvSetName == "First_Averaged",
+                "Averaging must create a new named UV channel and preserve source coordinates/presence");
+        auto averagedTriangles = BuildUvScopeTriangles(tab,tab.loaded.uvSets[averagedSet],{1,2});
+        auto averagedIslands = CalculateUvIslandStats(averagedTriangles,1,1);
+        Require(std::fabs(averagedIslands[0].density/averagedIslands[1].density-1) < .001f &&
+                std::fabs(averagedIslands[0].uvArea+averagedIslands[1].uvArea-totalArea) < 1e-5,
+                "Standalone averaging did not equalize density or preserve total UV area");
+        for (const auto& island : averagedIslands)
+            Require(std::fabs((island.minU+island.maxU)*.5f-.5f) < 1e-6f &&
+                    std::fabs((island.minV+island.maxV)*.5f-.5f) < 1e-6f,"Standalone averaging moved an island's center");
+        Require(UvIslandsOverlap(averagedIslands[0],averagedIslands[1],averagedTriangles),
+                "Standalone averaging unexpectedly repacked overlapping islands");
+        const auto averageOnly = tab.loaded.uvSets;
+        Require(tab.loaded.uvSets[1] == original[1] && tab.undoStack.size() == initialHistory+1,
+                "Standalone averaging changed another UV set or undo history");
+        Require(RepackUvSetIslands(tab,averagedSet,&report),"Repacking averaged islands failed");
+        Require(tab.loaded.uvSets.size() == original.size()+2 && tab.loaded.uvSets[averagedSet] == averageOnly[averagedSet] &&
+                tab.loaded.uvSets[0] == original[0],"Repacking averaged UVs overwrote an existing UV set");
+        auto packedTriangles = BuildUvScopeTriangles(tab,tab.loaded.uvSets[report.uvSet],{1,2});
+        auto packedIslands = CalculateUvIslandStats(packedTriangles,1,1);
+        Require(!UvIslandsOverlap(packedIslands[0],packedIslands[1],packedTriangles) &&
+                std::fabs(packedIslands[0].density/packedIslands[1].density-1) < .001f,
+                "Repacking averaged islands changed relative density or retained overlaps");
+        Require(tab.undoStack.size() == initialHistory+2 && UndoEdit(tab) && tab.loaded.uvSets == averageOnly &&
+                UndoEdit(tab) && tab.loaded.uvSets == original,"Average and repack did not undo separately");
+        Require(RepackUvSetIslands(tab,0,&report),"Standalone repacking failed");
+        packedTriangles = BuildUvScopeTriangles(tab,tab.loaded.uvSets[report.uvSet],{1,2});
+        packedIslands = CalculateUvIslandStats(packedTriangles,1,1);
+        const float ratio = packedIslands[0].density/packedIslands[1].density;
+        Require((std::fabs(ratio-2) < .001f || std::fabs(ratio-.5f) < .001f) &&
+                !UvIslandsOverlap(packedIslands[0],packedIslands[1],packedTriangles),
+                "Standalone repacking averaged island scales or left overlapping islands");
+        for (float uv : tab.loaded.uvSets[report.uvSet]) Require(uv > 0 && uv < 1,"Standalone repacking left the padded tile");
+        const auto repackOnly = tab.loaded.uvSets;
+        Require(UndoEdit(tab) && tab.loaded.uvSets == original && RedoEdit(tab) && tab.loaded.uvSets == repackOnly &&
+                UndoEdit(tab),"Standalone repacking undo/redo failed");
+        Require(AverageUvSetIslands(tab,0,&report),"Repeated averaging failed");
+        const auto firstAverage = tab.loaded.uvSets[report.uvSet];
+        Require(AverageUvSetIslands(tab,0,&report) && report.uvSetName == "First_Averaged_2" &&
+                tab.loaded.uvSets[original.size()] == firstAverage && tab.loaded.uvSets[0] == original[0],
+                "Repeated averaging overwrote a UV set or reused its name");
+        Require(UndoEdit(tab) && UndoEdit(tab) && tab.loaded.uvSets == original,"Repeated averaging undo failed");
+    }
+    // A UV set menu action spans meshes regardless of their material or current
+    // mesh/island selection, while retaining all other UV channels.
+    tab.loaded.nodes[2].materialName = "OtherMaterial";
+    tab.selectedNode = -1; tab.selectedUvIslands = {0};
+    const size_t averageHistory = tab.undoStack.size();
+    Require(ProcessUvSetIslands(tab,0,true,true),"UV set average and repack failed without a selected mesh");
+    triangles = BuildUvScopeTriangles(tab,tab.loaded.uvSets[0],{1,2});
+    islands = CalculateUvIslandStats(triangles,1,1);
+    Require(islands.size() == 2 && !UvIslandsOverlap(islands[0],islands[1],triangles) &&
+            std::fabs(islands[0].density/islands[1].density-1) < .001f,
+            "UV set average did not equalize and separate islands across different materials");
+    Require(tab.undoStack.size() == averageHistory+1 && tab.loaded.uvSets[1] == original[1] &&
+            tab.selectedUvIslands.empty(),"UV set average changed another channel or did not make one undo step");
+    const auto averagedUvs = tab.loaded.uvSets;
+    Require(UndoEdit(tab) && tab.loaded.uvSets == original,"UV set average undo failed");
+    Require(RedoEdit(tab) && tab.loaded.uvSets == averagedUvs,"UV set average redo failed");
+    Require(UndoEdit(tab),"Cannot restore UVs after average redo");
+    tab.loaded.nodes[2].materialName = "Material";
+    for (int v = 3; v < 6; ++v) tab.loaded.uvSetPresence[0][v] = 0;
+    Require(ProcessUvSetIslands(tab,0,true,true),"UV set average failed when another mesh lacked that channel");
+    Require(std::equal(tab.loaded.uvSets[0].begin()+6,tab.loaded.uvSets[0].end(),original[0].begin()+6) &&
+            tab.loaded.uvSetPresence[0][3] == 0,"UV set average edited or created missing UVs");
+    Require(UndoEdit(tab),"Partial UV set average undo failed");
+    for (int v = 3; v < 6; ++v) tab.loaded.uvSetPresence[0][v] = 1;
+    const auto failureHistory = tab.undoStack.size();
+    tab.loaded.uvSets[0][0] = std::numeric_limits<float>::infinity();
+    Require(!ProcessUvSetIslands(tab,0,true,true) && tab.undoStack.size() == failureHistory &&
+            std::isinf(tab.loaded.uvSets[0][0]) && tab.loaded.uvSets[0][2] == original[0][2],
+            "Invalid UV set averaging partially edited UVs or undo history");
+    tab.loaded.uvSets[0] = original[0];
+    std::fill(tab.loaded.uvSetPresence[0].begin(),tab.loaded.uvSetPresence[0].end(),0);
+    Require(!ProcessUvSetIslands(tab,0,true,true) && tab.loaded.uvSets == original && tab.undoStack.size() == failureHistory,
+            "Empty UV set averaging modified the model");
+    std::fill(tab.loaded.uvSetPresence[0].begin(),tab.loaded.uvSetPresence[0].end(),1);
+    {
+        ModelTab mixed = tab; mixed.undoStack.clear(); mixed.redoStack.clear();
+        for (int kind = 0; kind < 2; ++kind)
+        {
+            auto node = mixed.loaded.nodes[1]; node.meshVertexStart = 6+kind*3;
+            mixed.loaded.nodes.push_back(node);
+            const std::vector<float> points = kind == 0 ? std::vector<float>{5,0,0,6,0,0,5,1,0} : std::vector<float>{8,0,0,8,0,0,8,0,0};
+            mixed.loaded.bindVertices.insert(mixed.loaded.bindVertices.end(),points.begin(),points.end());
+            const std::vector<float> uv = kind == 0 ? std::vector<float>{.25f,.25f,.25f,.25f,.25f,.25f} : std::vector<float>{0,0,1,0,0,1};
+            for (auto& set : mixed.loaded.uvSets) set.insert(set.end(),uv.begin(),uv.end());
+            for (auto& presence : mixed.loaded.uvSetPresence) presence.insert(presence.end(),3,1);
+        }
+        mixed.loaded.bindNormals.resize(mixed.loaded.bindVertices.size(),0);
+        const auto before = mixed.loaded.uvSets;
+        UvRepackReport report;
+        Require(ProcessUvSetIslands(mixed,0,true,true,&report) && report.processedIslands == 2 && report.skippedIslands == 2 && report.error.empty(),
+                "A collapsed UV island or zero-area surface prevented valid islands from repacking");
+        Require(mixed.loaded.uvSets[1] == before[1] &&
+                std::equal(mixed.loaded.uvSets[0].begin()+12,mixed.loaded.uvSets[0].end(),before[0].begin()+12),
+                "Skipping degenerate islands changed their UVs or another channel");
+        triangles = BuildUvScopeTriangles(mixed,mixed.loaded.uvSets[0],{1,2});
+        islands = CalculateUvIslandStats(triangles,1,1);
+        Require(!UvIslandsOverlap(islands[0],islands[1],triangles) && std::fabs(islands[0].density/islands[1].density-1) < .001f,
+                "Mixed-island repacking did not preserve averaging and padding");
+        Require(mixed.undoStack.size() == 1 && UndoEdit(mixed) && mixed.loaded.uvSets == before,
+                "Mixed-island repacking did not undo in one step");
+        Require(RedoEdit(mixed) && UndoEdit(mixed),"Mixed-island redo failed");
+        std::fill(mixed.loaded.uvSets[0].begin(),mixed.loaded.uvSets[0].end(),.25f);
+        const auto collapsed = mixed.loaded.uvSets;
+        Require(!ProcessUvSetIslands(mixed,0,true,true,&report) && report.processedIslands == 0 && report.skippedIslands > 0 &&
+                report.error.find("All islands") != std::string::npos && mixed.loaded.uvSets == collapsed && mixed.undoStack.empty(),
+                "All-degenerate UVs changed the model/history or did not report the actual problem");
+        mixed.loaded.uvSets[0] = before[0];
+        for (int coordinate = 0; coordinate < 6; ++coordinate) mixed.loaded.uvSets[0][coordinate] *= 1e-24f;
+        Require(ProcessUvSetIslands(mixed,0,true,true,&report) && report.processedIslands == 2 && report.skippedIslands == 2,
+                "Small but valid islands were mistaken for zero-area islands through float underflow");
+        triangles = BuildUvScopeTriangles(mixed,mixed.loaded.uvSets[0],{1,2});
+        islands = CalculateUvIslandStats(triangles,1,1);
+        Require(std::fabs(islands[0].density/islands[1].density-1) < .001f,"Small island averaging lost area precision");
+        Require(UndoEdit(mixed),"Cannot restore mixed UVs for standalone operations");
+        Require(AverageUvSetIslands(mixed,0,&report) && report.processedIslands == 2 && report.skippedIslands == 2,
+                "Standalone averaging aborted on degenerate islands");
+        Require(UndoEdit(mixed),"Mixed standalone averaging undo failed");
+        Require(RepackUvSetIslands(mixed,0,&report) && report.processedIslands == 3 && report.skippedIslands == 1,
+                "Standalone repacking incorrectly required nonzero geometric area");
+    }
     CombineAllUvSets(tab, 1);
     Require(tab.loaded.uvSets.size() == 1 && tab.loaded.uvSets[0] == original[1], "Merge did not prefer chosen UV set");
     Require(!hasIssue("Multiple UV sets"), "Merge warning persisted");
@@ -1538,26 +1707,55 @@ static int TestLogPanel(const char* previewPath = nullptr)
     notice = "Saved FBX.";
     CollectLogMessages(panel, notice, error);
     Require(panel.entries.size() == 3, "Log dropped a repeated user action");
+    panel.selectedEntry = 1;
+    Require(GetSelectedLogMessageText(panel) == "ERROR: Missing texture.","Selected log copy lost message severity or content");
     for (int index = 0; index < 510; ++index)
     {
         notice = "Message " + std::to_string(index);
         CollectLogMessages(panel, notice, error);
     }
     Require(panel.entries.size() == 500 && panel.entries.front().text == "Message 10", "Log history must retain only the newest 500 messages");
+    Require(panel.selectedEntry == -1 && GetSelectedLogMessageText(panel).empty(),"Evicted log selection points to an unrelated message");
     Require(GetLogPanelText(panel).find("INFO: Message 509\n") != std::string::npos, "Copy log lost the latest message");
     SetTraceLogLevel(LOG_WARNING);
     SetConfigFlags(FLAG_WINDOW_HIDDEN);
     InitWindow(900, 600, "Log panel test");
     Font font = LoadTechnicalFont();
+    panel.selectedEntry = 100;
+    const std::string selectedBeforeAppend = GetSelectedLogMessageText(panel);
     notice = "Removed 52 zero-area faces; surviving quads and ngons preserved.";
     error = "Cannot load texture: C:/Projects/Hero/Textures/A_very_long_texture_filename_that_needs_to_wrap_without_hiding_the_end_of_the_message_BaseColor.png\nThe original mesh is still available.";
     CollectLogMessages(panel, notice, error);
+    Require(GetSelectedLogMessageText(panel) == selectedBeforeAppend,"Appending messages changed the selected message during history eviction");
+    panel.selectedEntry = static_cast<int>(panel.entries.size())-1;
+    const auto expectedSelected = GetSelectedLogMessageText(panel);
     WrapLogMessages(font, panel, 862.0f);
     for (const auto& line : panel.lines)
+    {
         Require(MeasureTextEx(font, line.text.c_str(), 14.0f, 1.0f).x <= 862.0f, "Wrapped log message exceeds panel width");
+        Require(line.entryIndex >= 0 && line.entryIndex < static_cast<int>(panel.entries.size()),"Wrapped log line lost its source message");
+    }
     const size_t wideLines = panel.lines.size();
     WrapLogMessages(font, panel, 320.0f);
     Require(panel.lines.size() > wideLines, "Log did not rewrap after a resize");
+    Require(GetSelectedLogMessageText(panel) == expectedSelected && expectedSelected.find("\nThe original mesh is still available.") != std::string::npos,
+            "Selected log copy depends on wrapping or loses multiline text");
+    // Preserve an existing text clipboard. Non-text clipboard contents are left
+    // untouched; the formatting and wrapped-message mapping checks still run.
+    if (const char* previous = GetClipboardText())
+    {
+        struct ClipboardRestore { std::string text; ~ClipboardRestore() { SetClipboardText(text.c_str()); } } restore{previous};
+        Require(CopyLogMessages(panel,false),"Cannot copy selected log message");
+        const char* selectedClipboard = GetClipboardText();
+        Require(selectedClipboard && std::string(selectedClipboard) == expectedSelected,"Clipboard truncated or changed the selected log message");
+        Require(CopyLogMessages(panel,true),"Cannot copy complete log");
+        const char* allClipboard = GetClipboardText();
+        Require(allClipboard && std::string(allClipboard) == GetLogPanelText(panel),"Clipboard lost full log history");
+        LogPanelState empty;
+        Require(!CopyLogMessages(empty,true) && !CopyLogMessages(empty,false) && GetClipboardText() &&
+                std::string(GetClipboardText()) == GetLogPanelText(panel),"Empty log copy erased the clipboard");
+    }
+    panel.copiedUntil = 0;
     RenderTexture2D preview = LoadRenderTexture(900, 600);
     auto draw = [&]()
     {
@@ -1600,10 +1798,41 @@ static int TestLogPanel(const char* previewPath = nullptr)
     return 0;
 }
 
+static int TestUvRepackAsset(const char* path)
+{
+    SetConfigFlags(FLAG_WINDOW_HIDDEN); InitWindow(800,600,"UV repack asset regression"); SetTraceLogLevel(LOG_WARNING);
+    ModelTab tab; std::string error; tab.path = path;
+    Require(LoadFbxModel(path,tab.loaded,error),error.c_str()); EnsurePbrMaterialStates(tab);
+    const auto original = tab.loaded.uvSets;
+    int repackedSets = 0;
+    for (bool average : {true,false})
+    for (int set = 0; set < static_cast<int>(original.size()); ++set)
+    {
+        UvRepackReport report;
+        const bool packed = average ? AverageUvSetIslands(tab,set,&report) : RepackUvSetIslands(tab,set,&report);
+        std::cout << tab.loaded.uvSetNames[set] << (average ? " average: " : " repack: ") << report.processedIslands << " processed, " << report.skippedIslands
+                  << " skipped" << (packed ? "" : "; " + report.error) << '\n';
+        if (packed)
+        {
+            ++repackedSets;
+            Require(tab.loaded.uvSets.size() == original.size()+1 && report.uvSet == static_cast<int>(original.size()),
+                    "A standalone UV operation failed to create a new UV channel");
+            for (int other = 0; other < static_cast<int>(original.size()); ++other)
+                Require(tab.loaded.uvSets[other] == original[other],"A standalone UV operation changed an original channel");
+            Require(UndoEdit(tab) && tab.loaded.uvSets == original,"Real asset UV repack undo failed");
+            Require(RedoEdit(tab) && UndoEdit(tab),"Real asset UV repack redo failed");
+        }
+    }
+    Require(repackedSets > 0,"No UV channel in the real asset could be repacked");
+    tab.undoStack.clear(); tab.redoStack.clear(); UnloadPbrTextures(tab); UnloadFbxModel(tab.loaded); CloseWindow();
+    return 0;
+}
+
 int main(int argc, char** argv)
 {
     try
     {
+        if (argc > 2 && std::string(argv[1]) == "--uv-repack") return TestUvRepackAsset(argv[2]);
         if (argc > 2 && std::string(argv[1]) == "--log-preview") return TestLogPanel(argv[2]);
         if (argc > 2 && std::string(argv[1]) == "--repair") return TestModelRepair(argv[2]);
         if (argc > 2 && std::string(argv[1]) == "--validation") return BenchmarkValidation(argv[2]);
@@ -1613,6 +1842,7 @@ int main(int argc, char** argv)
         TestDegenerateTriangleRepair();
         TestUvOverlapSpatialSearch();
         TestValidationFixes();
+        TestUvSetDeletion();
         TestBadSkinWeightRepair();
         TestSkinWeightDisplaySelection();
         TestParallelBindStorage();
